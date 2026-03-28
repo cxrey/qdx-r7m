@@ -1,0 +1,652 @@
+/**
+ * KellyEngine.js — Pure JS utility for Kelly Criterion position sizing.
+ * Provides bet sizing calculations with sensitivity analysis, scenario modeling,
+ * re-evaluation triggers, and portfolio-level constraints.
+ *
+ * DESIGN PHILOSOPHY: This is a MATHEMATICAL TOOL, not financial advice.
+ * All outputs include uncertainty ranges. Fractional Kelly scaling is
+ * robustness-aware — less confident edges get smaller fractions.
+ */
+
+// ─── Settings & Storage ─────────────────────────────────────────────
+
+const SETTINGS_KEY = 'pm_kelly_settings';
+const JOURNAL_KEY = 'pm_kelly_journal';
+const CALIBRATION_KEY = 'pm_kelly_calibration';
+
+const DEFAULT_SETTINGS = {
+  bankroll: 1000,
+  maxPositionPct: 20,       // % of bankroll for any single bet
+  maxTotalExposure: 80,     // % of bankroll across all positions
+  minPracticalBet: 5,       // $ minimum to bother placing
+  defaultFraction: 0.25,    // default Kelly fraction (quarter-Kelly)
+  correlationPenalty: true,  // reduce sizing for correlated positions
+};
+
+export function getKellySettings() {
+  try {
+    const stored = localStorage.getItem(SETTINGS_KEY);
+    if (stored) return { ...DEFAULT_SETTINGS, ...JSON.parse(stored) };
+  } catch { /* ignore */ }
+  return { ...DEFAULT_SETTINGS };
+}
+
+export function saveKellySettings(settings) {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  } catch { /* ignore */ }
+}
+
+// ─── Core Kelly Calculation ─────────────────────────────────────────
+
+/**
+ * Calculate Kelly fraction for a binary market.
+ *
+ * @param {number} estProb - Your estimated probability (0–1)
+ * @param {number} marketPrice - Current market price / implied probability (0–1)
+ * @param {string} side - 'YES' or 'NO'
+ * @returns {Object} Kelly analysis result
+ */
+export function calculateKelly(estProb, marketPrice, side = 'YES') {
+  // Validate inputs
+  if (estProb < 0 || estProb > 1 || marketPrice <= 0 || marketPrice >= 1) {
+    return { valid: false, reason: 'Invalid inputs' };
+  }
+
+  // For both sides: you pay marketPrice per share, receive $1 if your side wins.
+  // Profit per dollar risked = (1 - marketPrice) / marketPrice
+  // This is the same formula regardless of side.
+  let p, q, b;
+  if (side === 'YES') {
+    p = estProb;              // prob of YES (winning)
+    q = 1 - p;                // prob of losing
+  } else {
+    p = 1 - estProb;          // prob of NO happening (winning)
+    q = estProb;               // prob of losing (YES happens)
+  }
+  b = (1 - marketPrice) / marketPrice;  // odds: profit per dollar risked
+
+  // Edge = expected value per dollar
+  const edge = (b * p) - q;
+  const edgePp = edge * 100;
+
+  // Break-even probability for the selected side
+  // Buying YES at yesPrice: need YES prob > yesPrice to profit
+  // Buying NO at noPrice: need NO prob > noPrice to profit
+  const breakEvenProb = marketPrice;
+
+  // Gap between estimate and break-even (p = prob of the selected side winning)
+  const gapToBreakEven = p - breakEvenProb;
+  const gapPp = gapToBreakEven * 100;
+
+  // NO_EDGE_DETECTABLE check
+  if (gapPp < 0.5) {
+    return {
+      valid: true,
+      noEdge: true,
+      side,
+      estProb,
+      marketPrice,
+      breakEvenProb,
+      gapPp,
+      edge: edgePp,
+      fullKelly: 0,
+      reason: gapPp <= 0
+        ? 'Market price already reflects or exceeds your estimate'
+        : 'Edge too small to be meaningful (< 0.5pp)',
+    };
+  }
+
+  // Full Kelly fraction: f* = (bp - q) / b
+  const fullKelly = Math.max(0, (b * p - q) / b);
+
+  // Robustness assessment
+  const robustness = assessRobustness(gapPp, estProb);
+
+  // Fractional Kelly based on robustness
+  const fractionMultiplier = robustness.kellyFraction;
+  const fractionalKelly = fullKelly * fractionMultiplier;
+
+  // Expected growth rate (log utility)
+  const growthRate = p * Math.log(1 + fractionalKelly * b) + q * Math.log(1 - fractionalKelly);
+
+  return {
+    valid: true,
+    noEdge: false,
+    side,
+    estProb,
+    marketPrice,
+    breakEvenProb,
+    gapPp,
+    edge: edgePp,
+    fullKelly,
+    fractionalKelly,
+    fractionMultiplier,
+    robustness,
+    odds: b,
+    growthRate,
+    expectedValue: edge,
+  };
+}
+
+/**
+ * Assess robustness of the edge and determine Kelly fraction.
+ */
+function assessRobustness(gapPp, estProb) {
+  // How far is our estimate from 50/50 (max uncertainty)?
+  const distFromCenter = Math.abs(estProb - 0.5);
+
+  let level, kellyFraction, label;
+
+  if (gapPp >= 10 && distFromCenter > 0.2) {
+    level = 'ROBUST';
+    kellyFraction = 0.5;  // half-Kelly
+    label = 'Robust edge - half Kelly';
+  } else if (gapPp >= 5) {
+    level = 'SOLID';
+    kellyFraction = 0.25; // quarter-Kelly
+    label = 'Solid edge - quarter Kelly';
+  } else if (gapPp >= 2) {
+    level = 'MODERATE';
+    kellyFraction = 0.25; // quarter-Kelly
+    label = 'Moderate edge - quarter Kelly';
+  } else {
+    level = 'FRAGILE';
+    kellyFraction = 0.125; // eighth-Kelly
+    label = 'Fragile edge - eighth Kelly';
+  }
+
+  return { level, kellyFraction, label };
+}
+
+// ─── Multi-Outcome Kelly ────────────────────────────────────────────
+
+/**
+ * Calculate Kelly fractions for a multi-outcome market (3+ outcomes).
+ * Uses iterative approximation since closed-form multi-outcome Kelly
+ * doesn't have a simple solution.
+ *
+ * @param {Array<{name: string, estProb: number, marketPrice: number}>} outcomes
+ * @returns {Object} Multi-outcome Kelly result
+ */
+export function calculateMultiOutcomeKelly(outcomes) {
+  if (!outcomes || outcomes.length < 2) {
+    return { valid: false, reason: 'Need at least 2 outcomes' };
+  }
+
+  // Normalize estimated probabilities to sum to 1
+  const totalProb = outcomes.reduce((s, o) => s + o.estProb, 0);
+  if (totalProb <= 0) {
+    return { valid: false, reason: 'Probabilities must be positive' };
+  }
+
+  const normalized = outcomes.map((o) => ({
+    ...o,
+    estProb: o.estProb / totalProb,
+    odds: (1 - o.marketPrice) / o.marketPrice,
+    edge: o.estProb / totalProb - o.marketPrice,
+  }));
+
+  // For each outcome, calculate independent Kelly as if it were binary
+  const results = normalized.map((o) => {
+    const kelly = calculateKelly(o.estProb, o.marketPrice, 'YES');
+    return {
+      name: o.name,
+      estProb: o.estProb,
+      marketPrice: o.marketPrice,
+      edge: o.edge,
+      edgePp: o.edge * 100,
+      kelly,
+      recommendedFraction: kelly.valid && !kelly.noEdge ? kelly.fractionalKelly : 0,
+    };
+  });
+
+  // Check total allocation doesn't exceed 100%
+  const totalAllocation = results.reduce((s, r) => s + r.recommendedFraction, 0);
+
+  // Scale down proportionally if over-allocated
+  let scaledResults = results;
+  if (totalAllocation > 0.8) {
+    const scale = 0.8 / totalAllocation;
+    scaledResults = results.map((r) => ({
+      ...r,
+      recommendedFraction: r.recommendedFraction * scale,
+      scaled: true,
+    }));
+  }
+
+  return {
+    valid: true,
+    outcomes: scaledResults,
+    totalAllocation: scaledResults.reduce((s, r) => s + r.recommendedFraction, 0),
+    probsNormalized: totalProb !== 1,
+    originalProbSum: totalProb,
+  };
+}
+
+// ─── Sensitivity Table ──────────────────────────────────────────────
+
+/**
+ * Generate a sensitivity table showing how Kelly changes across
+ * different probability estimates.
+ *
+ * @param {number} marketPrice - Current market price
+ * @param {number} centerProb - Your center estimate
+ * @param {string} side - 'YES' or 'NO'
+ * @param {Object} settings - Kelly settings
+ * @returns {Array} Rows of sensitivity data
+ */
+export function calculateSensitivityTable(marketPrice, centerProb, side = 'YES', settings = null) {
+  const s = settings || getKellySettings();
+  const rows = [];
+
+  // Generate range: centerProb +/- 15pp in 2.5pp steps
+  const steps = [];
+  for (let delta = -15; delta <= 15; delta += 2.5) {
+    const prob = centerProb + delta / 100;
+    if (prob > 0.02 && prob < 0.98) {
+      steps.push(prob);
+    }
+  }
+
+  for (const prob of steps) {
+    const kelly = calculateKelly(prob, marketPrice, side);
+    const dollars = kelly.valid && !kelly.noEdge
+      ? Math.max(0, kelly.fractionalKelly * s.bankroll)
+      : 0;
+
+    // Apply position cap
+    const maxDollars = s.bankroll * (s.maxPositionPct / 100);
+    const cappedDollars = Math.min(dollars, maxDollars);
+
+    rows.push({
+      prob,
+      probPct: (prob * 100).toFixed(1),
+      isCenter: Math.abs(prob - centerProb) < 0.001,
+      kelly,
+      rawDollars: dollars,
+      cappedDollars,
+      capped: cappedDollars < dollars,
+      belowMinimum: cappedDollars > 0 && cappedDollars < s.minPracticalBet,
+      shares: marketPrice > 0 ? cappedDollars / marketPrice : 0,
+    });
+  }
+
+  return rows;
+}
+
+// ─── Scenario Analysis ──────────────────────────────────────────────
+
+/**
+ * Calculate outcomes under different scenarios.
+ *
+ * @param {number} betSize - Dollar amount of the bet
+ * @param {number} marketPrice - Price paid per share
+ * @param {string} side - 'YES' or 'NO'
+ * @param {number} estProb - Estimated probability
+ * @param {Object} settings - Kelly settings
+ * @returns {Object} Scenario analysis
+ */
+export function calculateScenarios(betSize, marketPrice, side, estProb, settings = null) {
+  const s = settings || getKellySettings();
+
+  // Shares purchased
+  const entryPrice = side === 'YES' ? marketPrice : (1 - marketPrice);
+  const shares = betSize / entryPrice;
+
+  // Win scenario: each share pays $1
+  const winPayout = shares * 1;
+  const winProfit = winPayout - betSize;
+  const winReturn = betSize > 0 ? (winProfit / betSize) * 100 : 0;
+
+  // Lose scenario: shares worth $0
+  const lossPayout = 0;
+  const lossAmount = betSize;
+
+  // Expected value
+  const winProb = side === 'YES' ? estProb : (1 - estProb);
+  const ev = winProb * winProfit - (1 - winProb) * lossAmount;
+  const evPct = betSize > 0 ? (ev / betSize) * 100 : 0;
+
+  // Impact on bankroll
+  const bankrollAfterWin = s.bankroll - betSize + winPayout;
+  const bankrollAfterLoss = s.bankroll - betSize;
+  const expectedBankroll = winProb * bankrollAfterWin + (1 - winProb) * bankrollAfterLoss;
+
+  // Partial scenarios (market moves but doesn't resolve)
+  const partialScenarios = [
+    { label: 'Price +10c', priceMove: 0.10 },
+    { label: 'Price +5c', priceMove: 0.05 },
+    { label: 'Price -5c', priceMove: -0.05 },
+    { label: 'Price -10c', priceMove: -0.10 },
+  ].map((s) => {
+    const newPrice = Math.max(0.01, Math.min(0.99, entryPrice + s.priceMove));
+    const paperValue = shares * newPrice;
+    const paperPnl = paperValue - betSize;
+    return {
+      ...s,
+      newPrice,
+      paperValue,
+      paperPnl,
+      paperPnlPct: betSize > 0 ? (paperPnl / betSize) * 100 : 0,
+    };
+  });
+
+  return {
+    betSize,
+    shares,
+    entryPrice,
+    side,
+    win: { payout: winPayout, profit: winProfit, returnPct: winReturn, prob: winProb },
+    loss: { amount: lossAmount, prob: 1 - winProb },
+    ev,
+    evPct,
+    bankrollAfterWin,
+    bankrollAfterLoss,
+    expectedBankroll,
+    partialScenarios,
+  };
+}
+
+// ─── Re-evaluation Triggers ─────────────────────────────────────────
+
+/**
+ * Calculate when you should re-evaluate a position.
+ *
+ * @param {number} entryPrice - Price at entry
+ * @param {number} estProb - Estimated probability at entry
+ * @param {number} daysLeft - Days until market resolution
+ * @param {Object} theta - Theta data from ThetaEngine (optional)
+ * @returns {Object} Re-evaluation triggers
+ */
+export function calculateReEvalTrigger(entryPrice, estProb, daysLeft, theta = null) {
+  const triggers = [];
+
+  // Price movement triggers
+  const priceTriggerUp = Math.min(0.99, entryPrice + 0.10);
+  const priceTriggerDown = Math.max(0.01, entryPrice - 0.10);
+  triggers.push({
+    type: 'PRICE_MOVE',
+    label: `Price moves above ${(priceTriggerUp * 100).toFixed(0)}c or below ${(priceTriggerDown * 100).toFixed(0)}c`,
+    upperBound: priceTriggerUp,
+    lowerBound: priceTriggerDown,
+  });
+
+  // Time-based triggers
+  if (daysLeft != null && daysLeft > 0) {
+    // Re-evaluate at certain time milestones
+    const milestones = [
+      { pct: 0.5, label: 'Halfway to resolution' },
+      { pct: 0.75, label: '75% of time elapsed' },
+      { pct: 0.9, label: '90% of time elapsed' },
+    ];
+    for (const m of milestones) {
+      const daysAtMilestone = daysLeft * (1 - m.pct);
+      if (daysAtMilestone > 1) {
+        triggers.push({
+          type: 'TIME',
+          label: `${m.label} (~${Math.round(daysAtMilestone)} days from now)`,
+          daysFromNow: Math.round(daysAtMilestone),
+        });
+      }
+    }
+  }
+
+  // Theta-aware: if high theta, re-evaluate sooner
+  if (theta?.bestTheta != null) {
+    const dailyDecay = Math.abs(theta.bestTheta) * 100; // cents/day
+    if (dailyDecay > 0.5) {
+      const daysTo5c = 5 / dailyDecay;
+      triggers.push({
+        type: 'THETA',
+        label: `High time decay (~${dailyDecay.toFixed(1)}c/day) - re-evaluate in ${Math.round(daysTo5c)} days`,
+        daysFromNow: Math.round(daysTo5c),
+        dailyDecay,
+      });
+    }
+  }
+
+  // Volume trigger: re-evaluate if market gets significantly more liquid
+  triggers.push({
+    type: 'VOLUME',
+    label: 'Volume doubles or unusual activity detected',
+  });
+
+  // New information trigger
+  triggers.push({
+    type: 'INFO',
+    label: 'Material new information about the underlying event',
+  });
+
+  return {
+    triggers,
+    nextReEval: triggers
+      .filter((t) => t.daysFromNow != null)
+      .sort((a, b) => a.daysFromNow - b.daysFromNow)[0] || null,
+  };
+}
+
+// ─── Portfolio Constraints ──────────────────────────────────────────
+
+/**
+ * Apply portfolio-level constraints to a proposed bet.
+ *
+ * @param {number} rawDollars - Unconstrained bet size
+ * @param {Object} market - Market data
+ * @param {Object} portfolio - Portfolio hook data (optional)
+ * @param {Object} settings - Kelly settings
+ * @returns {Object} Constrained sizing result
+ */
+export function applyPortfolioConstraints(rawDollars, market, portfolio = null, settings = null) {
+  const s = settings || getKellySettings();
+  const constraints = [];
+  let adjustedDollars = rawDollars;
+
+  // 1. Max position size
+  const maxPosition = s.bankroll * (s.maxPositionPct / 100);
+  if (adjustedDollars > maxPosition) {
+    constraints.push({
+      type: 'MAX_POSITION',
+      label: `Capped at ${s.maxPositionPct}% of bankroll ($${maxPosition.toFixed(0)})`,
+      original: adjustedDollars,
+    });
+    adjustedDollars = maxPosition;
+  }
+
+  // 2. Max total exposure
+  if (portfolio?.hasPortfolio && portfolio.summary) {
+    const currentExposure = portfolio.summary.totalValue || 0;
+    const maxExposure = s.bankroll * (s.maxTotalExposure / 100);
+    const remaining = Math.max(0, maxExposure - currentExposure);
+    if (adjustedDollars > remaining) {
+      constraints.push({
+        type: 'MAX_EXPOSURE',
+        label: `Total exposure limit: $${remaining.toFixed(0)} remaining of $${maxExposure.toFixed(0)} max`,
+        original: adjustedDollars,
+      });
+      adjustedDollars = remaining;
+    }
+  }
+
+  // 3. Correlation penalty
+  if (s.correlationPenalty && portfolio?.hasPortfolio && portfolio.screenTrade) {
+    const screening = portfolio.screenTrade(market);
+    if (screening?.maxCorrelation > 0.5) {
+      const penalty = 1 - (screening.maxCorrelation - 0.5); // 0.5 corr = no penalty, 1.0 = 50% reduction
+      const penalizedDollars = adjustedDollars * penalty;
+      constraints.push({
+        type: 'CORRELATION',
+        label: `Correlated with existing position (r=${screening.maxCorrelation.toFixed(2)}), reduced by ${((1 - penalty) * 100).toFixed(0)}%`,
+        original: adjustedDollars,
+      });
+      adjustedDollars = penalizedDollars;
+    }
+  }
+
+  // 4. Minimum practical bet check
+  const belowMinimum = adjustedDollars > 0 && adjustedDollars < s.minPracticalBet;
+  if (belowMinimum) {
+    constraints.push({
+      type: 'BELOW_MINIMUM',
+      label: `Below minimum practical bet of $${s.minPracticalBet}`,
+    });
+  }
+
+  // 5. Min bet as % of bankroll check
+  const pctOfBankroll = s.bankroll > 0 ? (adjustedDollars / s.bankroll) * 100 : 0;
+  if (pctOfBankroll < 1 && adjustedDollars > 0) {
+    constraints.push({
+      type: 'TINY_FRACTION',
+      label: 'Less than 1% of bankroll - edge may not be worth the attention cost',
+    });
+  }
+
+  return {
+    rawDollars,
+    adjustedDollars: Math.max(0, adjustedDollars),
+    constraints,
+    belowMinimum,
+    pctOfBankroll,
+    effective: !belowMinimum && adjustedDollars > 0,
+  };
+}
+
+// ─── Decision Journal ───────────────────────────────────────────────
+
+export function getJournalEntries() {
+  try {
+    const stored = localStorage.getItem(JOURNAL_KEY);
+    return stored ? JSON.parse(stored) : [];
+  } catch { return []; }
+}
+
+export function saveJournalEntry(entry) {
+  try {
+    const entries = getJournalEntries();
+    const newEntry = {
+      id: `j_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      createdAt: new Date().toISOString(),
+      ...entry,
+      reEvaluations: [],
+      resolved: false,
+      outcome: null,
+    };
+    entries.unshift(newEntry);
+    // Keep max 200 entries
+    if (entries.length > 200) entries.length = 200;
+    localStorage.setItem(JOURNAL_KEY, JSON.stringify(entries));
+    return newEntry;
+  } catch { return null; }
+}
+
+export function addReEvaluation(entryId, reEval) {
+  try {
+    const entries = getJournalEntries();
+    const entry = entries.find((e) => e.id === entryId);
+    if (!entry) return false;
+    entry.reEvaluations.push({
+      timestamp: new Date().toISOString(),
+      ...reEval,
+    });
+    localStorage.setItem(JOURNAL_KEY, JSON.stringify(entries));
+    return true;
+  } catch { return false; }
+}
+
+export function resolveJournalEntry(entryId, outcome) {
+  try {
+    const entries = getJournalEntries();
+    const entry = entries.find((e) => e.id === entryId);
+    if (!entry) return false;
+    entry.resolved = true;
+    entry.outcome = outcome; // 'WIN', 'LOSS', or 'SCRATCH'
+    entry.resolvedAt = new Date().toISOString();
+    localStorage.setItem(JOURNAL_KEY, JSON.stringify(entries));
+    return true;
+  } catch { return false; }
+}
+
+export function deleteJournalEntry(entryId) {
+  try {
+    const entries = getJournalEntries().filter((e) => e.id !== entryId);
+    localStorage.setItem(JOURNAL_KEY, JSON.stringify(entries));
+    return true;
+  } catch { return false; }
+}
+
+// ─── Calibration Tracking ───────────────────────────────────────────
+
+export function getCalibrationData() {
+  try {
+    const stored = localStorage.getItem(CALIBRATION_KEY);
+    return stored ? JSON.parse(stored) : [];
+  } catch { return []; }
+}
+
+export function addCalibrationPoint(point) {
+  try {
+    const data = getCalibrationData();
+    data.push({
+      timestamp: new Date().toISOString(),
+      ...point,
+    });
+    // Keep last 500 points
+    if (data.length > 500) data.splice(0, data.length - 500);
+    localStorage.setItem(CALIBRATION_KEY, JSON.stringify(data));
+    return true;
+  } catch { return false; }
+}
+
+/**
+ * Compute calibration metrics: bucket predictions by confidence level
+ * and see how often they actually came true.
+ */
+export function computeCalibrationMetrics() {
+  const journal = getJournalEntries().filter((e) => e.resolved && e.outcome !== 'SCRATCH');
+  if (journal.length === 0) return { buckets: [], totalResolved: 0 };
+
+  // Bucket by predicted probability (in 10% bands)
+  const buckets = [];
+  for (let lower = 0; lower < 100; lower += 10) {
+    const upper = lower + 10;
+    const inBucket = journal.filter((e) => {
+      const pct = (e.estProb || 0) * 100;
+      return pct >= lower && pct < upper;
+    });
+    if (inBucket.length === 0) continue;
+
+    const wins = inBucket.filter((e) => e.outcome === 'WIN').length;
+    const actualRate = wins / inBucket.length;
+    const midpoint = (lower + upper) / 2 / 100;
+
+    buckets.push({
+      range: `${lower}-${upper}%`,
+      midpoint,
+      count: inBucket.length,
+      wins,
+      actualRate,
+      calibrationError: actualRate - midpoint,
+      overconfident: actualRate < midpoint,
+    });
+  }
+
+  // Overall metrics
+  const totalResolved = journal.length;
+  const totalWins = journal.filter((e) => e.outcome === 'WIN').length;
+  const overallWinRate = totalWins / totalResolved;
+
+  // Brier score
+  const brierScore = journal.reduce((sum, e) => {
+    const predicted = e.estProb || 0.5;
+    const actual = e.outcome === 'WIN' ? 1 : 0;
+    return sum + Math.pow(predicted - actual, 2);
+  }, 0) / totalResolved;
+
+  return {
+    buckets,
+    totalResolved,
+    totalWins,
+    overallWinRate,
+    brierScore,
+  };
+}
