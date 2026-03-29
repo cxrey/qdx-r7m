@@ -3,6 +3,9 @@
 // category / structure / duration / price bucket, and compares active market
 // prices to historical base rates to detect "narrative premiums".
 
+import { inferCategory } from './categoryPatterns';
+import { withTimeout, TIMEOUT_GAMMA_PAGE } from './fetchUtils';
+
 const GAMMA_API = '/gamma-api';
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -35,17 +38,21 @@ function saveCache(data) {
 const MAX_RESOLVED = 5000;
 const MAX_RESOLVED_PAGES = 200;
 const MAX_CONSECUTIVE_EMPTY_RESOLVED = 3;
+const RESOLVED_CONCURRENCY = 4; // Parallel page fetches (conservative vs api.js's 5)
 
 async function fetchResolvedPage(url, signal, maxRetries = 3) {
+  let lastWas429 = false;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     if (signal?.aborted) return null;
     try {
-      const res = await fetch(url, { signal });
+      const res = await fetch(url, { signal: withTimeout(signal, TIMEOUT_GAMMA_PAGE) });
       if (res.status === 429) {
+        lastWas429 = true;
         const wait = parseInt(res.headers.get('Retry-After') || '3', 10) * 1000;
         await delay(wait);
         continue;
       }
+      lastWas429 = false;
       if (!res.ok) {
         await delay(1000 * (attempt + 1));
         continue;
@@ -56,6 +63,11 @@ async function fetchResolvedPage(url, signal, maxRetries = 3) {
       await delay(1000 * (attempt + 1));
     }
   }
+  if (lastWas429) {
+    const err = new Error('Rate limited');
+    err.status = 429;
+    throw err;
+  }
   return null;
 }
 
@@ -63,64 +75,95 @@ export async function fetchResolvedMarkets(signal) {
   const cached = loadCache();
   if (cached?.resolvedMarkets) return cached;
 
+  const startTime = Date.now();
   const markets = [];
-  let offset = 0;
+  let pageOffset = 0;
   const limit = 100;
-  let consecutiveEmpty = 0;
+  let done = false;
+  let hitRateLimit = false;
   let pageCount = 0;
 
-  while (markets.length < MAX_RESOLVED && consecutiveEmpty < MAX_CONSECUTIVE_EMPTY_RESOLVED && pageCount < MAX_RESOLVED_PAGES) {
+  // Parallel-batch pattern (mirrors fetchAllMarkets in api.js)
+  let consecutiveEmpty = 0; // tracks across batches to detect end-of-data
+  while (!done && !hitRateLimit && markets.length < MAX_RESOLVED && pageOffset < MAX_RESOLVED_PAGES) {
     if (signal?.aborted) break;
-    const url = `${GAMMA_API}/markets?limit=${limit}&offset=${offset}&closed=true&order=volume&ascending=false`;
-    const data = await fetchResolvedPage(url, signal);
-    pageCount++;
 
-    if (!data || !Array.isArray(data) || data.length === 0) {
-      consecutiveEmpty++;
-      offset += limit;
-      await delay(200);
-      continue;
+    // Build a batch of RESOLVED_CONCURRENCY page fetches
+    const batch = [];
+    for (let i = 0; i < RESOLVED_CONCURRENCY && (pageOffset + i) < MAX_RESOLVED_PAGES; i++) {
+      const offset = (pageOffset + i) * limit;
+      const url = `${GAMMA_API}/markets?limit=${limit}&offset=${offset}&closed=true&order=volume&ascending=false`;
+      batch.push(
+        fetchResolvedPage(url, signal)
+          .then(data => ({ status: 'ok', data }))
+          .catch(err => {
+            if (err?.status === 429) return { status: 429, data: null };
+            if (err?.name === 'AbortError') throw err;
+            return { status: 'error', data: null };
+          })
+      );
     }
 
-    consecutiveEmpty = 0;
+    let results;
+    try {
+      results = await Promise.all(batch);
+    } catch (err) {
+      if (err.name === 'AbortError') break;
+      throw err;
+    }
 
-    // Only keep markets that have a clear resolved outcome
-    for (const m of data) {
-      if (m.resolutionSource || m.resolvedBy || m.outcome != null || m.resolution != null) {
-        markets.push(m);
+    // Collect results from all pages in the batch
+    for (const result of results) {
+      pageCount++;
+
+      if (result.status === 429) {
+        hitRateLimit = true;
+        continue; // Don't break — collect remaining successful pages
+      }
+
+      const data = result.data;
+      if (!data || !Array.isArray(data) || data.length === 0) {
+        consecutiveEmpty++;
+        if (consecutiveEmpty >= MAX_CONSECUTIVE_EMPTY_RESOLVED) {
+          done = true;
+        }
+        continue;
+      }
+
+      consecutiveEmpty = 0;
+
+      // Only keep markets that have a clear resolved outcome
+      for (const m of data) {
+        if (m.resolutionSource || m.resolvedBy || m.outcome != null || m.resolution != null) {
+          markets.push(m);
+        }
+      }
+
+      if (markets.length >= MAX_RESOLVED) {
+        done = true;
       }
     }
 
-    offset += limit;
-    await delay(200);
+    pageOffset += RESOLVED_CONCURRENCY;
+
+    // Brief delay between batches to avoid hammering the API
+    if (!done && !hitRateLimit && !signal?.aborted) {
+      await delay(100);
+    }
   }
 
-  console.log(`[BaseRateEngine] Fetched ${markets.length} resolved markets across ${pageCount} pages.`);
+  if (hitRateLimit) {
+    console.warn('[BaseRateEngine] Rate limited — using', markets.length, 'resolved markets fetched so far');
+  }
+
+  console.log(`[BaseRateEngine] Fetched ${markets.length} resolved markets across ${pageCount} pages in ${Date.now() - startTime}ms.`);
 
   const result = { resolvedMarkets: markets, fetchedAt: Date.now() };
   saveCache(result);
   return result;
 }
 
-// ─── Category inference (mirrors api.js) ───
-const CATEGORY_RULES = [
-  { category: 'Politics', patterns: [/president/i, /election/i, /trump/i, /biden/i, /congress/i, /senate/i, /governor/i, /democrat/i, /republican/i, /vote/i, /poll/i] },
-  { category: 'Crypto', patterns: [/bitcoin/i, /btc/i, /ethereum/i, /eth\b/i, /crypto/i, /solana/i, /token/i, /defi/i, /nft/i, /blockchain/i] },
-  { category: 'Finance', patterns: [/stock/i, /s&p/i, /nasdaq/i, /dow jones/i, /fed\b/i, /interest rate/i, /inflation/i, /gdp/i, /recession/i, /treasury/i] },
-  { category: 'Sports', patterns: [/nba/i, /nfl/i, /mlb/i, /nhl/i, /soccer/i, /football/i, /basketball/i, /baseball/i, /tennis/i, /golf/i, /ufc/i, /boxing/i, /championship/i, /playoff/i, /super bowl/i] },
-  { category: 'Geopolitics', patterns: [/war\b/i, /ceasefire/i, /iran/i, /russia/i, /ukraine/i, /china/i, /taiwan/i, /nato/i, /sanction/i, /tariff/i] },
-  { category: 'Tech', patterns: [/\bai\b/i, /artificial intelligence/i, /openai/i, /google/i, /apple/i, /microsoft/i, /meta\b/i, /spacex/i, /tesla/i, /chatgpt/i] },
-  { category: 'Pop Culture', patterns: [/movie/i, /film/i, /oscar/i, /grammy/i, /emmy/i, /album/i, /music/i, /celebrity/i, /tiktok/i, /youtube/i] },
-  { category: 'Science', patterns: [/climate/i, /temperature/i, /earthquake/i, /hurricane/i, /pandemic/i, /virus/i, /vaccine/i, /covid/i, /nasa/i, /space/i] },
-  { category: 'Legal', patterns: [/court/i, /lawsuit/i, /convicted/i, /trial\b/i, /judge/i, /indictment/i, /arrest/i, /guilty/i, /settlement/i, /ruling/i] },
-];
-
-function inferCat(question) {
-  for (const rule of CATEGORY_RULES) {
-    if (rule.patterns.some((p) => p.test(question))) return rule.category;
-  }
-  return 'Other';
-}
+// Category inference — uses shared patterns from categoryPatterns.js
 
 // Duration bucket from days between created & closed
 function durationBucket(days) {
@@ -161,7 +204,7 @@ export function computeBaseRates(resolvedMarkets) {
     if (resolvedYes == null) continue; // ambiguous resolution, skip
 
     const question = m.question || m.title || '';
-    const category = inferCat(question);
+    const category = inferCategory(question);
 
     // Parse initial yes price
     let yesPrice = null;

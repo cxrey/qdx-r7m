@@ -1,105 +1,133 @@
 import { truncateSlugNumerics } from './utils/detectMarketLink';
+import { withTimeout, TIMEOUT_GAMMA_PAGE } from './fetchUtils';
 
 const GAMMA_API = '/gamma-api';
 const CLOB_API = '/clob-api';
 
-const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+const PAGE_SIZE = 100;
+const CONCURRENCY = 5;
+const MAX_PAGES = 200; // Safety cap: 200 pages × 100/page = 20K markets max
 
-const MAX_PAGES = 50;              // safety cap — 25,000 markets max
-const MAX_CONSECUTIVE_EMPTY = 3;   // stop after 3 consecutive empty pages
-const DELAY_MS = 50;               // ms between requests
-const PAGE_SIZE = 500;
-
-/**
- * Fetch a single page with retry logic for rate limits and transient errors.
- */
-async function fetchPageWithRetry(url, signal, maxRetries = 3) {
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    if (signal?.aborted) return null;
-    try {
-      const res = await fetch(url, { signal });
-
-      if (res.status === 429) {
-        const retryAfter = Math.max(1000, parseInt(res.headers.get('Retry-After') || '3', 10) * 1000);
-        console.warn(`[fetchAllMarkets] Rate limited, waiting ${retryAfter}ms (attempt ${attempt + 1})`);
-        await delay(retryAfter);
-        continue;
-      }
-
-      if (!res.ok) {
-        console.warn(`[fetchAllMarkets] HTTP ${res.status} on attempt ${attempt + 1}`);
-        await delay(1000 * (attempt + 1));
-        continue;
-      }
-
-      return await res.json();
-    } catch (err) {
-      if (err.name === 'AbortError') return null;
-      console.warn(`[fetchAllMarkets] Fetch error on attempt ${attempt + 1}:`, err.message);
-      await delay(1000 * (attempt + 1));
-    }
-  }
-  console.error(`[fetchAllMarkets] Failed after ${maxRetries} retries: ${url}`);
-  return null;
-}
+// ── Request-level timeouts ──────────────────────────────────────
+// Prevents hung fetches from blocking concurrent batches indefinitely.
+// TIMEOUT_GAMMA_PAGE (10s) imported from fetchUtils.js
+const TIMEOUT_ORDER_BOOK = 5_000;    // 5s per order book request
+const TIMEOUT_PRICE_HISTORY = 8_000; // 8s per price history request
+const TIMEOUT_LOOKUP = 8_000;        // 8s per direct lookup request
 
 export async function fetchAllMarkets(onProgress, signal) {
-  const markets = [];
-  let offset = 0;
-  let consecutiveEmpty = 0;
-  let pageCount = 0;
+  const startTime = Date.now();
+  let allRaw = [];
+  let pageOffset = 0;
+  let done = false;
+  let hitRateLimit = false;
 
-  console.log('[fetchAllMarkets] Starting market fetch...');
-
-  while (consecutiveEmpty < MAX_CONSECUTIVE_EMPTY && pageCount < MAX_PAGES) {
+  while (!done && !hitRateLimit && pageOffset < MAX_PAGES) {
     if (signal?.aborted) break;
 
-    const url = `${GAMMA_API}/markets?limit=${PAGE_SIZE}&offset=${offset}&active=true&closed=false&order=volume&ascending=false`;
-    const data = await fetchPageWithRetry(url, signal);
-    pageCount++;
-
-    if (!data || !Array.isArray(data) || data.length === 0) {
-      consecutiveEmpty++;
-      console.log(`[fetchAllMarkets] Page ${pageCount}: empty (consecutive: ${consecutiveEmpty}/${MAX_CONSECUTIVE_EMPTY})`);
-      offset += PAGE_SIZE;
-      await delay(DELAY_MS);
-      continue;
+    // Build a batch of CONCURRENCY page fetches
+    const batch = [];
+    for (let i = 0; i < CONCURRENCY && (pageOffset + i) < MAX_PAGES; i++) {
+      const offset = (pageOffset + i) * PAGE_SIZE;
+      const url = `${GAMMA_API}/markets?limit=${PAGE_SIZE}&offset=${offset}&active=true&closed=false&order=volume&ascending=false&volume_num_min=100`;
+      batch.push(
+        fetch(url, { signal: withTimeout(signal, TIMEOUT_GAMMA_PAGE) })
+          .then(async (res) => {
+            if (res.status === 429) return { status: 429, data: [] };
+            if (!res.ok) return { status: res.status, data: [] };
+            const data = await res.json();
+            return { status: 200, data: Array.isArray(data) ? data : [] };
+          })
+          .catch((err) => {
+            if (err.name === 'AbortError') throw err;
+            console.warn(`[fetchAllMarkets] Page ${pageOffset + i} failed:`, err.message);
+            return { status: 0, data: [] };
+          })
+      );
     }
 
-    consecutiveEmpty = 0;
-    markets.push(...data);
-    offset += PAGE_SIZE;
-
-    if (onProgress) onProgress(markets.length);
-
-    // A partial page is a strong signal we've reached the end — break
-    // immediately to avoid 3 extra empty-page round-trips.
-    if (data.length < PAGE_SIZE) {
-      console.log(`[fetchAllMarkets] Page ${pageCount}: ${data.length} markets (partial page, total: ${markets.length}) — done`);
-      break;
+    // Wait for all pages in the batch to complete
+    let results;
+    try {
+      results = await Promise.all(batch);
+    } catch (err) {
+      if (err.name === 'AbortError') break;
+      throw err;
     }
 
-    await delay(DELAY_MS);
+    // Collect ALL successful data from the batch first, then check for stop conditions.
+    // Do NOT break early on 429 — pages after the 429 in the batch may have succeeded
+    // (all requests were already in flight). Collect everything, then stop before next batch.
+    for (let i = 0; i < results.length; i++) {
+      const { status, data } = results[i];
+
+      if (status === 429) {
+        hitRateLimit = true;
+        // Don't break — keep collecting data from remaining successful pages in this batch
+      }
+
+      if (data.length > 0) {
+        allRaw.push(...data);
+      }
+
+      if (data.length === 0 && status === 200) {
+        // Empty 200 response = no more data at this offset
+        done = true;
+      }
+    }
+
+    // Check if any page in the batch returned fewer results than the effective page size.
+    // Use the first *successful* (status 200) page's length as the reference — a failed
+    // page (status 0) returning empty data must not trigger end-of-data detection.
+    if (!done && !hitRateLimit && results.length > 0) {
+      const refPage = results.find((r) => r.status === 200 && r.data.length > 0);
+      if (!refPage) {
+        // No successful non-empty page in this batch — stop
+        done = true;
+      } else {
+        const effectivePageSize = refPage.data.length;
+        for (let i = 0; i < results.length; i++) {
+          if (results[i] !== refPage && results[i].data.length < effectivePageSize && results[i].status === 200) {
+            done = true;
+            break;
+          }
+        }
+      }
+    }
+
+    if (hitRateLimit) {
+      console.warn('[fetchAllMarkets] Rate limited — using', allRaw.length, 'markets fetched so far');
+    }
+
+    pageOffset += CONCURRENCY;
+
+    // Report progress after each batch
+    if (onProgress && allRaw.length > 0) {
+      onProgress(allRaw.length);
+    }
   }
 
-  console.log(
-    `[fetchAllMarkets] Fetch complete: ${markets.length} markets across ${pageCount} pages. ` +
-    `Last offset: ${offset}. Stop reason: ${consecutiveEmpty >= MAX_CONSECUTIVE_EMPTY ? 'consecutive empty pages' : pageCount >= MAX_PAGES ? 'max page cap' : signal?.aborted ? 'aborted' : 'done'}.`
-  );
-
-  if (pageCount >= MAX_PAGES) {
-    console.warn('[fetchAllMarkets] Hit max page safety cap — there may be more markets.');
+  if (pageOffset >= MAX_PAGES) {
+    console.warn(`[fetchAllMarkets] Hit MAX_PAGES safety cap (${MAX_PAGES}) — ${allRaw.length} markets fetched`);
   }
 
-  return markets;
+  console.log(`[fetchAllMarkets] Fetch complete: ${allRaw.length} markets in ${Date.now() - startTime}ms (${pageOffset} pages)`);
+
+  return allRaw;
 }
 
 export async function fetchOrderBook(tokenId, signal) {
   try {
-    const res = await fetch(`${CLOB_API}/book?token_id=${tokenId}`, { signal });
+    const res = await fetch(`${CLOB_API}/book?token_id=${tokenId}`, { signal: withTimeout(signal, TIMEOUT_ORDER_BOOK) });
+    if (res.status === 429 || res.status === 403) {
+      const err = new Error(res.status === 403 ? 'Forbidden' : 'Rate limited');
+      err.status = res.status;
+      throw err;
+    }
     if (!res.ok) return null;
     return await res.json();
   } catch (e) {
+    if (e?.status === 429 || e?.status === 403) throw e;
     if (e.name !== 'AbortError') console.warn('[fetchOrderBook] Failed:', e.message);
     return null;
   }
@@ -114,10 +142,16 @@ export async function fetchPriceHistory(tokenId, interval, fidelity, startTs, en
       url += `&interval=${interval}`;
     }
     if (fidelity) url += `&fidelity=${fidelity}`;
-    const res = await fetch(url, { signal });
+    const res = await fetch(url, { signal: withTimeout(signal, TIMEOUT_PRICE_HISTORY) });
+    if (res.status === 429 || res.status === 403) {
+      const err = new Error(res.status === 403 ? 'Forbidden' : 'Rate limited');
+      err.status = res.status;
+      throw err;
+    }
     if (!res.ok) return null;
     return await res.json();
   } catch (e) {
+    if (e?.status === 429 || e?.status === 403) throw e;
     if (e.name !== 'AbortError') console.warn('[fetchPriceHistory] Failed:', e.message);
     return null;
   }
@@ -130,7 +164,7 @@ export async function fetchPriceHistory(tokenId, interval, fidelity, startTs, en
  */
 export async function fetchMarketById(id, signal) {
   try {
-    const res = await fetch(`${GAMMA_API}/markets/${id}`, { signal });
+    const res = await fetch(`${GAMMA_API}/markets/${id}`, { signal: withTimeout(signal, TIMEOUT_LOOKUP) });
     if (!res.ok) return null;
     const data = await res.json();
     return data && data.id ? { markets: [data], event: null } : null;
@@ -147,7 +181,7 @@ export async function fetchMarketById(id, signal) {
 export async function fetchMarketBySlug(slug, signal) {
   // 1. Try events endpoint
   try {
-    const res = await fetch(`${GAMMA_API}/events?slug=${encodeURIComponent(slug)}`, { signal });
+    const res = await fetch(`${GAMMA_API}/events?slug=${encodeURIComponent(slug)}`, { signal: withTimeout(signal, TIMEOUT_LOOKUP) });
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data) && data.length > 0) {
@@ -160,7 +194,7 @@ export async function fetchMarketBySlug(slug, signal) {
 
   // 2. Try markets endpoint
   try {
-    const res = await fetch(`${GAMMA_API}/markets?slug=${encodeURIComponent(slug)}`, { signal });
+    const res = await fetch(`${GAMMA_API}/markets?slug=${encodeURIComponent(slug)}`, { signal: withTimeout(signal, TIMEOUT_LOOKUP) });
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data) && data.length > 0) {
@@ -173,7 +207,7 @@ export async function fetchMarketBySlug(slug, signal) {
   const truncated = truncateSlugNumerics(slug);
   if (truncated) {
     try {
-      const res = await fetch(`${GAMMA_API}/events?slug=${encodeURIComponent(truncated)}`, { signal });
+      const res = await fetch(`${GAMMA_API}/events?slug=${encodeURIComponent(truncated)}`, { signal: withTimeout(signal, TIMEOUT_LOOKUP) });
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data) && data.length > 0) {
@@ -183,7 +217,7 @@ export async function fetchMarketBySlug(slug, signal) {
     } catch { /* continue */ }
 
     try {
-      const res = await fetch(`${GAMMA_API}/markets?slug=${encodeURIComponent(truncated)}`, { signal });
+      const res = await fetch(`${GAMMA_API}/markets?slug=${encodeURIComponent(truncated)}`, { signal: withTimeout(signal, TIMEOUT_LOOKUP) });
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data) && data.length > 0) {
@@ -196,7 +230,7 @@ export async function fetchMarketBySlug(slug, signal) {
   // 4. Last resort: text search
   try {
     const searchTerm = (truncated || slug).replace(/-/g, ' ');
-    const res = await fetch(`${GAMMA_API}/markets?_q=${encodeURIComponent(searchTerm)}&limit=5`, { signal });
+    const res = await fetch(`${GAMMA_API}/markets?_q=${encodeURIComponent(searchTerm)}&limit=5`, { signal: withTimeout(signal, TIMEOUT_LOOKUP) });
     if (res.ok) {
       const data = await res.json();
       if (Array.isArray(data) && data.length > 0) {
@@ -214,7 +248,7 @@ export async function fetchMarketBySlug(slug, signal) {
  */
 export async function fetchMarketByConditionId(conditionId, signal) {
   try {
-    const res = await fetch(`${GAMMA_API}/markets?condition_id=${encodeURIComponent(conditionId)}`, { signal });
+    const res = await fetch(`${GAMMA_API}/markets?condition_id=${encodeURIComponent(conditionId)}`, { signal: withTimeout(signal, TIMEOUT_LOOKUP) });
     if (!res.ok) return null;
     const data = await res.json();
     if (Array.isArray(data) && data.length > 0) return { markets: data, event: null };
@@ -230,7 +264,7 @@ export async function fetchMarketByConditionId(conditionId, signal) {
  */
 export async function fetchMarketByTokenId(tokenId, signal) {
   try {
-    const res = await fetch(`${GAMMA_API}/markets?clob_token_ids=${encodeURIComponent(tokenId)}`, { signal });
+    const res = await fetch(`${GAMMA_API}/markets?clob_token_ids=${encodeURIComponent(tokenId)}`, { signal: withTimeout(signal, TIMEOUT_LOOKUP) });
     if (!res.ok) return null;
     const data = await res.json();
     if (Array.isArray(data) && data.length > 0) return { markets: data, event: null };

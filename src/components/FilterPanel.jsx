@@ -1,5 +1,6 @@
-import { useCallback } from 'react';
+import { useCallback, useMemo } from 'react';
 import DualRangeSlider from './DualRangeSlider';
+import { DEFAULT_FILTERS } from '../filterDefaults';
 
 const SORT_OPTIONS = [
   { value: 'edgeScore', label: 'Edge Score' },
@@ -46,8 +47,28 @@ const RESOLUTION_TYPES = [
   { value: 'TOUCH', label: 'Touch' },
 ];
 
+/** Shallow comparison — avoids JSON.stringify on every filter change */
+function filtersEqual(a, b) {
+  if (a === b) return true;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((v, i) => v === b[i]);
+  }
+  return false;
+}
+
 export default function FilterPanel({ filters, setFilters, categories, lookupState, onPaste, onClearSearch, hasPortfolio }) {
   const update = (key, val) => setFilters((f) => ({ ...f, [key]: val }));
+
+  const hasActiveFilters = useMemo(() => {
+    return Object.keys(DEFAULT_FILTERS).some(key => {
+      if (key === 'search') return false; // search is handled separately
+      return !filtersEqual(filters[key], DEFAULT_FILTERS[key]);
+    });
+  }, [filters]);
+
+  const handleReset = useCallback(() => {
+    setFilters(prev => ({ ...DEFAULT_FILTERS, search: prev.search }));
+  }, [setFilters]);
 
   const handlePaste = useCallback((e) => {
     if (!onPaste) return;
@@ -64,29 +85,39 @@ export default function FilterPanel({ filters, setFilters, categories, lookupSta
     if (onClearSearch) onClearSearch();
   }, [update, onClearSearch]);
 
-  const toggleCategory = (cat) => {
+  const toggleCategory = useCallback((cat) => {
     setFilters((f) => {
       const selected = f.categories.includes(cat)
         ? f.categories.filter((c) => c !== cat)
         : [...f.categories, cat];
       return { ...f, categories: selected };
     });
-  };
+  }, [setFilters]);
 
-  const toggleResolutionType = (type) => {
+  const toggleResolutionType = useCallback((type) => {
     setFilters((f) => {
       const selected = (f.resolutionTypes || []).includes(type)
         ? f.resolutionTypes.filter((t) => t !== type)
         : [...(f.resolutionTypes || []), type];
       return { ...f, resolutionTypes: selected };
     });
-  };
+  }, [setFilters]);
 
   return (
     <div className="w-full lg:w-72 shrink-0 bg-gray-900 border-r border-gray-800 p-4 overflow-y-auto">
       {/* Search */}
       <div className="mb-4">
-        <label className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Search</label>
+        <div className="flex items-center justify-between">
+          <label className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Search</label>
+          {hasActiveFilters && (
+            <button
+              onClick={handleReset}
+              className="text-xs text-gray-500 hover:text-gray-200 transition-colors"
+            >
+              Reset
+            </button>
+          )}
+        </div>
         <div className="mt-1 relative">
           <input
             type="text"
@@ -134,7 +165,7 @@ export default function FilterPanel({ filters, setFilters, categories, lookupSta
       {/* Volume Range */}
       <DualRangeSlider
         label="Volume"
-        min={0} max={50_000_000} step={1}
+        min={0} max={50_000_000}
         value={filters.volumeRange}
         onChange={(v) => update('volumeRange', v)}
         displayFormat={(v) => v >= 1_000_000 ? `$${(v / 1_000_000).toFixed(1)}M` : `$${(v / 1_000).toFixed(0)}K`}
@@ -144,7 +175,7 @@ export default function FilterPanel({ filters, setFilters, categories, lookupSta
       {/* Yes Price Range */}
       <DualRangeSlider
         label="Yes Price"
-        min={0} max={100} step={1}
+        min={0} max={100}
         value={filters.yesPriceRange}
         onChange={(v) => update('yesPriceRange', v)}
         displayFormat={(v) => `${v}¢`}
@@ -153,7 +184,7 @@ export default function FilterPanel({ filters, setFilters, categories, lookupSta
       {/* No Price Range */}
       <DualRangeSlider
         label="No Price"
-        min={0} max={100} step={1}
+        min={0} max={100}
         value={filters.noPriceRange}
         onChange={(v) => update('noPriceRange', v)}
         displayFormat={(v) => `${v}¢`}
@@ -162,7 +193,7 @@ export default function FilterPanel({ filters, setFilters, categories, lookupSta
       {/* Days Left */}
       <DualRangeSlider
         label="Days Left"
-        min={0} max={365} step={1}
+        min={0} max={365}
         value={filters.daysLeftRange}
         onChange={(v) => update('daysLeftRange', v)}
       />

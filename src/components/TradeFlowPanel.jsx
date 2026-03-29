@@ -12,6 +12,7 @@ import {
   getCachedTradeFlow, setCachedTradeFlow,
   formatUsdcSize, formatTimeAgo, truncateWallet,
 } from '../TradeFlowEngine';
+import { isClobRateLimited, triggerClobRateLimit } from '../clobRateLimit';
 
 const CYAN = '#00d4aa';
 const PINK = '#ff4d6a';
@@ -56,6 +57,12 @@ export default function TradeFlowPanel({ market, bookData }) {
     const cached = getCachedTradeFlow(market.id);
     if (cached) {
       setFlowData(cached);
+      setLoading(false);
+      return;
+    }
+
+    if (isClobRateLimited()) {
+      setError('CLOB API rate limited — try again later');
       setLoading(false);
       return;
     }
@@ -135,6 +142,11 @@ export default function TradeFlowPanel({ market, bookData }) {
       setCachedTradeFlow(market.id, analysis);
       setFlowData(analysis);
     } catch (err) {
+      if (err?.status === 429 || err?.status === 403) {
+        triggerClobRateLimit(err.status);
+        if (mountedRef.current) setError('CLOB API rate limited — paused for 60s');
+        return;
+      }
       if (mountedRef.current) {
         console.warn('[TradeFlowPanel] Error:', err);
         setError('Failed to load trade flow data');

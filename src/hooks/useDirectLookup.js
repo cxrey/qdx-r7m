@@ -236,7 +236,11 @@ export function useDirectLookup(rawMarkets, baseRatesRef) {
           }
         } catch (err) {
           if (err.name === 'AbortError') return;
-          setLookupError('Failed to look up market. Please try again.');
+          if (err?.status === 429) {
+            setLookupError('Gamma API rate limited — try again later');
+          } else {
+            setLookupError('Failed to look up market. Please try again.');
+          }
         } finally {
           if (!controller.signal.aborted) setLookupLoading(false);
         }

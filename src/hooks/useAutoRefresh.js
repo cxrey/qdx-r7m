@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { produce } from 'immer';
 import { RefreshManager } from '../RefreshManager';
 
 const LS_KEY = 'polymarket-scanner-auto-refresh';
@@ -15,7 +14,10 @@ const LS_KEY = 'polymarket-scanner-auto-refresh';
  */
 export function useAutoRefresh({ rawMarkets, setRawMarkets, baseRatesRef, refresh }) {
   const [enabled, setEnabled] = useState(() => {
-    try { return localStorage.getItem(LS_KEY) === 'true'; } catch { return false; }
+    try {
+      const saved = localStorage.getItem(LS_KEY);
+      return saved !== null ? saved === 'true' : true; // default ON if no saved preference
+    } catch { return true; }
   });
   const [wsStatus, setWsStatus] = useState('disconnected'); // 'connecting'|'connected'|'disconnected'|'polling'|'error'
   const [toasts, setToasts] = useState([]);                  // [{id, type, message, ts}]
@@ -26,7 +28,15 @@ export function useAutoRefresh({ rawMarkets, setRawMarkets, baseRatesRef, refres
   const marketsRef = useRef(rawMarkets);
   marketsRef.current = rawMarkets;
 
-  // Index map: marketId → array index for O(1) price update lookups
+  // Dirty flag: set true when a price update arrives.
+  // Read by App.jsx's throttle to skip filterAndSort when idle.
+  const pricesDirtyRef = useRef(false);
+
+  // Accumulated price updates — written by onPriceUpdate, drained by App.jsx throttle.
+  // Avoids Immer produce() on every 150ms batcher flush (was the primary memory leak).
+  const pendingPriceUpdatesRef = useRef(new Map());
+
+  // Index map: marketId → array index for O(1) flash direction lookups
   const indexMapRef = useRef(new Map());
 
   // Toast management
@@ -43,56 +53,56 @@ export function useAutoRefresh({ rawMarkets, setRawMarkets, baseRatesRef, refres
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  // Price flash management
-  const triggerFlash = useCallback((marketId, direction) => {
-    setPriceFlashes((prev) => ({ ...prev, [marketId]: direction }));
-    setTimeout(() => {
-      setPriceFlashes((prev) => {
-        const next = { ...prev };
-        delete next[marketId];
-        return next;
-      });
-    }, 800);
-  }, []);
-
   // Initialize manager
   useEffect(() => {
     const manager = new RefreshManager({
       onPriceUpdate: (updates) => {
-        // updates: Map<marketId, {yesPrice?, noPrice?}>
-        setRawMarkets((prev) => {
-          // Rebuild index map if stale (different array length or first use)
-          const idxMap = indexMapRef.current;
-          if (idxMap.size === 0 || idxMap.size !== prev.length) {
-            idxMap.clear();
-            for (let i = 0; i < prev.length; i++) {
-              idxMap.set(prev[i].id, i);
+        // Accumulate into ref — no Immer, no setRawMarkets, no re-render.
+        // App.jsx's throttle drains pendingPriceUpdatesRef once per tick.
+        const flashBatch = {};
+
+        for (const [marketId, update] of updates) {
+          // Determine flash direction BEFORE accumulating.
+          // Compare against pending ref first (captures intra-window changes),
+          // then fall back to current displayed price.
+          if (update.yesPrice != null) {
+            const pending = pendingPriceUpdatesRef.current.get(marketId);
+            const currentYes = pending?.yesPrice
+              ?? marketsRef.current[indexMapRef.current.get(marketId)]?.yesPrice;
+
+            if (currentYes != null && update.yesPrice !== currentYes) {
+              flashBatch[marketId] = update.yesPrice > currentYes ? 'up' : 'down';
             }
           }
 
-          // Use Immer for structural sharing — only touched entries create new refs
-          let changed = false;
-          const next = produce(prev, (draft) => {
-            for (const [marketId, update] of updates) {
-              const idx = idxMap.get(marketId);
-              if (idx == null) continue;
+          // Accumulate into pending ref — no state update, no Immer
+          const existing = pendingPriceUpdatesRef.current.get(marketId);
+          if (existing) {
+            if (update.yesPrice != null) existing.yesPrice = update.yesPrice;
+            if (update.noPrice != null) existing.noPrice = update.noPrice;
+          } else {
+            pendingPriceUpdatesRef.current.set(marketId, { ...update });
+          }
+        }
 
-              const m = draft[idx];
-              const newYes = update.yesPrice ?? m.yesPrice;
-              const newNo = update.noPrice ?? m.noPrice;
+        pricesDirtyRef.current = true;
 
-              if (newYes === m.yesPrice && newNo === m.noPrice) continue;
+        // One setPriceFlashes call for the entire batch
+        if (Object.keys(flashBatch).length > 0) {
+          setPriceFlashes(prev => ({ ...prev, ...flashBatch }));
 
-              changed = true;
-              if (newYes !== m.yesPrice) {
-                triggerFlash(marketId, newYes > m.yesPrice ? 'up' : 'down');
+          // One setTimeout to clear this entire batch
+          const flashIds = Object.keys(flashBatch);
+          setTimeout(() => {
+            setPriceFlashes(prev => {
+              const next = { ...prev };
+              for (const id of flashIds) {
+                delete next[id];
               }
-              m.yesPrice = newYes;
-              m.noPrice = newNo;
-            }
-          });
-          return changed ? next : prev;
-        });
+              return next;
+            });
+          }, 800);
+        }
       },
 
       onNewMarkets: (newMarkets) => {
@@ -102,6 +112,10 @@ export function useAutoRefresh({ rawMarkets, setRawMarkets, baseRatesRef, refres
         if (toAdd.length === 0) return;
 
         setRawMarkets((prevState) => [...prevState, ...toAdd]);
+
+        // Immediately update ref so getCurrentMarkets() sees new markets
+        // before React re-renders. Prevents duplicate Tier 2 discovery.
+        marketsRef.current = [...marketsRef.current, ...toAdd];
 
         // Append to index map immediately (don't clear + wait for rebuild)
         const idxMap = indexMapRef.current;
@@ -198,5 +212,7 @@ export function useAutoRefresh({ rawMarkets, setRawMarkets, baseRatesRef, refres
     removeToast,
     priceFlashes,
     handleManualRefresh,
+    pricesDirtyRef,
+    pendingPriceUpdatesRef,
   };
 }

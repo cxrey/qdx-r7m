@@ -7,6 +7,9 @@
  * It does NOT provide directional recommendations.
  */
 
+import { getCategoryPatterns } from './categoryPatterns';
+import { withTimeout, TIMEOUT_DATA_API } from './fetchUtils';
+
 const DATA_API = '/data-api';
 const LEADERBOARD_CACHE_KEY = 'pm_leaderboard_cache';
 const LEADERBOARD_TTL = 24 * 60 * 60 * 1000; // 24 hours
@@ -25,12 +28,20 @@ export async function fetchMarketTrades(conditionId) {
   ];
   for (const url of urls) {
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, { signal: withTimeout(null, TIMEOUT_DATA_API) });
+      if (res.status === 429 || res.status === 403) {
+        const err = new Error(res.status === 403 ? 'Forbidden' : 'Rate limited');
+        err.status = res.status;
+        throw err;
+      }
       if (!res.ok) continue;
       const data = await res.json();
       const list = Array.isArray(data) ? data : (data?.trades || data?.data || []);
       if (list.length > 0) return list;
-    } catch { /* try next */ }
+    } catch (e) {
+      if (e?.status === 429 || e?.status === 403) throw e;
+      /* try next */
+    }
   }
   return [];
 }
@@ -44,7 +55,7 @@ export async function fetchMarketHolders(conditionId) {
   ];
   for (const url of urls) {
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, { signal: withTimeout(null, TIMEOUT_DATA_API) });
       if (!res.ok) continue;
       const data = await res.json();
       if (data && (Array.isArray(data) ? data.length > 0 : Object.keys(data).length > 0)) {
@@ -77,7 +88,7 @@ export async function fetchLeaderboard() {
 
   for (const url of endpoints) {
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, { signal: withTimeout(null, TIMEOUT_DATA_API) });
       if (!res.ok) continue;
       const data = await res.json();
       const list = Array.isArray(data) ? data : (data?.leaderboard || data?.rankings || data?.data || []);
@@ -109,7 +120,7 @@ export async function fetchWalletActivity(walletAddress) {
   } catch { /* ignore */ }
 
   try {
-    const res = await fetch(`${DATA_API}/activity?user=${encodeURIComponent(walletAddress)}&type=TRADE&limit=100`);
+    const res = await fetch(`${DATA_API}/activity?user=${encodeURIComponent(walletAddress)}&type=TRADE&limit=100`, { signal: withTimeout(null, TIMEOUT_DATA_API) });
     if (!res.ok) {
       console.warn(`[TradeFlow] /activity returned ${res.status} for ${walletAddress.slice(0, 10)}...`);
       return null;
@@ -222,20 +233,7 @@ export function assessWalletRelevance(walletActivity, marketCategory, leaderboar
   return { categoryTradeCount, categoryWinRate, relevanceLevel, displayText };
 }
 
-function getCategoryPatterns(category) {
-  const map = {
-    Politics: [/president/i, /election/i, /trump/i, /biden/i, /congress/i, /senate/i, /governor/i, /democrat/i, /republican/i, /vote/i, /poll/i],
-    Crypto: [/bitcoin/i, /btc/i, /ethereum/i, /eth\b/i, /crypto/i, /solana/i, /token/i, /defi/i],
-    Finance: [/stock/i, /s&p/i, /nasdaq/i, /fed\b/i, /interest rate/i, /inflation/i, /gdp/i, /treasury/i],
-    Sports: [/nba/i, /nfl/i, /mlb/i, /nhl/i, /soccer/i, /football/i, /basketball/i, /baseball/i, /ufc/i, /boxing/i, /f1\b/i, /championship/i, /playoff/i, /super bowl/i],
-    Geopolitics: [/war\b/i, /ceasefire/i, /iran/i, /russia/i, /ukraine/i, /china/i, /taiwan/i, /nato/i, /sanction/i, /military/i, /tariff/i],
-    Tech: [/\bai\b/i, /artificial intelligence/i, /openai/i, /google/i, /apple/i, /microsoft/i, /spacex/i, /tesla/i],
-    'Pop Culture': [/movie/i, /film/i, /oscar/i, /grammy/i, /album/i, /music/i, /celebrity/i],
-    Science: [/climate/i, /temperature/i, /earthquake/i, /hurricane/i, /pandemic/i, /virus/i, /vaccine/i, /nasa/i],
-    Legal: [/court/i, /lawsuit/i, /convicted/i, /trial\b/i, /judge/i, /indictment/i, /arrest/i, /guilty/i],
-  };
-  return map[category] || [];
-}
+// Category patterns imported from shared categoryPatterns.js
 
 // ─── Main Trade Flow Analysis ───────────────────────────────────────
 
@@ -696,6 +694,7 @@ export function tradeFlowEdgeBonus(flowData, structuralDirection) {
 // ─── Cache Helpers ──────────────────────────────────────────────────
 
 const flowCache = new Map();
+const MAX_FLOW_CACHE = 500; // LRU cap — bounds memory for long sessions
 
 export function getCachedTradeFlow(marketId) {
   const entry = flowCache.get(marketId);
@@ -704,11 +703,22 @@ export function getCachedTradeFlow(marketId) {
     flowCache.delete(marketId);
     return null;
   }
+  // Promote to end of Map insertion order (makes eviction true LRU, not FIFO)
+  flowCache.delete(marketId);
+  flowCache.set(marketId, entry);
   return entry.data;
 }
 
 export function setCachedTradeFlow(marketId, data) {
   flowCache.set(marketId, { data, ts: Date.now() });
+
+  // LRU eviction: when cache exceeds cap, evict the least-recently-used entry.
+  // Map iteration order is insertion order; getCachedTradeFlow promotes on access,
+  // so the first key is the least-recently-used.
+  if (flowCache.size > MAX_FLOW_CACHE) {
+    const oldestKey = flowCache.keys().next().value;
+    flowCache.delete(oldestKey);
+  }
 }
 
 // ─── Utility ────────────────────────────────────────────────────────

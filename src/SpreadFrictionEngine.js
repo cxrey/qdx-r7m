@@ -5,27 +5,48 @@
  * bid-ask spread, slippage from walking the order book, and depth metrics.
  */
 
+// --- Order Book Normalization ---
+
+/**
+ * Parse, filter, and sort raw order book data once.
+ * Returns pre-processed bids (desc by price) and asks (asc by price).
+ * Accepts raw or already-normalized data (idempotent).
+ * @param {{ bids: Array, asks: Array }} orderBook
+ * @returns {{ bids: Array<{price: number, size: number}>, asks: Array<{price: number, size: number}> } | null}
+ */
+export function normalizeOrderBook(orderBook) {
+  if (!orderBook) return null;
+
+  // Internal sentinel — set only by this function. Callers should never construct
+  // objects with _normalized: true; doing so with string-priced entries will break.
+  if (orderBook._normalized) return orderBook;
+
+  const bids = (orderBook.bids || [])
+    .map((b) => ({ price: parseFloat(b.price), size: parseFloat(b.size) }))
+    .filter((b) => !isNaN(b.price) && !isNaN(b.size) && b.size > 0)
+    .sort((a, b) => b.price - a.price);
+  const asks = (orderBook.asks || [])
+    .map((a) => ({ price: parseFloat(a.price), size: parseFloat(a.size) }))
+    .filter((a) => !isNaN(a.price) && !isNaN(a.size) && a.size > 0)
+    .sort((a, b) => a.price - b.price);
+
+  return { bids, asks, _normalized: true };
+}
+
 // --- Core Spread ---
 
 /**
  * Calculate basic spread metrics from order book data.
- * @param {{ bids: Array<{price: string, size: string}>, asks: Array<{price: string, size: string}> }} orderBook
+ * Accepts raw or normalized order book.
+ * @param {{ bids: Array, asks: Array }} orderBook
  * @returns {{ bestBid: number, bestAsk: number, midpoint: number, absoluteSpread: number } | null}
  */
 export function calculateSpread(orderBook) {
-  if (!orderBook) return null;
+  const norm = normalizeOrderBook(orderBook);
+  if (!norm || norm.bids.length === 0 || norm.asks.length === 0) return null;
 
-  const bids = (orderBook.bids || [])
-    .map((b) => ({ price: parseFloat(b.price), size: parseFloat(b.size) }))
-    .filter((b) => !isNaN(b.price) && !isNaN(b.size) && b.size > 0);
-  const asks = (orderBook.asks || [])
-    .map((a) => ({ price: parseFloat(a.price), size: parseFloat(a.size) }))
-    .filter((a) => !isNaN(a.price) && !isNaN(a.size) && a.size > 0);
-
-  if (bids.length === 0 || asks.length === 0) return null;
-
-  const bestBid = Math.max(...bids.map((b) => b.price));
-  const bestAsk = Math.min(...asks.map((a) => a.price));
+  const bestBid = norm.bids[0].price;  // sorted desc
+  const bestAsk = norm.asks[0].price;  // sorted asc
   const midpoint = (bestBid + bestAsk) / 2;
   const absoluteSpread = bestAsk - bestBid;
 
@@ -44,17 +65,16 @@ export function calculateSpread(orderBook) {
 export function simulateFill(orderBook, side, entrySize) {
   if (!orderBook || entrySize <= 0) return null;
 
-  const spreadData = calculateSpread(orderBook);
-  if (!spreadData) return null;
+  const norm = normalizeOrderBook(orderBook);
+  if (!norm || norm.bids.length === 0 || norm.asks.length === 0) return null;
 
-  const { bestBid, bestAsk, midpoint } = spreadData;
+  const bestBid = norm.bids[0].price;
+  const bestAsk = norm.asks[0].price;
+  const midpoint = (bestBid + bestAsk) / 2;
 
   if (side === 'BUY_YES') {
-    // Lift asks — sort ascending by price (cheapest first)
-    const asks = (orderBook.asks || [])
-      .map((a) => ({ price: parseFloat(a.price), size: parseFloat(a.size) }))
-      .filter((a) => !isNaN(a.price) && !isNaN(a.size) && a.size > 0)
-      .sort((a, b) => a.price - b.price);
+    // Lift asks — already sorted ascending by price
+    const asks = norm.asks;
 
     let totalCost = 0;
     let totalShares = 0;
@@ -101,11 +121,8 @@ export function simulateFill(orderBook, side, entrySize) {
   }
 
   if (side === 'BUY_NO') {
-    // Hit bids on yes book — sort descending by price (highest first)
-    const bids = (orderBook.bids || [])
-      .map((b) => ({ price: parseFloat(b.price), size: parseFloat(b.size) }))
-      .filter((b) => !isNaN(b.price) && !isNaN(b.size) && b.size > 0)
-      .sort((a, b) => b.price - a.price);
+    // Hit bids on yes book — already sorted descending by price
+    const bids = norm.bids;
 
     let totalCost = 0;
     let totalShares = 0;
@@ -165,19 +182,14 @@ export function simulateFill(orderBook, side, entrySize) {
  * @returns {object | null}
  */
 export function calculateDepthMetrics(orderBook) {
-  if (!orderBook) return null;
+  const norm = normalizeOrderBook(orderBook);
+  if (!norm || norm.bids.length === 0 || norm.asks.length === 0) return null;
 
-  const spreadData = calculateSpread(orderBook);
-  if (!spreadData) return null;
+  const bestBid = norm.bids[0].price;
+  const bestAsk = norm.asks[0].price;
 
-  const { bestBid, bestAsk } = spreadData;
-
-  const bids = (orderBook.bids || [])
-    .map((b) => ({ price: parseFloat(b.price), size: parseFloat(b.size) }))
-    .filter((b) => !isNaN(b.price) && !isNaN(b.size) && b.size > 0);
-  const asks = (orderBook.asks || [])
-    .map((a) => ({ price: parseFloat(a.price), size: parseFloat(a.size) }))
-    .filter((a) => !isNaN(a.price) && !isNaN(a.size) && a.size > 0);
+  const bids = norm.bids;
+  const asks = norm.asks;
 
   // Dollar depth within 5¢ of best bid/ask
   const bidDepthAt5c = bids

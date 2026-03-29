@@ -3,7 +3,15 @@
  * Position fetching, correlation analysis, clustering, concentration metrics, alerts, and trade screening.
  */
 
+import { withTimeout, TIMEOUT_DATA_API } from './fetchUtils';
+
 const DATA_API = '/data-api';
+
+// ── localStorage keys (grouped at top for visibility) ──
+const MANUAL_KEY = 'polymarket-portfolio-manual';
+const WALLET_KEY = 'polymarket-portfolio-wallet';
+const PORTFOLIO_CACHE_KEY = 'polymarket-portfolio-cache';
+const DISMISSED_KEY = 'polymarket-portfolio-dismissed-alerts';
 
 // ── Entity dictionaries for correlation detection ──
 
@@ -35,7 +43,7 @@ export async function fetchPositions(walletAddress) {
 
   // Try user param
   try {
-    const res = await fetch(`${DATA_API}/positions?user=${walletAddress}`);
+    const res = await fetch(`${DATA_API}/positions?user=${walletAddress}`, { signal: withTimeout(null, TIMEOUT_DATA_API) });
     if (res.ok) {
       const data = await res.json();
       console.log('[PortfolioEngine] Positions API response (user=):', data);
@@ -53,7 +61,7 @@ export async function fetchPositions(walletAddress) {
   // Try address param as fallback
   if (!positions) {
     try {
-      const res = await fetch(`${DATA_API}/positions?address=${walletAddress}`);
+      const res = await fetch(`${DATA_API}/positions?address=${walletAddress}`, { signal: withTimeout(null, TIMEOUT_DATA_API) });
       if (res.ok) {
         const data = await res.json();
         console.log('[PortfolioEngine] Positions API response (address=):', data);
@@ -71,7 +79,7 @@ export async function fetchPositions(walletAddress) {
   // Also try to fetch trade history for entry price data
   let trades = null;
   try {
-    const res = await fetch(`${DATA_API}/trades?user=${walletAddress}`);
+    const res = await fetch(`${DATA_API}/trades?user=${walletAddress}`, { signal: withTimeout(null, TIMEOUT_DATA_API) });
     if (res.ok) {
       const data = await res.json();
       console.log('[PortfolioEngine] Trades API response:', data);
@@ -166,27 +174,53 @@ export function matchPositionsToMarkets(positions, loadedMarkets) {
 
 export function extractEntities(text) {
   const lower = text.toLowerCase();
-  const found = { countries: [], people: [], orgs: [] };
+  const found = { countries: new Set(), people: new Set(), orgs: new Set() };
 
   for (const c of COUNTRIES) {
-    if (lower.includes(c)) found.countries.push(c);
+    if (lower.includes(c)) found.countries.add(c);
   }
   for (const p of PEOPLE) {
-    if (lower.includes(p)) found.people.push(p);
+    if (lower.includes(p)) found.people.add(p);
   }
   for (const o of ORGS) {
-    if (lower.includes(o)) found.orgs.push(o);
+    if (lower.includes(o)) found.orgs.add(o);
   }
   return found;
+}
+
+// Module-level cache for entity extraction results.
+// Keyed on market ID — market text is immutable within a session,
+// so extracting once per market is sufficient. Avoids O(n²) redundant
+// extractions in buildCorrelationClusters (9,900 → 50 for 50 positions).
+// LRU-capped to bound memory if screenNewTrade scans many candidates.
+const entityCache = new Map();
+const MAX_ENTITY_CACHE = 500;
+
+function getCachedEntities(market) {
+  const id = market.id;
+  if (entityCache.has(id)) {
+    const cached = entityCache.get(id);
+    // Promote to end (true LRU)
+    entityCache.delete(id);
+    entityCache.set(id, cached);
+    return cached;
+  }
+  const entities = extractEntities(market.question + ' ' + (market.description || ''));
+  entityCache.set(id, entities);
+  if (entityCache.size > MAX_ENTITY_CACHE) {
+    const oldestKey = entityCache.keys().next().value;
+    entityCache.delete(oldestKey);
+  }
+  return entities;
 }
 
 // ── Correlation Analysis ──
 
 function sharedEntities(e1, e2) {
   const shared = [];
-  for (const c of e1.countries) { if (e2.countries.includes(c)) shared.push(c); }
-  for (const p of e1.people) { if (e2.people.includes(p)) shared.push(p); }
-  for (const o of e1.orgs) { if (e2.orgs.includes(o)) shared.push(o); }
+  for (const c of e1.countries) { if (e2.countries.has(c)) shared.push(c); }
+  for (const p of e1.people) { if (e2.people.has(p)) shared.push(p); }
+  for (const o of e1.orgs) { if (e2.orgs.has(o)) shared.push(o); }
   return shared;
 }
 
@@ -206,9 +240,9 @@ export function calculatePairCorrelation(posA, posB) {
     labels.push(mA.category);
   }
 
-  // ENTITY_OVERLAP
-  const eA = extractEntities(mA.question + ' ' + (mA.description || ''));
-  const eB = extractEntities(mB.question + ' ' + (mB.description || ''));
+  // ENTITY_OVERLAP — cached per market to avoid O(n²) re-extraction
+  const eA = getCachedEntities(mA);
+  const eB = getCachedEntities(mB);
   const shared = sharedEntities(eA, eB);
   if (shared.length > 0) {
     types.push('ENTITY');
@@ -677,10 +711,6 @@ export function getPositionSignals(position) {
 
 // ── Manual Position Storage ──
 
-const MANUAL_KEY = 'polymarket-portfolio-manual';
-const WALLET_KEY = 'polymarket-portfolio-wallet';
-const CACHE_KEY = 'polymarket-portfolio-cache';
-
 export function getStoredWallet() {
   return localStorage.getItem(WALLET_KEY) || null;
 }
@@ -718,7 +748,7 @@ export function clearManualPositions() {
 
 export function getCachedPositions() {
   try {
-    const cached = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null');
+    const cached = JSON.parse(localStorage.getItem(PORTFOLIO_CACHE_KEY) || 'null');
     if (!cached) return null;
     // Expire after 5 minutes
     if (Date.now() - cached.ts > 5 * 60 * 1000) return null;
@@ -729,12 +759,10 @@ export function getCachedPositions() {
 }
 
 export function setCachedPositions(data) {
-  localStorage.setItem(CACHE_KEY, JSON.stringify({ data, ts: Date.now() }));
+  localStorage.setItem(PORTFOLIO_CACHE_KEY, JSON.stringify({ data, ts: Date.now() }));
 }
 
 // ── Dismissed alerts storage ──
-
-const DISMISSED_KEY = 'polymarket-portfolio-dismissed-alerts';
 
 export function getDismissedAlerts() {
   try {

@@ -4,6 +4,20 @@ import { analyzeTheta } from './ThetaEngine';
 import { analyzeResolution } from './ResolutionAnalyzer';
 import { analyzeVolumeEfficiency } from './VolumeEfficiencyEngine';
 import { analyzeBaseRate } from './BaseRateEngine';
+import {
+  VOLUME_BANDS, PRICE_MIDRANGE, PRICE_LONGSHOT, PRICE_DEFAULT_SCORE, PRICE_EXTREME_THRESHOLD,
+  DAYS_LEFT_BANDS, DAYS_LEFT_DEFAULT_SCORE, SPREAD_BANDS,
+  FLB_BIAS_OPPORTUNITY_SCORE, FLB_MODERATE_EDGE_SCORE,
+  THETA_HIGH_THRESHOLD, THETA_HIGH_SCORE, THETA_MODERATE_THRESHOLD, THETA_MODERATE_SCORE,
+  THETA_CRUSH_ZONE_SCORE, THETA_DEAD_MONEY_PENALTY,
+  RESOLUTION_STRICT_THRESHOLD, RESOLUTION_STRICT_PRICE_MIN, RESOLUTION_STRICT_SCORE,
+  RESOLUTION_MODERATE_THRESHOLD, RESOLUTION_MODERATE_PRICE_MIN, RESOLUTION_MODERATE_SCORE,
+  RESOLUTION_TOUCH_PRICE_MAX, RESOLUTION_TOUCH_SCORE,
+  VOLUME_EFFICIENCY_SCORES,
+  BASE_RATE_GAP_LARGE, BASE_RATE_GAP_SMALL,
+  BASE_RATE_NARRATIVE_PREMIUM_SCORE, BASE_RATE_NARRATIVE_DISCOUNT_SCORE, BASE_RATE_DEFAULT_SCORE,
+  MAX_EDGE_SCORE,
+} from './scoringConfig';
 
 const CATEGORY_RULES = [
   { category: 'Politics', patterns: [/president/i, /election/i, /trump/i, /biden/i, /congress/i, /senate/i, /governor/i, /democrat/i, /republican/i, /vote/i, /poll/i, /primary/i, /inaugur/i, /impeach/i, /parliament/i, /minister/i, /mayor/i, /political/i] },
@@ -30,10 +44,18 @@ function inferCategory(question, slug) {
 export const ALL_CATEGORIES = CATEGORY_RULES.map((r) => r.category).concat('Other');
 
 export function processMarket(market) {
+  const _engineFailures = [];
+
   let outcomePrices = [];
-  try { if (market.outcomePrices) outcomePrices = JSON.parse(market.outcomePrices); } catch { /* malformed */ }
+  try { if (market.outcomePrices) outcomePrices = JSON.parse(market.outcomePrices); } catch (e) {
+    console.warn('[processMarket] Malformed outcomePrices for', market.id, e.message);
+    _engineFailures.push('outcomePrices');
+  }
   let clobTokenIds = [];
-  try { if (market.clobTokenIds) clobTokenIds = JSON.parse(market.clobTokenIds); } catch { /* malformed */ }
+  try { if (market.clobTokenIds) clobTokenIds = JSON.parse(market.clobTokenIds); } catch (e) {
+    console.warn('[processMarket] Malformed clobTokenIds for', market.id, e.message);
+    _engineFailures.push('clobTokenIds');
+  }
 
   const yesPrice = outcomePrices[0] != null ? parseFloat(outcomePrices[0]) : null;
   const noPrice = outcomePrices[1] != null ? parseFloat(outcomePrices[1]) : null;
@@ -53,8 +75,6 @@ export function processMarket(market) {
   const question = market.question || market.title || 'Untitled';
   const slug = market.events?.[0]?.slug || market.slug || '';
   const category = inferCategory(question, slug);
-
-  const _engineFailures = [];
 
   let resolutionAnalysis = null;
   try {
@@ -148,26 +168,28 @@ export function calculateEdgeScore(market) {
 
   let score = 0;
 
-  // Volume scoring
-  if (volume >= 1_000_000 && volume <= 5_000_000) score += 25;
-  else if ((volume >= 500_000 && volume < 1_000_000) || (volume > 5_000_000 && volume <= 10_000_000)) score += 15;
-  else if (volume >= 100_000 && volume < 500_000) score += 10;
+  // Volume scoring — first matching band wins
+  for (const band of VOLUME_BANDS) {
+    if (volume >= band.min && volume <= band.max) { score += band.score; break; }
+  }
 
   // Price scoring
   if (yesPrice != null) {
     const yc = yesPrice * 100;
     const nc = noPrice != null ? noPrice * 100 : (100 - yc);
-    if ((yc >= 25 && yc <= 75) || (nc >= 25 && nc <= 75)) score += 25;
-    else if (yc >= 5 && yc <= 15) score += 15;
-    else if (!(yc >= 90 || nc >= 90)) score += 5; // extreme prices (>=90c) get no bonus
+    if ((yc >= PRICE_MIDRANGE.min && yc <= PRICE_MIDRANGE.max) ||
+        (nc >= PRICE_MIDRANGE.min && nc <= PRICE_MIDRANGE.max)) score += PRICE_MIDRANGE.score;
+    else if (yc >= PRICE_LONGSHOT.min && yc <= PRICE_LONGSHOT.max) score += PRICE_LONGSHOT.score;
+    else if (!(yc >= PRICE_EXTREME_THRESHOLD || nc >= PRICE_EXTREME_THRESHOLD)) score += PRICE_DEFAULT_SCORE;
   }
 
-  // Days left scoring
+  // Days left scoring — first matching band wins, then fallback
   if (daysLeft != null) {
-    if (daysLeft >= 14 && daysLeft <= 56) score += 25;
-    else if ((daysLeft >= 0 && daysLeft < 14) || (daysLeft > 56 && daysLeft <= 120)) score += 15;
-    else if (daysLeft > 180) score += 5;
-    else score += 10;
+    let matched = false;
+    for (const band of DAYS_LEFT_BANDS) {
+      if (daysLeft >= band.min && daysLeft <= band.max) { score += band.score; matched = true; break; }
+    }
+    if (!matched) score += DAYS_LEFT_DEFAULT_SCORE;
   }
 
   // Spread scoring
@@ -175,49 +197,47 @@ export function calculateEdgeScore(market) {
     const mid = (yesPrice + noPrice) / 2;
     if (mid > 0) {
       const spreadPct = (spread / mid) * 100;
-      if (spreadPct < 2) score += 25;
-      else if (spreadPct <= 5) score += 15;
-      else if (spreadPct <= 10) score += 10;
+      for (const band of SPREAD_BANDS) {
+        if (band.strict ? spreadPct < band.maxPct : spreadPct <= band.maxPct) { score += band.score; break; }
+      }
     }
   }
 
   // FLB bonus
   if (flb) {
-    if (flb.isBiasOpportunity) score += 15;
-    else if (flb.isModerateEdge) score += 8;
+    if (flb.isBiasOpportunity) score += FLB_BIAS_OPPORTUNITY_SCORE;
+    else if (flb.isModerateEdge) score += FLB_MODERATE_EDGE_SCORE;
   }
 
   // Theta bonus
   if (theta) {
     const absDailyTheta = Math.abs(theta.bestTheta) * 100;
-    if (absDailyTheta > 0.5) score += 10;
-    else if (absDailyTheta > 0.2) score += 5;
-    if (theta.zones.includes('THETA_CRUSH_ZONE')) score += 8;
-    if (theta.zones.includes('DEAD_MONEY')) score -= 5;
+    if (absDailyTheta > THETA_HIGH_THRESHOLD) score += THETA_HIGH_SCORE;
+    else if (absDailyTheta > THETA_MODERATE_THRESHOLD) score += THETA_MODERATE_SCORE;
+    if (theta.zones.includes('THETA_CRUSH_ZONE')) score += THETA_CRUSH_ZONE_SCORE;
+    if (theta.zones.includes('DEAD_MONEY')) score += THETA_DEAD_MONEY_PENALTY;
   }
 
   // Resolution strictness bonus
   if (resolutionAnalysis?.strictness) {
     const ss = resolutionAnalysis.strictness.score;
     const hasTouch = resolutionAnalysis.characteristics?.some((c) => c.type === 'TOUCH' && c.confidence === 'HIGH');
-    if (ss > 75 && yesPrice != null && yesPrice > 0.30) score += 12;
-    else if (ss > 60 && yesPrice != null && yesPrice > 0.25) score += 6;
-    if (hasTouch && yesPrice != null && yesPrice < 0.15) score += 8;
+    if (ss > RESOLUTION_STRICT_THRESHOLD && yesPrice != null && yesPrice > RESOLUTION_STRICT_PRICE_MIN) score += RESOLUTION_STRICT_SCORE;
+    else if (ss > RESOLUTION_MODERATE_THRESHOLD && yesPrice != null && yesPrice > RESOLUTION_MODERATE_PRICE_MIN) score += RESOLUTION_MODERATE_SCORE;
+    if (hasTouch && yesPrice != null && yesPrice < RESOLUTION_TOUCH_PRICE_MAX) score += RESOLUTION_TOUCH_SCORE;
   }
 
   // Volume efficiency bonus
   if (volumeEfficiency) {
-    if (volumeEfficiency.priority === 'SWEET_SPOT') score += 15;
-    else if (volumeEfficiency.priority === 'OPPORTUNITY') score += 8;
-    else if (volumeEfficiency.priority === 'MARGINAL') score += 3;
-    else if (volumeEfficiency.priority === 'LOW_LIQUIDITY') score -= 5;
+    const veScore = VOLUME_EFFICIENCY_SCORES[volumeEfficiency.priority];
+    if (veScore != null) score += veScore;
   }
 
   // Base rate bonus
   if (baseRate) {
-    if (baseRate.gapType === 'NARRATIVE_PREMIUM' && baseRate.absGapCents > 8 && baseRate.confidence !== 'LOW') score += 10;
-    else if (baseRate.gapType === 'NARRATIVE_DISCOUNT' && baseRate.absGapCents > 8 && baseRate.confidence !== 'LOW') score += 8;
-    else if (baseRate.absGapCents > 5 && baseRate.confidence !== 'LOW') score += 5;
+    if (baseRate.gapType === 'NARRATIVE_PREMIUM' && baseRate.absGapCents > BASE_RATE_GAP_LARGE && baseRate.confidence !== 'LOW') score += BASE_RATE_NARRATIVE_PREMIUM_SCORE;
+    else if (baseRate.gapType === 'NARRATIVE_DISCOUNT' && baseRate.absGapCents > BASE_RATE_GAP_LARGE && baseRate.confidence !== 'LOW') score += BASE_RATE_NARRATIVE_DISCOUNT_SCORE;
+    else if (baseRate.absGapCents > BASE_RATE_GAP_SMALL && baseRate.confidence !== 'LOW') score += BASE_RATE_DEFAULT_SCORE;
   }
 
   // Conjunction bonus
@@ -225,7 +245,7 @@ export function calculateEdgeScore(market) {
     score += conjunctionEdgeBonus(conjunction);
   }
 
-  return Math.min(100, score);
+  return Math.min(MAX_EDGE_SCORE, score);
 }
 
 /**

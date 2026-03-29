@@ -12,9 +12,11 @@ import { WebSocketPriceStream } from './WebSocketPriceStream';
 import { PriceUpdateBatcher } from './PriceUpdateBatcher';
 import { fetchAllMarkets } from './api';
 import { processMarket, enrichWithBaseRate } from './processMarket';
+import { processAllInWorker } from './workerManager';
 
-const TIER2_INTERVAL = 5 * 60 * 1000;       // 5 min
-const TIER3_INTERVAL = 30 * 60 * 1000;      // 30 min
+const TIER2_INTERVAL = 60 * 1000;            // 60 sec (3 requests per cycle)
+const TIER2_COOLDOWN = 30 * 1000;            // min gap between Tier 2 runs (must be < TIER2_INTERVAL)
+const TIER3_INTERVAL = 10 * 60 * 1000;      // 10 min (parallel fetch burst)
 const POLLING_FALLBACK_INTERVAL = 30_000;    // 30s polling if WS fails
 const NEW_MARKET_PAGES = 3;                  // check first 3 pages for new markets
 const PAGE_SIZE = 100;
@@ -51,6 +53,7 @@ export class RefreshManager {
 
     // Tier 2 state
     this._tier2Running = false;
+    this._tier2LastCompleted = 0;  // timestamp of last completed Tier 2 run
 
     // Polling fallback
     this._pollingTimer = null;
@@ -255,6 +258,11 @@ export class RefreshManager {
       for (let page = 0; page < 3; page++) {
         const url = `${GAMMA_API}/markets?limit=100&offset=${page * 100}&active=true&closed=false&order=volume&ascending=false`;
         const res = await fetch(url);
+        if (res.status === 429) {
+          this._handleRateLimit();
+          this._opts.onToast?.({ type: 'warn', message: 'Gamma API rate limited during polling' });
+          break;
+        }
         if (!res.ok) break;
         const data = await res.json();
         if (!Array.isArray(data) || data.length === 0) break;
@@ -319,6 +327,10 @@ export class RefreshManager {
 
   async _runTier2() {
     if (!this._enabled || this._tier2Running) return;
+
+    // Cooldown: skip if Tier 2 completed less than TIER2_COOLDOWN ago
+    if (Date.now() - this._tier2LastCompleted < TIER2_COOLDOWN) return;
+
     this._tier2Running = true;
 
     try {
@@ -327,7 +339,7 @@ export class RefreshManager {
 
       const newMarkets = [];
       for (let page = 0; page < NEW_MARKET_PAGES; page++) {
-        const url = `${GAMMA_API}/markets?limit=${PAGE_SIZE}&offset=${page * PAGE_SIZE}&active=true&closed=false&order=createdAt&ascending=false`;
+        const url = `${GAMMA_API}/markets?limit=${PAGE_SIZE}&offset=${page * PAGE_SIZE}&active=true&closed=false&order=createdAt&ascending=false&volume_num_min=100`;
         const res = await fetch(url);
 
         if (res.status === 429) {
@@ -378,6 +390,7 @@ export class RefreshManager {
       }
     } finally {
       this._tier2Running = false;
+      this._tier2LastCompleted = Date.now();
     }
   }
 
@@ -406,7 +419,10 @@ export class RefreshManager {
         return true;
       });
 
-      const processed = deduped.map((m) => processMarket(m)).filter((m) => m.question);
+      if (this._tier3Controller.signal.aborted) return;
+      const allProcessed = await processAllInWorker(deduped);
+      if (this._tier3Controller.signal.aborted) return;
+      const processed = allProcessed.filter((m) => m.question);
 
       // Smart diff against current markets
       const currentMarkets = this._opts.getCurrentMarkets?.() || [];

@@ -1,13 +1,12 @@
-import { useState, useCallback, useRef, useEffect, memo } from 'react';
-import MarketDetailPanel from './MarketDetailPanel';
+import { useState, useCallback, useRef, useEffect, memo, lazy, Suspense } from 'react';
+const MarketDetailPanel = lazy(() => import('./MarketDetailPanel'));
 import { RulesCell } from './ResolutionCard';
 import { VolPriceCell } from './VolumeEfficiencyCard';
 import { BaseRateCell } from './BaseRateCard';
 import { SpreadCell } from './SpreadFrictionCard';
 import { ConjunctionCell } from './ConjunctionCard';
 import { FlowCell } from './TradeFlowPanel';
-
-const ROW_HEIGHT = 44; // fixed row height for virtual scrolling
+import { ROW_HEIGHT } from '../uiConfig';
 
 function EdgeBadge({ score }) {
   let color = 'bg-red-900 text-red-300';
@@ -198,39 +197,24 @@ function AddToPortfolioPopover({ market, onAdd, onClose, anchorRef }) {
 }
 
 // ── Portfolio indicator dot ──
-function PortfolioDot({ market, portfolio, showFit }) {
-  if (!portfolio?.hasPortfolio) return null;
+function PortfolioDot({ marketId, hasPortfolio, isMarketHeld, getHeldPosition }) {
+  if (!hasPortfolio) return null;
 
-  const isHeld = portfolio.isMarketHeld(market.id);
-  if (isHeld) {
-    const held = portfolio.getHeldPosition(market.id);
-    return (
-      <span
-        className="inline-block w-2 h-2 rounded-full shrink-0"
-        style={{ background: '#00d4aa' }}
-        title={`Held: ${held?.side || '?'} ${held?.size?.toFixed(1) || ''} shares`}
-      />
-    );
-  }
+  const isHeld = isMarketHeld(marketId);
+  if (!isHeld) return null;
 
-  if (showFit) {
-    const screening = portfolio.screenTrade(market);
-    if (screening.maxCorrelation > 0.5) {
-      return (
-        <span
-          className="inline-block w-2 h-2 rounded-full shrink-0"
-          style={{ background: '#f59e0b' }}
-          title={`High correlation (${screening.maxCorrelation.toFixed(2)}) with existing position`}
-        />
-      );
-    }
-  }
-
-  return null;
+  const held = getHeldPosition(marketId);
+  return (
+    <span
+      className="inline-block w-2 h-2 rounded-full shrink-0"
+      style={{ background: '#00d4aa' }}
+      title={`Held: ${held?.side || '?'} ${held?.size?.toFixed(1) || ''} shares`}
+    />
+  );
 }
 
 // ── MarketRow with React.memo ──
-const MarketRow = memo(function MarketRow({ market, expanded, onToggle, detailWidth, highlighted, cachedSpread, onBookData, cachedFlow, onFlowData, portfolio, filters, gridColumns, priceFlash }) {
+const MarketRow = memo(function MarketRow({ market, expanded, onToggle, detailWidth, highlighted, cachedSpread, onBookData, cachedFlow, onFlowData, hasPortfolio, isMarketHeld, getHeldPosition, addManualPosition, portfolio, filters, gridColumns, priceFlash }) {
   const [showAddPopover, setShowAddPopover] = useState(false);
   const addBtnRef = useRef(null);
 
@@ -278,7 +262,7 @@ const MarketRow = memo(function MarketRow({ market, expanded, onToggle, detailWi
     ? `https://polymarket.com/event/${encodeURIComponent(market.slug)}`
     : `https://polymarket.com`;
 
-  const isHeld = portfolio?.hasPortfolio && portfolio.isMarketHeld(market.id);
+  const isHeld = hasPortfolio && isMarketHeld(market.id);
   const showHighlightHeld = filters?.highlightHeld !== false && isHeld;
 
   const rowStyle = {};
@@ -289,10 +273,10 @@ const MarketRow = memo(function MarketRow({ market, expanded, onToggle, detailWi
   }
 
   const handleAddToPortfolio = useCallback((pos) => {
-    if (portfolio?.addManualPosition) {
-      portfolio.addManualPosition(pos);
+    if (addManualPosition) {
+      addManualPosition(pos);
     }
-  }, [portfolio]);
+  }, [addManualPosition]);
 
   return (
     <div className="border-b border-gray-800 market-row" style={rowStyle}>
@@ -304,7 +288,7 @@ const MarketRow = memo(function MarketRow({ market, expanded, onToggle, detailWi
         onClick={onToggle}
       >
         <div className="truncate pr-2 flex items-center gap-1.5 whitespace-nowrap overflow-hidden">
-          <PortfolioDot market={market} portfolio={portfolio} showFit={filters?.showPortfolioFit !== false} />
+          <PortfolioDot marketId={market.id} hasPortfolio={hasPortfolio} isMarketHeld={isMarketHeld} getHeldPosition={getHeldPosition} />
           <a
             href={polymarketUrl}
             target="_blank"
@@ -381,7 +365,9 @@ const MarketRow = memo(function MarketRow({ market, expanded, onToggle, detailWi
 
       {expanded && (
         <div className="sticky left-0" style={{ width: detailWidth || '100%' }}>
-          <MarketDetailPanel market={market} onBookData={onBookData} onFlowData={onFlowData} portfolio={portfolio} />
+          <Suspense fallback={<div className="h-20 animate-pulse bg-gray-800/50 rounded" />}>
+            <MarketDetailPanel market={market} onBookData={onBookData} onFlowData={onFlowData} portfolio={portfolio} />
+          </Suspense>
         </div>
       )}
     </div>
@@ -393,10 +379,12 @@ const MarketRow = memo(function MarketRow({ market, expanded, onToggle, detailWi
   if (prevProps.cachedSpread !== nextProps.cachedSpread) return false;
   if (prevProps.cachedFlow !== nextProps.cachedFlow) return false;
   if (prevProps.priceFlash !== nextProps.priceFlash) return false;
-  if (prevProps.portfolio !== nextProps.portfolio) return false;
+  // Portfolio: compare stable primitives instead of the full object.
+  // hasPortfolio is a boolean, isMarketHeld is a useCallback ref —
+  // both only change when positions actually change.
+  if (prevProps.hasPortfolio !== nextProps.hasPortfolio) return false;
+  if (prevProps.isMarketHeld !== nextProps.isMarketHeld) return false;
   if (prevProps.filters?.highlightHeld !== nextProps.filters?.highlightHeld) return false;
-  if (prevProps.filters?.showPortfolioFit !== nextProps.filters?.showPortfolioFit) return false;
-
   const prev = prevProps.market;
   const next = nextProps.market;
   if (prev === next) return true; // same object reference
@@ -420,7 +408,7 @@ const MarketRow = memo(function MarketRow({ market, expanded, onToggle, detailWi
   );
 });
 
-// Re-export ROW_HEIGHT for VariableSizeList
-export const ROW_HEIGHT_PX = 44;
+// Re-export for any consumers that imported ROW_HEIGHT_PX
+export { ROW_HEIGHT as ROW_HEIGHT_PX };
 
 export default MarketRow;

@@ -1,5 +1,6 @@
 import { useState, useMemo } from 'react';
 import {
+  normalizeOrderBook,
   calculateSpread,
   simulateFill,
   calculateDepthMetrics,
@@ -77,8 +78,11 @@ export function SpreadCell({ market, cachedSpread }) {
 export default function SpreadFrictionCard({ market, bookData }) {
   const [selectedSize, setSelectedSize] = useState(100);
 
-  const spreadData = useMemo(() => calculateSpread(bookData), [bookData]);
-  const depthMetrics = useMemo(() => calculateDepthMetrics(bookData), [bookData]);
+  // Normalize once — all downstream functions accept pre-normalized data
+  const normalizedBook = useMemo(() => normalizeOrderBook(bookData), [bookData]);
+
+  const spreadData = useMemo(() => calculateSpread(normalizedBook), [normalizedBook]);
+  const depthMetrics = useMemo(() => calculateDepthMetrics(normalizedBook), [normalizedBook]);
   const frictionScore = useMemo(
     () => spreadData ? calculateFrictionScore(spreadData, depthMetrics, market.yesPrice) : null,
     [spreadData, depthMetrics, market.yesPrice]
@@ -89,12 +93,12 @@ export default function SpreadFrictionCard({ market, bookData }) {
   );
 
   const yesFill = useMemo(
-    () => simulateFill(bookData, 'BUY_YES', selectedSize),
-    [bookData, selectedSize]
+    () => simulateFill(normalizedBook, 'BUY_YES', selectedSize),
+    [normalizedBook, selectedSize]
   );
   const noFill = useMemo(
-    () => simulateFill(bookData, 'BUY_NO', selectedSize),
-    [bookData, selectedSize]
+    () => simulateFill(normalizedBook, 'BUY_NO', selectedSize),
+    [normalizedBook, selectedSize]
   );
 
   if (!bookData) {

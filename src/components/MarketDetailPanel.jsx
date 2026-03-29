@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
 import { fetchPriceHistory, fetchOrderBook } from '../api';
+import { isClobRateLimited, triggerClobRateLimit } from '../clobRateLimit';
 import PriceChart from './PriceChart';
 import DepthChart from './DepthChart';
 import OrderBookTable from './OrderBookTable';
@@ -88,6 +89,10 @@ export default function MarketDetailPanel({ market, onBookData, onFlowData, port
   // Fetch price history
   const loadPriceHistory = useCallback(async () => {
     if (!tokenId) return;
+    if (isClobRateLimited()) {
+      setPriceError('CLOB API rate limited — try again later');
+      return;
+    }
     const cacheKey = `price-${tokenId}-${timeframe.label}`;
     const cached = cacheGet(cacheKey);
     if (cached) { setPriceData(cached); return; }
@@ -107,7 +112,12 @@ export default function MarketDetailPanel({ market, onBookData, onFlowData, port
         setPriceData(data);
         if (data) cacheSet(cacheKey, data, 60000);
       }
-    } catch {
+    } catch (err) {
+      if (err?.status === 429 || err?.status === 403) {
+        triggerClobRateLimit(err.status);
+        if (mountedRef.current) setPriceError('CLOB API rate limited — paused for 60s');
+        return;
+      }
       if (mountedRef.current) setPriceError('Failed to load price history');
     } finally {
       if (mountedRef.current) setPriceLoading(false);
@@ -117,6 +127,10 @@ export default function MarketDetailPanel({ market, onBookData, onFlowData, port
   // Fetch order book
   const loadOrderBook = useCallback(async () => {
     if (!tokenId) return;
+    if (isClobRateLimited()) {
+      setBookError('CLOB API rate limited — try again later');
+      return;
+    }
     const cacheKey = `book-${tokenId}`;
     const cached = cacheGet(cacheKey);
     if (cached) {
@@ -136,7 +150,12 @@ export default function MarketDetailPanel({ market, onBookData, onFlowData, port
           if (onBookData) onBookData(market.id, data);
         }
       }
-    } catch {
+    } catch (err) {
+      if (err?.status === 429 || err?.status === 403) {
+        triggerClobRateLimit(err.status);
+        if (mountedRef.current) setBookError('CLOB API rate limited — paused for 60s');
+        return;
+      }
       if (mountedRef.current) setBookError('Failed to load order book');
     } finally {
       if (mountedRef.current) setBookLoading(false);

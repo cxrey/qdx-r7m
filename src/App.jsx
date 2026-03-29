@@ -11,45 +11,34 @@ import { useDebounce } from './hooks/useDebounce';
 import { useDirectLookup } from './hooks/useDirectLookup';
 import { usePortfolio } from './hooks/usePortfolio';
 import { ALL_CATEGORIES } from './processMarket';
-import { getVolEffSortValue } from './VolumeEfficiencyEngine';
 import { fetchLeaderboard, buildLeaderboardIndex } from './TradeFlowEngine';
-import { perfStart, perfEnd } from './perfMonitor';
-
-const DEFAULT_FILTERS = {
-  search: '',
-  volumeRange: [0, 50_000_000],
-  yesPriceRange: [0, 100],
-  noPriceRange: [0, 100],
-  daysLeftRange: [0, 365],
-  categories: [],
-  sortBy: 'edgeScore',
-  sortAsc: false,
-  perPage: 50,
-  flbOnly: false,
-  minTheta: 0,
-  hideDeadMoney: false,
-  resolutionTypes: [],
-  minStrictness: 0,
-  volPriorities: [],
-  hideEfficient: false,
-  minEstEdge: 0,
-  minNarrativeGap: 0,
-  baseRateConfidence: 'any',
-  conjunctionTypes: [],
-  minConjunctionGap: 0,
-  // Portfolio filters
-  highlightHeld: true,
-  hideHeld: false,
-  showPortfolioFit: true,
-  // Trade flow filters
-  flowDirection: 'any',
-  leaderboardActive: false,
-  relevantExpertActive: false,
-};
+import { filterAndSort } from './utils/filterAndSort';
+import { produce } from 'immer';
+import ErrorBoundary from './components/ErrorBoundary';
+import { MAX_FILTER_SORT_SKIPS, PRICE_THROTTLE_MS, THROTTLE_LOG_EVERY } from './uiConfig';
+import { DEFAULT_FILTERS } from './filterDefaults';
 
 function App() {
-  const { rawMarkets, setRawMarkets, loading, error, progress, lastFetch, baseRatesLoading, refresh, baseRatesRef } = useMarkets();
+  const { rawMarkets, setRawMarkets, loading, error, progress, lastFetch, baseRatesLoading, gammaRateLimited, refresh, baseRatesRef } = useMarkets();
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
+
+  // Ref always points to latest markets array without triggering re-renders
+  const rawMarketsRef = useRef(rawMarkets);
+  rawMarketsRef.current = rawMarkets;
+
+  // Version counter drives filteredMarkets recalculation.
+  // Bumped immediately on structural changes, throttled for price ticks.
+  const [marketsVersion, setMarketsVersion] = useState(0);
+
+  // Guard against multiple version bumps in the same render commit.
+  // Reset to false at the top of each render (here), checked by each
+  // structural-change effect below. First effect to bump sets it true,
+  // subsequent effects in the same commit skip.
+  const versionBumpedRef = useRef(false);
+  versionBumpedRef.current = false;
+  const skipCountRef = useRef(0);
+  const totalCyclesRef = useRef(0);
+  const skippedCyclesRef = useRef(0);
   const [activeTab, setActiveTab] = useState('scanner'); // 'scanner' | 'portfolio'
   const [leaderboardReady, setLeaderboardReady] = useState(false);
 
@@ -57,6 +46,7 @@ function App() {
   const {
     autoRefreshEnabled, toggleAutoRefresh, wsStatus, statusMessage,
     toasts, removeToast, priceFlashes, handleManualRefresh,
+    pricesDirtyRef, pendingPriceUpdatesRef,
   } = useAutoRefresh({ rawMarkets, setRawMarkets, baseRatesRef, refresh });
 
   const debouncedSearch = useDebounce(filters.search, 300);
@@ -74,6 +64,118 @@ function App() {
     }).catch(() => {
       console.warn('[App] Leaderboard fetch failed — trade flow ranking disabled');
     });
+  }, []);
+
+  // ── marketsVersion: immediate bumps for structural changes ────
+
+  // Bump marketsVersion once per render commit, resetting dirty flag and skip counter.
+  // Deduped by versionBumpedRef so multiple effects in the same commit don't double-bump.
+  const bumpVersion = useCallback(() => {
+    if (versionBumpedRef.current) return;
+    versionBumpedRef.current = true;
+    setMarketsVersion(v => v + 1);
+    pricesDirtyRef.current = false;
+    skipCountRef.current = 0;
+    pendingPriceUpdatesRef.current.clear();
+  }, []);
+
+  // Immediate re-filter when markets are added or removed
+  const prevLengthRef = useRef(0);
+  useEffect(() => {
+    if (rawMarkets.length !== prevLengthRef.current) {
+      prevLengthRef.current = rawMarkets.length;
+      bumpVersion();
+    }
+  }, [rawMarkets.length, bumpVersion]);
+
+  // Immediate re-filter when base rate enrichment completes
+  const prevBaseRatesLoadingRef = useRef(baseRatesLoading);
+  useEffect(() => {
+    if (prevBaseRatesLoadingRef.current && !baseRatesLoading) {
+      bumpVersion();
+    }
+    prevBaseRatesLoadingRef.current = baseRatesLoading;
+  }, [baseRatesLoading, bumpVersion]);
+
+  // Immediate re-filter when a full refresh completes (Tier 3 or manual Refresh)
+  const prevLastFetchRef = useRef(lastFetch);
+  useEffect(() => {
+    if (lastFetch && lastFetch !== prevLastFetchRef.current) {
+      prevLastFetchRef.current = lastFetch;
+      bumpVersion();
+    }
+  }, [lastFetch, bumpVersion]);
+
+  // ── marketsVersion: throttled bump for price ticks ────────────
+
+  // Uses a ref-based interval instead of a useEffect on rawMarkets,
+  // so React doesn't run effect setup/cleanup 7 times per second.
+  const priceThrottleRef = useRef(null);
+
+  useEffect(() => {
+    priceThrottleRef.current = setInterval(() => {
+      // Persistent skip ratio logging (once per minute)
+      totalCyclesRef.current++;
+      if (totalCyclesRef.current % THROTTLE_LOG_EVERY === 0) {
+        console.log(`[Throttle] ${skippedCyclesRef.current}/${totalCyclesRef.current} cycles skipped`);
+        totalCyclesRef.current = 0;
+        skippedCyclesRef.current = 0;
+      }
+
+      // Only run filterAndSort if prices changed or max-skip reached
+      if (pricesDirtyRef.current || skipCountRef.current >= MAX_FILTER_SORT_SKIPS) {
+        // Apply all accumulated price updates in one Immer pass.
+        // `applied` is set inside the setRawMarkets updater, which runs
+        // synchronously within setInterval callbacks in React 18/19.
+        let applied = false;
+
+        if (pendingPriceUpdatesRef.current.size > 0) {
+          setRawMarkets(prev => {
+            const idxMap = new Map();
+            for (let i = 0; i < prev.length; i++) {
+              idxMap.set(prev[i].id, i);
+            }
+
+            let changed = false;
+            const next = produce(prev, draft => {
+              for (const [marketId, update] of pendingPriceUpdatesRef.current) {
+                const idx = idxMap.get(marketId);
+                if (idx == null) continue;
+                const m = draft[idx];
+                const newYes = update.yesPrice ?? m.yesPrice;
+                const newNo = update.noPrice ?? m.noPrice;
+                if (newYes === m.yesPrice && newNo === m.noPrice) continue;
+                changed = true;
+                m.yesPrice = newYes;
+                m.noPrice = newNo;
+              }
+            });
+
+            if (changed) applied = true;
+            return changed ? next : prev;
+          });
+          pendingPriceUpdatesRef.current.clear();
+        }
+
+        // Only bump version if prices actually changed or max-skip forced it
+        if (applied || skipCountRef.current >= MAX_FILTER_SORT_SKIPS) {
+          setMarketsVersion(v => v + 1);
+        }
+
+        pricesDirtyRef.current = false;
+        skipCountRef.current = 0;
+      } else {
+        skipCountRef.current++;
+        skippedCyclesRef.current++;
+      }
+    }, PRICE_THROTTLE_MS);
+
+    return () => {
+      if (priceThrottleRef.current) {
+        clearInterval(priceThrottleRef.current);
+        priceThrottleRef.current = null;
+      }
+    };
   }, []);
 
   // Direct lookup
@@ -105,136 +207,17 @@ function App() {
   // Pre-compute lowercase search text once
   const searchLower = useMemo(() => debouncedSearch?.toLowerCase() || '', [debouncedSearch]);
 
-  // Consolidated single-pass filter + sort
+  // Consolidated single-pass filter + sort (extracted to pure utility)
   const filteredMarkets = useMemo(() => {
-    // If we have fetched markets from API lookup, show only those
-    if (isLookupActive && fetchedMarkets.length > 0) {
-      return fetchedMarkets;
-    }
-
-    const isLookupFoundInLoaded = isLookupActive && foundInLoadedId != null;
-    const hasCategories = filters.categories.length > 0;
-    const hasResTypes = filters.resolutionTypes?.length > 0;
-    const hasVolPriorities = filters.volPriorities?.length > 0;
-    const hasConjTypes = filters.conjunctionTypes?.length > 0;
-    const minEdge = filters.minEstEdge > 0 ? filters.minEstEdge / 100 : 0;
-    const brAllowed = filters.baseRateConfidence === 'HIGH' ? ['HIGH'] : filters.baseRateConfidence === 'MEDIUM' ? ['HIGH', 'MEDIUM'] : null;
-    const hasSearch = !isLookupActive && searchLower.length > 0;
-
-    // Single-pass filter — cheapest checks first
-    perfStart('filter-sort');
-    const result = [];
-    for (let i = 0; i < rawMarkets.length; i++) {
-      const m = rawMarkets[i];
-      const isPinned = isLookupFoundInLoaded && m.id === foundInLoadedId;
-
-      if (!isPinned) {
-        // CHEAPEST: numeric comparisons
-        if (m.volume < filters.volumeRange[0] || m.volume > filters.volumeRange[1]) continue;
-        if (m.yesPrice != null) {
-          const yc = m.yesPrice * 100;
-          if (yc < filters.yesPriceRange[0] || yc > filters.yesPriceRange[1]) continue;
-        }
-        if (m.noPrice != null) {
-          const nc = m.noPrice * 100;
-          if (nc < filters.noPriceRange[0] || nc > filters.noPriceRange[1]) continue;
-        }
-        if (m.daysLeft != null) {
-          if (m.daysLeft < filters.daysLeftRange[0] || m.daysLeft > filters.daysLeftRange[1]) continue;
-        }
-
-        // MEDIUM: array membership
-        if (hasCategories && !filters.categories.includes(m.category)) continue;
-        if (hasVolPriorities && !(m.volumeEfficiency && filters.volPriorities.includes(m.volumeEfficiency.priority))) continue;
-
-        // NUMERIC thresholds
-        if (filters.minStrictness > 0 && (m.resolutionAnalysis?.strictness?.score ?? 0) < filters.minStrictness) continue;
-        if (filters.minNarrativeGap > 0 && (m.baseRate?.absGapCents ?? 0) < filters.minNarrativeGap) continue;
-        if (filters.minTheta > 0 && (!m.theta || Math.abs(m.theta.bestTheta) * 100 < filters.minTheta)) continue;
-        if (minEdge > 0 && (m.volumeEfficiency?.estimatedEdge ?? 0) < minEdge) continue;
-        if (filters.minConjunctionGap > 0 && !(m.conjunction?.isConjunction && Math.abs(m.conjunction.gapPp ?? 0) >= filters.minConjunctionGap)) continue;
-
-        // BOOLEAN toggles
-        if (filters.flbOnly && !m.flb?.isBiasOpportunity) continue;
-        if (filters.hideDeadMoney && m.theta?.zones?.includes('DEAD_MONEY')) continue;
-        if (filters.hideEfficient && m.volumeEfficiency?.priority === 'EFFICIENT') continue;
-
-        // Resolution types
-        if (hasResTypes) {
-          if (!m.resolutionAnalysis?.characteristics) continue;
-          const hasMatch = filters.resolutionTypes.some((type) =>
-            m.resolutionAnalysis.characteristics.some((c) => c.type === type && c.confidence === 'HIGH')
-          );
-          if (!hasMatch) continue;
-        }
-
-        // Base rate confidence
-        if (brAllowed && !(m.baseRate && brAllowed.includes(m.baseRate.confidence))) continue;
-
-        // Conjunction types
-        if (hasConjTypes) {
-          if (filters.conjunctionTypes.includes('NONE')) {
-            if (m.conjunction?.isConjunction) continue;
-          } else {
-            if (!(m.conjunction?.isConjunction && filters.conjunctionTypes.includes(m.conjunction.type))) continue;
-          }
-        }
-
-        // Hide held — O(1) Set lookup
-        if (filters.hideHeld && portfolio.hasPortfolio && portfolio.isMarketHeld(m.id)) continue;
-
-        // MOST EXPENSIVE: string matching (last)
-        if (hasSearch) {
-          const qLower = m.question.toLowerCase();
-          if (!qLower.includes(searchLower)) {
-            const dLower = m.description.toLowerCase();
-            if (!dLower.includes(searchLower)) continue;
-          }
-        }
-      }
-
-      result.push(m);
-    }
-
-    // Sort
-    const dir = filters.sortAsc ? 1 : -1;
-    result.sort((a, b) => {
-      if (isLookupFoundInLoaded) {
-        if (a.id === foundInLoadedId) return -1;
-        if (b.id === foundInLoadedId) return 1;
-      }
-
-      let av, bv;
-      switch (filters.sortBy) {
-        case 'flbEdge':
-          av = a.flb?.bestEdge ?? 0; bv = b.flb?.bestEdge ?? 0; break;
-        case 'theta':
-          av = Math.abs(a.theta?.bestTheta ?? 0); bv = Math.abs(b.theta?.bestTheta ?? 0); break;
-        case 'strictness':
-          av = a.resolutionAnalysis?.strictness?.score ?? 0; bv = b.resolutionAnalysis?.strictness?.score ?? 0; break;
-        case 'impliedDailyRate':
-          av = a.resolutionAnalysis?.temporal?.metrics?.impliedDailyRate ?? 0; bv = b.resolutionAnalysis?.temporal?.metrics?.impliedDailyRate ?? 0; break;
-        case 'volEfficiency':
-          av = getVolEffSortValue(a.volumeEfficiency); bv = getVolEffSortValue(b.volumeEfficiency); break;
-        case 'effectiveVolume':
-          av = a.volumeEfficiency?.effectiveVolume ?? 0; bv = b.volumeEfficiency?.effectiveVolume ?? 0; break;
-        case 'volVelocity':
-          av = a.volumeEfficiency?.recencyMultiplier ?? 0; bv = b.volumeEfficiency?.recencyMultiplier ?? 0; break;
-        case 'baseRateGap':
-          av = a.baseRate?.absGapCents ?? 0; bv = b.baseRate?.absGapCents ?? 0; break;
-        case 'conjunctionGap':
-          av = Math.abs(a.conjunction?.gapPp ?? 0); bv = Math.abs(b.conjunction?.gapPp ?? 0); break;
-        case 'walletImbalance':
-          av = Math.abs(a._flowImbalance ?? 0); bv = Math.abs(b._flowImbalance ?? 0); break;
-        default:
-          av = a[filters.sortBy] ?? 0; bv = b[filters.sortBy] ?? 0;
-      }
-      return (av - bv) * dir;
+    return filterAndSort({
+      markets: rawMarketsRef.current,
+      filters,
+      searchLower,
+      lookupState: { isLookupActive, fetchedMarkets, foundInLoadedId },
+      portfolio,
     });
-
-    perfEnd('filter-sort', 50);
-    return result;
-  }, [rawMarkets, searchLower, filters, isLookupActive, fetchedMarkets, foundInLoadedId, portfolio.hasPortfolio, portfolio.isMarketHeld]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [marketsVersion, searchLower, filters, isLookupActive, fetchedMarkets, foundInLoadedId, portfolio.hasPortfolio, portfolio.isMarketHeld]);
 
   const handleFiltersChange = useCallback((updater) => {
     setFilters(updater);
@@ -339,6 +322,12 @@ function App() {
       {/* Toast notifications */}
       <ToastContainer toasts={toasts} onRemove={removeToast} />
 
+      {gammaRateLimited && (
+        <div className="px-4 py-2 bg-yellow-900/50 text-yellow-300 text-sm border-b border-yellow-800">
+          Gamma API rate limited — partial data loaded. Resumes automatically in 30s.
+        </div>
+      )}
+
       {error && (
         <div className="px-4 py-2 bg-red-900/50 text-red-300 text-sm border-b border-red-800">
           Error: {error}
@@ -357,20 +346,24 @@ function App() {
             onClearSearch={handleClearSearch}
             hasPortfolio={portfolio.hasPortfolio}
           />
-          <ResultsTable
-            markets={filteredMarkets}
-            lookupState={lookup}
-            onClearSearch={handleClearSearch}
-            portfolio={portfolio}
-            filters={filters}
-            leaderboardReady={leaderboardReady}
-            priceFlashes={priceFlashes}
-          />
+          <ErrorBoundary name="ResultsTable">
+            <ResultsTable
+              markets={filteredMarkets}
+              lookupState={lookup}
+              onClearSearch={handleClearSearch}
+              portfolio={portfolio}
+              filters={filters}
+              leaderboardReady={leaderboardReady}
+              priceFlashes={priceFlashes}
+            />
+          </ErrorBoundary>
         </div>
       ) : (
-        <Suspense fallback={<div className="flex-1 flex items-center justify-center text-gray-500">Loading portfolio...</div>}>
-          <PortfolioDashboard portfolio={portfolio} />
-        </Suspense>
+        <ErrorBoundary name="PortfolioDashboard">
+          <Suspense fallback={<div className="flex-1 flex items-center justify-center text-gray-500">Loading portfolio...</div>}>
+            <PortfolioDashboard portfolio={portfolio} />
+          </Suspense>
+        </ErrorBoundary>
       )}
     </div>
   );

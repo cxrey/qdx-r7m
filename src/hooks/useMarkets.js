@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { fetchAllMarkets } from '../api';
-import { processMarket, enrichWithBaseRate } from '../processMarket';
+import { enrichWithBaseRate } from '../processMarket';
+import { processAllInWorker, terminateAnalysisWorker } from '../workerManager';
 import { fetchResolvedMarkets, computeBaseRates } from '../BaseRateEngine';
 
 export function useMarkets() {
@@ -10,8 +11,10 @@ export function useMarkets() {
   const [progress, setProgress] = useState(0);
   const [lastFetch, setLastFetch] = useState(null);
   const [baseRatesLoading, setBaseRatesLoading] = useState(false);
+  const [gammaRateLimited, setGammaRateLimited] = useState(false);
   const controllerRef = useRef(null);
   const baseRatesRef = useRef(null);
+  const gammaTimerRef = useRef(null);
 
   const loadMarkets = useCallback(async () => {
     if (controllerRef.current) controllerRef.current.abort();
@@ -64,7 +67,10 @@ export function useMarkets() {
         return true;
       });
 
-      const processed = deduped.map((m) => processMarket(m)).filter((m) => m.question);
+      if (controller.signal.aborted) return;
+      const allProcessed = await processAllInWorker(deduped);
+      if (controller.signal.aborted) return;
+      const processed = allProcessed.filter((m) => m.question);
       setRawMarkets(processed);
       setLastFetch(new Date());
 
@@ -82,7 +88,17 @@ export function useMarkets() {
           })
           .catch((e) => {
             if (e.name !== 'AbortError') {
-              console.warn('[useMarkets] Base rate fetch failed:', e.message);
+              if (e?.status === 429) {
+                setGammaRateLimited(true);
+                if (gammaTimerRef.current) clearTimeout(gammaTimerRef.current);
+                gammaTimerRef.current = setTimeout(() => {
+                  gammaTimerRef.current = null;
+                  setGammaRateLimited(false);
+                }, 30_000);
+                console.warn('[useMarkets] Gamma API rate limited during base rate fetch');
+              } else {
+                console.warn('[useMarkets] Base rate fetch failed:', e.message);
+              }
             }
           })
           .finally(() => setBaseRatesLoading(false));
@@ -103,8 +119,10 @@ export function useMarkets() {
     loadMarkets();
     return () => {
       if (controllerRef.current) controllerRef.current.abort();
+      if (gammaTimerRef.current) clearTimeout(gammaTimerRef.current);
+      terminateAnalysisWorker();
     };
   }, [loadMarkets]);
 
-  return { rawMarkets, setRawMarkets, loading, error, progress, lastFetch, baseRatesLoading, refresh: loadMarkets, baseRatesRef };
+  return { rawMarkets, setRawMarkets, loading, error, progress, lastFetch, baseRatesLoading, gammaRateLimited, refresh: loadMarkets, baseRatesRef };
 }
