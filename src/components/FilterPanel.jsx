@@ -504,19 +504,6 @@ export default function FilterPanel({ filters, setFilters, categories, lookupSta
         </label>
       </div>
 
-      {/* Per Page */}
-      <div className="mb-4">
-        <label className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Results Per Page</label>
-        <select
-          value={filters.perPage}
-          onChange={(e) => update('perPage', parseInt(e.target.value))}
-          className="mt-1 w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-gray-100 focus:outline-none focus:border-emerald-500"
-        >
-          <option value={25}>25</option>
-          <option value={50}>50</option>
-          <option value={100}>100</option>
-        </select>
-      </div>
     </div>
   );
 }

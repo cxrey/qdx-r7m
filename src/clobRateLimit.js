@@ -7,6 +7,8 @@
  * 429 (soft rate limit): 60s recovery. 403 (IP block): 5min recovery.
  */
 
+import { onRateLimitHit } from './clobConcurrency';
+
 let rateLimited = false;
 let listeners = [];
 let recoveryTimer = null;
@@ -33,6 +35,10 @@ export function triggerClobRateLimit(statusCode = 429) {
   if (rateLimited && statusCode !== 403) return;
 
   rateLimited = true;
+
+  // Notify concurrency limiter to reduce capacity
+  onRateLimitHit();
+
   console.warn(`[CLOB] ${statusCode === 403 ? 'Forbidden' : 'Rate limited'} — all CLOB fetches paused for ${recoveryTime / 1000}s`);
 
   // Notify UI listeners on fresh trip or 403 upgrade

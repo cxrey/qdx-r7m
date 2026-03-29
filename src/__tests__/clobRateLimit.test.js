@@ -1,4 +1,9 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+
+vi.mock('../clobConcurrency', () => ({
+  onRateLimitHit: vi.fn(),
+}));
+
 import {
   isClobRateLimited,
   triggerClobRateLimit,
@@ -6,11 +11,15 @@ import {
   onClobRateLimitChange,
   getClobRecoverySeconds,
 } from '../clobRateLimit';
+import { onRateLimitHit } from '../clobConcurrency';
 
 beforeEach(() => {
   vi.useFakeTimers();
+  vi.clearAllMocks();
   clearClobRateLimit(); // reset state between tests
 });
+
+afterEach(() => { vi.useRealTimers(); });
 
 describe('clobRateLimit', () => {
   it('starts not rate limited', () => {
@@ -170,5 +179,25 @@ describe('clobRateLimit', () => {
     expect(getClobRecoverySeconds()).toBe(60);
     clearClobRateLimit();
     expect(getClobRecoverySeconds()).toBe(0);
+  });
+
+  // ── Concurrency limiter integration ──
+
+  it('calls onRateLimitHit from clobConcurrency on trigger', () => {
+    triggerClobRateLimit(429);
+    expect(onRateLimitHit).toHaveBeenCalledTimes(1);
+  });
+
+  it('calls onRateLimitHit on 403 upgrade', () => {
+    triggerClobRateLimit(429);
+    triggerClobRateLimit(403);
+    // First trigger + 403 upgrade = 2 calls
+    expect(onRateLimitHit).toHaveBeenCalledTimes(2);
+  });
+
+  it('does NOT call onRateLimitHit on duplicate 429', () => {
+    triggerClobRateLimit(429);
+    triggerClobRateLimit(429); // duplicate — should be no-op
+    expect(onRateLimitHit).toHaveBeenCalledTimes(1);
   });
 });

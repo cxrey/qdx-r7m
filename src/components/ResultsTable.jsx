@@ -3,9 +3,24 @@ import { List, useDynamicRowHeight } from 'react-window';
 import MarketRow from './MarketRow';
 import { fetchOrderBook, fetchPriceHistory } from '../api';
 import { calculateSpread } from '../SpreadFrictionEngine';
-import { fetchMarketTrades, getLeaderboardIndex, analyzeTradeFlow, getCachedTradeFlow, setCachedTradeFlow } from '../TradeFlowEngine';
-import { ROW_HEIGHT, HEADER_HEIGHT, FOOTER_HEIGHT, BANNER_HEIGHT, SPREAD_FETCH_DELAY, SPREAD_BATCH_START, FLOW_FETCH_DELAY, FLOW_BATCH_START } from '../uiConfig';
+import { fetchMarketTrades, getLeaderboardIndex, analyzeTradeFlow, peekCachedTradeFlow, setCachedTradeFlow } from '../TradeFlowEngine';
+import {
+  ROW_HEIGHT, HEADER_HEIGHT, FOOTER_HEIGHT, BANNER_HEIGHT, CYAN,
+  SPREAD_FETCH_DELAY, SPREAD_BATCH_START, FLOW_FETCH_DELAY, FLOW_BATCH_START,
+  HOVER_DEBOUNCE_DELAY, PREFETCH_CACHE_TTL, PREFETCH_LRU_CAP, SPREAD_CACHE_CAP,
+} from '../uiConfig';
 import { isClobRateLimited, triggerClobRateLimit, clearClobRateLimit, onClobRateLimitChange, getClobRecoverySeconds } from '../clobRateLimit';
+import { acquireClobSlot, hasClobSlotAvailable } from '../clobConcurrency';
+
+// LRU insert into spread cache Map (ref-based, no state)
+function updateSpreadCache(ref, marketId, value) {
+  const cache = ref.current;
+  cache.delete(marketId);       // LRU promotion: move to end of iteration order
+  cache.set(marketId, value);
+  if (cache.size > SPREAD_CACHE_CAP) {
+    cache.delete(cache.keys().next().value);  // evict oldest
+  }
+}
 
 // Single source of truth for grid column layout
 const GRID_COLS = '1fr 55px 55px 80px 75px 45px 80px 45px 60px 70px 75px 60px 58px 58px 50px 65px 75px';
@@ -15,7 +30,7 @@ const GRID_COLS = '1fr 55px 55px 80px 75px 45px 80px 45px 60px 70px 75px 60px 58
 function VirtualRow({
   index, style, ariaAttributes,
   markets, expandedMarketId, scrollWidth,
-  spreadCacheRef, flowCacheRef, priceFlashesRef, portfolioRef,
+  spreadCacheRef, priceFlashesRef, portfolioRef,
   foundInLoadedId, isApiFetched, handleToggleExpand, handleBookData,
   handleFlowData, hasPortfolio, isMarketHeld, getHeldPosition, addManualPosition,
   filters, handleRowHover, handleRowHoverEnd,
@@ -29,8 +44,6 @@ function VirtualRow({
     (isApiFetched && m._fromLookup);
 
   // Read latest values from refs — avoids rowData recreation on every cache/flash update
-  const spreadCache = spreadCacheRef.current;
-  const flowCache = flowCacheRef.current;
   const priceFlashes = priceFlashesRef.current;
 
   return (
@@ -39,32 +52,30 @@ function VirtualRow({
       onMouseEnter={() => handleRowHover(m.id, m)}
       onMouseLeave={handleRowHoverEnd}
     >
-      <div data-react-window-index={index}>
-        {isApiFetched && index === 0 && (
-          <div className="px-3 py-1.5 text-xs" style={{ color: '#00d4aa', background: 'rgba(0, 212, 170, 0.05)' }}>
-            Direct lookup result
-          </div>
-        )}
-        <MarketRow
-          market={m}
-          expanded={m.id === expandedMarketId}
-          onToggle={() => handleToggleExpand(index, m.id)}
-          detailWidth={scrollWidth}
-          highlighted={isHighlighted}
-          cachedSpread={spreadCache[m.id] ?? null}
-          onBookData={handleBookData}
-          cachedFlow={flowCache[m.id] || getCachedTradeFlow(m.id) || null}
-          onFlowData={handleFlowData}
-          hasPortfolio={hasPortfolio}
-          isMarketHeld={isMarketHeld}
-          getHeldPosition={getHeldPosition}
-          addManualPosition={addManualPosition}
-          portfolio={portfolioRef.current}
-          filters={filters}
-          gridColumns={GRID_COLS}
-          priceFlash={priceFlashes?.[m.id] || null}
-        />
-      </div>
+      {isApiFetched && index === 0 && (
+        <div className="px-3 py-1.5 text-xs" style={{ color: CYAN, background: 'rgba(0, 212, 170, 0.05)' }}>
+          Direct lookup result
+        </div>
+      )}
+      <MarketRow
+        market={m}
+        expanded={m.id === expandedMarketId}
+        onToggle={() => handleToggleExpand(index, m.id)}
+        detailWidth={scrollWidth}
+        highlighted={isHighlighted}
+        cachedSpread={spreadCacheRef.current.get(m.id) ?? null}
+        onBookData={handleBookData}
+        cachedFlow={peekCachedTradeFlow(m.id)}
+        onFlowData={handleFlowData}
+        hasPortfolio={hasPortfolio}
+        isMarketHeld={isMarketHeld}
+        getHeldPosition={getHeldPosition}
+        addManualPosition={addManualPosition}
+        portfolio={portfolioRef.current}
+        filters={filters}
+        gridColumns={GRID_COLS}
+        priceFlash={priceFlashes?.[m.id] || null}
+      />
     </div>
   );
 }
@@ -96,17 +107,15 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, port
     document.body.removeChild(outer);
   }, []);
 
-  // Spread cache: marketId -> real absoluteSpread value
-  const [spreadCache, setSpreadCache] = useState({});
-  const spreadCacheRef = useRef(spreadCache);
-  spreadCacheRef.current = spreadCache;
+  // Spread cache: marketId -> real absoluteSpread value (LRU Map, ref-only)
+  const spreadCacheRef = useRef(new Map());
+  const [, setCacheUpdateTick] = useState(0); // single tick for spread + flow batch re-renders
   const batchAbortRef = useRef(null);
   const batchQueueRef = useRef(null);
 
-  // Trade flow cache: marketId -> flow analysis data
-  const [flowCache, setFlowCache] = useState({});
-  const flowCacheRef = useRef(flowCache);
-  flowCacheRef.current = flowCache;
+  // Trade flow cache: reads from module-level cache in TradeFlowEngine.js
+  // (500 LRU, 5-min TTL — peekCachedTradeFlow for reads, setCachedTradeFlow for writes;
+  //  getCachedTradeFlow with LRU promotion is used only in TradeFlowPanel for active access)
   const flowBatchAbortRef = useRef(null);
   const flowBatchQueueRef = useRef(null);
 
@@ -134,13 +143,15 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, port
   const handleBookData = useCallback((marketId, bookData) => {
     const spread = calculateSpread(bookData);
     if (spread) {
-      setSpreadCache((prev) => ({ ...prev, [marketId]: spread.absoluteSpread }));
+      updateSpreadCache(spreadCacheRef, marketId, spread.absoluteSpread);
+      setCacheUpdateTick(t => t + 1);
     }
   }, []);
 
   // Handle trade flow data from expanded panels
   const handleFlowData = useCallback((marketId, data) => {
-    setFlowCache((prev) => ({ ...prev, [marketId]: data }));
+    setCachedTradeFlow(marketId, data);
+    setCacheUpdateTick(t => t + 1);
   }, []);
 
   // ── Virtual list sizing ──────────────────────────────────────
@@ -166,52 +177,8 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, port
     key: listKey,
   });
 
-  // Observe row elements for automatic height measurement.
-  // MutationObserver watches the inner content container for row wrapper changes
-  // during scroll virtualization. ResizeObserver handles height changes within rows.
-  useEffect(() => {
-    const listEl = listRef.current?.element;
-    if (!listEl) return;
-
-    // react-window v2 DOM: scroll container (listEl) > inner content div > row wrappers.
-    // Row wrappers (outer positioned divs) are direct children of the inner content div.
-    const innerContainer = listEl.querySelector('[style*="position: relative"]')
-      || listEl.querySelector('[style*="position:relative"]')
-      || listEl.firstElementChild;
-
-    if (!innerContainer) return;
-
-    let resizeCleanup = null;
-
-    const observeCurrentRows = () => {
-      if (resizeCleanup) {
-        resizeCleanup();
-        resizeCleanup = null;
-      }
-
-      // Query the inner measurement wrappers (NOT the outer positioned wrappers)
-      const rowElements = innerContainer.querySelectorAll('[data-react-window-index]');
-      if (rowElements.length > 0) {
-        resizeCleanup = dynamicHeight.observeRowElements(rowElements);
-      }
-    };
-
-    // Initial observation
-    observeCurrentRows();
-
-    // Watch inner container for direct child changes (react-window adding/removing
-    // row wrappers on scroll). subtree: false — only fires when outer positioned divs
-    // are added/removed, NOT when content inside rows changes.
-    const mutationObserver = new MutationObserver(() => {
-      observeCurrentRows();
-    });
-    mutationObserver.observe(innerContainer, { childList: true, subtree: false });
-
-    return () => {
-      mutationObserver.disconnect();
-      if (resizeCleanup) resizeCleanup();
-    };
-  }, [dynamicHeight, listKey]);
+  // Row observation is handled natively by react-window v2's built-in layout effect,
+  // which sets data-react-window-index on outer wrappers and calls observeRowElements.
 
   const handleToggleExpand = useCallback((index, marketId) => {
     setExpandedMarketId((prev) => prev === marketId ? null : marketId);
@@ -255,9 +222,11 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, port
     const { start, stop } = visibleRange;
     const visibleMarkets = marketsRef.current.slice(start, Math.min(stop + 1, marketsRef.current.length));
 
+    // Cap batch to actual visible row count — gap filler catches the rest
+    const visibleCount = Math.max(1, stop - start + 1);
     const toFetch = visibleMarkets
-      .filter((m) => m.clobTokenIds?.[0] && spreadCacheRef.current[m.id] == null)
-      .slice(0, 25);
+      .filter((m) => m.clobTokenIds?.[0] && !spreadCacheRef.current.has(m.id))
+      .slice(0, Math.min(visibleCount, 25));
 
     if (toFetch.length === 0) return;
 
@@ -265,28 +234,39 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, port
 
     let cancelled = false;
     const fetchSequential = async () => {
+      let fetched = 0;
       for (const market of toFetch) {
         if (cancelled || controller.signal.aborted || isClobRateLimited()) break;
+        let release;
         try {
+          release = await acquireClobSlot(controller.signal);
+          if (cancelled || controller.signal.aborted) break;
           const data = await fetchOrderBook(market.clobTokenIds[0]);
           if (cancelled || controller.signal.aborted) break;
           if (data) {
             const spread = calculateSpread(data);
             if (spread) {
-              setSpreadCache((prev) => ({ ...prev, [market.id]: spread.absoluteSpread }));
+              updateSpreadCache(spreadCacheRef, market.id, spread.absoluteSpread);
+              fetched++;
             }
           }
         } catch (err) {
+          if (err.name === 'AbortError') break;
           if (err?.status === 429 || err?.status === 403) {
             triggerClobRateLimit(err.status);
             break;
           }
-          if (err.name !== 'AbortError') console.warn('[ResultsTable] Order book fetch failed:', err);
+          console.warn('[ResultsTable] Order book fetch failed:', err);
+        } finally {
+          if (release) release();
         }
+        // Keep inter-request delay — paces this system independently
         if (!cancelled && !controller.signal.aborted) {
           await new Promise((r) => setTimeout(r, SPREAD_FETCH_DELAY));
         }
       }
+      // Single re-render after entire batch (not per-market)
+      if (fetched > 0 && !cancelled) setCacheUpdateTick(t => t + 1);
     };
 
     batchQueueRef.current = setTimeout(() => {
@@ -312,9 +292,11 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, port
     const { start, stop } = visibleRange;
     const visibleMarkets = marketsRef.current.slice(start, Math.min(stop + 1, marketsRef.current.length));
 
+    // Cap batch to actual visible row count — gap filler catches the rest
+    const visibleCount = Math.max(1, stop - start + 1);
     const toFetch = visibleMarkets
-      .filter((m) => m.conditionId && !flowCacheRef.current[m.id] && !getCachedTradeFlow(m.id))
-      .slice(0, 10);
+      .filter((m) => m.conditionId && !peekCachedTradeFlow(m.id))
+      .slice(0, Math.min(visibleCount, 10));
 
     if (toFetch.length === 0) return;
 
@@ -323,27 +305,36 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, port
     let cancelled = false;
     const fetchSeq = async () => {
       const lbIndex = getLeaderboardIndex();
+      let fetched = 0;
       for (const market of toFetch) {
         if (cancelled || controller.signal.aborted || isClobRateLimited()) break;
+        let release;
         try {
+          release = await acquireClobSlot(controller.signal);
+          if (cancelled || controller.signal.aborted) break;
           const trades = await fetchMarketTrades(market.conditionId);
           if (cancelled || controller.signal.aborted) break;
           if (trades && trades.length > 0) {
             const analysis = analyzeTradeFlow(trades, null, lbIndex, market, null);
             setCachedTradeFlow(market.id, analysis);
-            setFlowCache((prev) => ({ ...prev, [market.id]: analysis }));
+            fetched++;
           }
         } catch (err) {
+          if (err.name === 'AbortError') break;
           if (err?.status === 429 || err?.status === 403) {
             triggerClobRateLimit(err.status);
             break;
           }
-          if (err.name !== 'AbortError') console.warn('[ResultsTable] Trade flow fetch failed:', err);
+          console.warn('[ResultsTable] Trade flow fetch failed:', err);
+        } finally {
+          if (release) release();
         }
         if (!cancelled && !controller.signal.aborted) {
           await new Promise((r) => setTimeout(r, FLOW_FETCH_DELAY));
         }
       }
+      // Single re-render after entire batch (not per-market)
+      if (fetched > 0 && !cancelled) setCacheUpdateTick(t => t + 1);
     };
 
     flowBatchQueueRef.current = setTimeout(() => {
@@ -362,80 +353,109 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, port
   // market to cross a filter boundary into a visible row position).
   useEffect(() => {
     let cancelled = false;
-    const gapRunningRef = { current: false };
+    let running = false;
+    let emptyRuns = 0;
+    let timerId = null;
 
-    const gapInterval = setInterval(() => {
-      if (gapRunningRef.current || isClobRateLimited()) return;
+    const runGapFill = async () => {
+      if (cancelled || running || isClobRateLimited() || !hasClobSlotAvailable()) {
+        scheduleNext();
+        return;
+      }
 
       const { start, stop } = visibleRangeRef.current;
       const visible = marketsRef.current.slice(start, Math.min(stop + 1, marketsRef.current.length));
 
-      // Check for spread gaps
       const spreadMissing = visible
-        .filter(m => m.clobTokenIds?.[0] && spreadCacheRef.current[m.id] == null)
+        .filter(m => m.clobTokenIds?.[0] && !spreadCacheRef.current.has(m.id))
         .slice(0, 3);
-
-      // Check for flow gaps
       const flowMissing = visible
-        .filter(m => m.conditionId && !flowCacheRef.current[m.id] && !getCachedTradeFlow(m.id))
+        .filter(m => m.conditionId && !peekCachedTradeFlow(m.id))
         .slice(0, 2);
 
-      if (spreadMissing.length === 0 && flowMissing.length === 0) return;
+      if (spreadMissing.length === 0 && flowMissing.length === 0) {
+        emptyRuns++;
+        scheduleNext();
+        return;
+      }
 
-      gapRunningRef.current = true;
+      emptyRuns = 0;
+      running = true;
 
-      (async () => {
-        try {
-          // Fetch spread gaps
-          for (const market of spreadMissing) {
+      try {
+        let anySpread = false;
+        let anyFlow = false;
+
+        for (const market of spreadMissing) {
+          if (cancelled || isClobRateLimited()) break;
+          let release;
+          try {
+            release = await acquireClobSlot();
+            const data = await fetchOrderBook(market.clobTokenIds[0]);
+            if (cancelled) break;
+            if (data) {
+              const spread = calculateSpread(data);
+              if (spread) {
+                updateSpreadCache(spreadCacheRef, market.id, spread.absoluteSpread);
+                anySpread = true;
+              }
+            }
+          } catch (err) {
+            if (err?.status === 429 || err?.status === 403) {
+              triggerClobRateLimit(err.status);
+              break;
+            }
+          } finally {
+            if (release) release();
+          }
+        }
+
+        if (!cancelled) {
+          const lbIndex = getLeaderboardIndex();
+          for (const market of flowMissing) {
             if (cancelled || isClobRateLimited()) break;
+            let release;
             try {
-              const data = await fetchOrderBook(market.clobTokenIds[0]);
+              release = await acquireClobSlot();
+              const trades = await fetchMarketTrades(market.conditionId);
               if (cancelled) break;
-              if (data) {
-                const spread = calculateSpread(data);
-                if (spread) {
-                  setSpreadCache(prev => ({ ...prev, [market.id]: spread.absoluteSpread }));
-                }
+              if (trades && trades.length > 0) {
+                const analysis = analyzeTradeFlow(trades, null, lbIndex, market, null);
+                setCachedTradeFlow(market.id, analysis);
+                anyFlow = true;
               }
             } catch (err) {
               if (err?.status === 429 || err?.status === 403) {
                 triggerClobRateLimit(err.status);
                 break;
               }
+            } finally {
+              if (release) release();
             }
           }
-
-          // Fetch flow gaps
-          if (!cancelled) {
-            const lbIndex = getLeaderboardIndex();
-            for (const market of flowMissing) {
-              if (cancelled || isClobRateLimited()) break;
-              try {
-                const trades = await fetchMarketTrades(market.conditionId);
-                if (cancelled) break;
-                if (trades && trades.length > 0) {
-                  const analysis = analyzeTradeFlow(trades, null, lbIndex, market, null);
-                  setCachedTradeFlow(market.id, analysis);
-                  setFlowCache(prev => ({ ...prev, [market.id]: analysis }));
-                }
-              } catch (err) {
-                if (err?.status === 429 || err?.status === 403) {
-                  triggerClobRateLimit(err.status);
-                  break;
-                }
-              }
-            }
-          }
-        } finally {
-          gapRunningRef.current = false;
         }
-      })();
-    }, 5000);
+
+        if (!cancelled && (anySpread || anyFlow)) {
+          setCacheUpdateTick(t => t + 1);
+        }
+      } finally {
+        running = false;
+        scheduleNext();
+      }
+    };
+
+    function scheduleNext() {
+      if (cancelled || timerId) return;
+      // Back off to 15s after 3 consecutive empty checks
+      const delay = emptyRuns >= 3 ? 15000 : 5000;
+      timerId = setTimeout(() => { timerId = null; runGapFill(); }, delay);
+    }
+
+    scheduleNext();
 
     return () => {
       cancelled = true;
-      clearInterval(gapInterval);
+      if (timerId) clearTimeout(timerId);
     };
   }, []);
 
@@ -452,12 +472,12 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, port
 
   const handleRowHover = useCallback((marketId, market) => {
     const cached = prefetchCache.current.get(marketId);
-    if (cached && Date.now() - cached.timestamp < 30000) return;
+    if (cached && Date.now() - cached.timestamp < PREFETCH_CACHE_TTL) return;
 
     if (prefetchController.current) prefetchController.current.abort();
 
     // LRU eviction
-    if (prefetchCache.current.size >= 20) {
+    if (prefetchCache.current.size >= PREFETCH_LRU_CAP) {
       let oldestKey = null, oldestTime = Infinity;
       for (const [key, val] of prefetchCache.current) {
         if (val.timestamp < oldestTime) { oldestTime = val.timestamp; oldestKey = key; }
@@ -472,14 +492,27 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, port
     const timer = setTimeout(async () => {
       if (signal.aborted) return;
       if (isClobRateLimited()) return;
+      // Non-blocking check: skip prefetch entirely if all slots are busy.
+      // acquireClobSlot below would block-wait; prefetch shouldn't queue up.
+      if (!hasClobSlotAvailable()) return;
       const yesTokenId = market.clobTokenIds?.[0];
       if (!yesTokenId) return;
+
+      // Skip order book fetch if spread effect already cached it
+      const hasSpread = spreadCacheRef.current.has(marketId);
+
+      let release;
       try {
+        release = await acquireClobSlot(signal);
+        if (signal.aborted) return;
+
         const [bookData, priceHistory] = await Promise.all([
-          fetchOrderBook(yesTokenId).catch((err) => {
-            if (err?.status === 429 || err?.status === 403) triggerClobRateLimit(err.status);
-            return null;
-          }),
+          hasSpread
+            ? Promise.resolve(null)  // skip — already cached by spread effect
+            : fetchOrderBook(yesTokenId).catch((err) => {
+                if (err?.status === 429 || err?.status === 403) triggerClobRateLimit(err.status);
+                return null;
+              }),
           fetchPriceHistory(yesTokenId, '1d', null, null, null, signal).catch((err) => {
             if (err?.status === 429 || err?.status === 403) triggerClobRateLimit(err.status);
             return null;
@@ -490,8 +523,10 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, port
         }
       } catch (e) {
         if (e.name !== 'AbortError') console.warn('[Prefetch] Failed:', e);
+      } finally {
+        if (release) release();
       }
-    }, 150);
+    }, HOVER_DEBOUNCE_DELAY);
 
     signal.addEventListener('abort', () => clearTimeout(timer));
   }, []);
@@ -504,14 +539,14 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, port
   }, []);
 
   // ── Row data (stable object to avoid re-creating on every render) ──
-  // spreadCache, flowCache, priceFlashes, and portfolio are read from refs
+  // spreadCache, priceFlashes, and portfolio are read from refs
   // inside VirtualRow — NOT listed as deps here. This prevents rowData
   // recreation on every background fetch or price flash, which was the
   // primary re-render cascade source (every visible MarketRow's memo ran).
 
   const rowData = useMemo(() => ({
     markets: marketsRef.current, expandedMarketId, scrollWidth,
-    spreadCacheRef, flowCacheRef, priceFlashesRef, portfolioRef,
+    spreadCacheRef, priceFlashesRef, portfolioRef,
     foundInLoadedId, isApiFetched, handleToggleExpand, handleBookData,
     handleFlowData,
     hasPortfolio: portfolio.hasPortfolio,

@@ -13,6 +13,7 @@ import { PriceUpdateBatcher } from './PriceUpdateBatcher';
 import { fetchAllMarkets } from './api';
 import { processMarket, enrichWithBaseRate } from './processMarket';
 import { processAllInWorker } from './workerManager';
+import { triggerClobRateLimit } from './clobRateLimit';
 
 const TIER2_INTERVAL = 60 * 1000;            // 60 sec (3 requests per cycle)
 const TIER2_COOLDOWN = 30 * 1000;            // min gap between Tier 2 runs (must be < TIER2_INTERVAL)
@@ -258,9 +259,9 @@ export class RefreshManager {
       for (let page = 0; page < 3; page++) {
         const url = `${GAMMA_API}/markets?limit=100&offset=${page * 100}&active=true&closed=false&order=volume&ascending=false`;
         const res = await fetch(url);
-        if (res.status === 429) {
-          this._handleRateLimit();
-          this._opts.onToast?.({ type: 'warn', message: 'Gamma API rate limited during polling' });
+        if (res.status === 429 || res.status === 403) {
+          this._handleRateLimit(res.status);
+          this._opts.onToast?.({ type: 'warn', message: `Gamma API ${res.status === 403 ? 'forbidden' : 'rate limited'} during polling` });
           break;
         }
         if (!res.ok) break;
@@ -342,8 +343,8 @@ export class RefreshManager {
         const url = `${GAMMA_API}/markets?limit=${PAGE_SIZE}&offset=${page * PAGE_SIZE}&active=true&closed=false&order=createdAt&ascending=false&volume_num_min=100`;
         const res = await fetch(url);
 
-        if (res.status === 429) {
-          this._handleRateLimit();
+        if (res.status === 429 || res.status === 403) {
+          this._handleRateLimit(res.status);
           break;
         }
         if (!res.ok) break;
@@ -502,7 +503,10 @@ export class RefreshManager {
 
   // ── Rate Limit Management ─────────────────────────────────────
 
-  _handleRateLimit() {
+  _handleRateLimit(statusCode = 429) {
+    // Notify the shared circuit breaker so all CLOB fetches pause too
+    triggerClobRateLimit(statusCode);
+
     this._rateLimitMultiplier = Math.min(this._rateLimitMultiplier * 2, 8);
     console.warn(`[RefreshManager] Rate limited — multiplier now ${this._rateLimitMultiplier}x`);
 

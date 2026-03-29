@@ -6,7 +6,17 @@ import { BaseRateCell } from './BaseRateCard';
 import { SpreadCell } from './SpreadFrictionCard';
 import { ConjunctionCell } from './ConjunctionCard';
 import { FlowCell } from './TradeFlowPanel';
-import { ROW_HEIGHT } from '../uiConfig';
+import { ROW_HEIGHT, CYAN, PINK, AMBER } from '../uiConfig';
+
+// Pre-warm: download + parse chunk during idle time so first expand is instant
+if (typeof window !== 'undefined') {
+  const preWarm = () => import('./MarketDetailPanel');
+  if ('requestIdleCallback' in window) {
+    requestIdleCallback(preWarm, { timeout: 4000 });
+  } else {
+    setTimeout(preWarm, 2000);
+  }
+}
 
 function EdgeBadge({ score }) {
   let color = 'bg-red-900 text-red-300';
@@ -59,8 +69,8 @@ function ThetaCell({ theta }) {
   const cents = Math.abs(theta.bestTheta) * 100;
   const sign = theta.bestTheta >= 0 ? '+' : '-';
   let color = '#4b5563';
-  if (cents > 0.5) color = '#00d4aa';
-  else if (cents > 0.2) color = '#f59e0b';
+  if (cents > 0.5) color = CYAN;
+  else if (cents > 0.2) color = AMBER;
   else if (cents > 0.05) color = '#9ca3af';
 
   return (
@@ -79,10 +89,10 @@ function FLBSideCell({ flb }) {
     return <span className="text-gray-600 text-xs">--</span>;
   }
   if (flb.bestSide === 'YES') {
-    return <span className="text-xs font-semibold" style={{ color: '#00d4aa' }}>Buy Yes</span>;
+    return <span className="text-xs font-semibold" style={{ color: CYAN }}>Buy Yes</span>;
   }
   if (flb.bestSide === 'NO') {
-    return <span className="text-xs font-semibold" style={{ color: '#ff4d6a' }}>Buy No</span>;
+    return <span className="text-xs font-semibold" style={{ color: PINK }}>Buy No</span>;
   }
   return <span className="text-gray-600 text-xs">--</span>;
 }
@@ -135,7 +145,7 @@ function AddToPortfolioPopover({ market, onAdd, onClose, anchorRef }) {
             className={`flex-1 px-2 py-1 rounded text-xs font-semibold transition-colors ${
               side === 'YES' ? 'border text-white' : 'text-gray-500 border border-transparent'
             }`}
-            style={side === 'YES' ? { borderColor: '#00d4aa', background: 'rgba(0,212,170,0.1)', color: '#00d4aa' } : {}}
+            style={side === 'YES' ? { borderColor: CYAN, background: 'rgba(0,212,170,0.1)', color: CYAN } : {}}
           >
             Yes
           </button>
@@ -148,7 +158,7 @@ function AddToPortfolioPopover({ market, onAdd, onClose, anchorRef }) {
             className={`flex-1 px-2 py-1 rounded text-xs font-semibold transition-colors ${
               side === 'NO' ? 'border text-white' : 'text-gray-500 border border-transparent'
             }`}
-            style={side === 'NO' ? { borderColor: '#ff4d6a', background: 'rgba(255,77,106,0.1)', color: '#ff4d6a' } : {}}
+            style={side === 'NO' ? { borderColor: PINK, background: 'rgba(255,77,106,0.1)', color: PINK } : {}}
           >
             No
           </button>
@@ -207,7 +217,7 @@ function PortfolioDot({ marketId, hasPortfolio, isMarketHeld, getHeldPosition })
   return (
     <span
       className="inline-block w-2 h-2 rounded-full shrink-0"
-      style={{ background: '#00d4aa' }}
+      style={{ background: CYAN }}
       title={`Held: ${held?.side || '?'} ${held?.size?.toFixed(1) || ''} shares`}
     />
   );
@@ -267,7 +277,7 @@ const MarketRow = memo(function MarketRow({ market, expanded, onToggle, detailWi
 
   const rowStyle = {};
   if (highlighted) {
-    rowStyle.borderLeft = '3px solid #00d4aa';
+    rowStyle.borderLeft = `3px solid ${CYAN}`;
   } else if (showHighlightHeld) {
     rowStyle.borderLeft = '3px solid rgba(0, 212, 170, 0.4)';
   }

@@ -96,37 +96,51 @@ describe('fetchMarketHolders', () => {
     expect(result).toEqual(holders);
   });
 
-  it('does NOT throw on 429 — continues to next variant', async () => {
-    mockFetch
-      .mockResolvedValueOnce(new Response('Rate limited', { status: 429 }))
-      .mockResolvedValueOnce(new Response('Rate limited', { status: 429 }))
-      .mockResolvedValueOnce(new Response('Rate limited', { status: 429 }));
-    // Should not throw — returns null
-    const result = await fetchMarketHolders('cond-abc');
-    expect(result).toBeNull();
+  it('throws on 429 with .status property', async () => {
+    mockFetch.mockResolvedValueOnce(new Response('Rate limited', { status: 429 }));
+    const err = await fetchMarketHolders('cond-abc').catch(e => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.status).toBe(429);
+  });
+
+  it('throws on 403 with .status property', async () => {
+    mockFetch.mockResolvedValueOnce(new Response('Forbidden', { status: 403 }));
+    const err = await fetchMarketHolders('cond-abc').catch(e => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.status).toBe(403);
   });
 });
 
 // ── fetchLeaderboard ───────────────────────────────────────────────
 
 describe('fetchLeaderboard', () => {
-  it('tries 3 endpoint URLs sequentially', async () => {
-    mockFetch.mockResolvedValue(new Response('Not Found', { status: 404 }));
+  it('calls correct leaderboard URL with proper parameters', async () => {
+    const data = [{ rank: '1', proxyWallet: '0xabc', pnl: 100, vol: 5000 }];
+    mockFetch.mockResolvedValueOnce(new Response(JSON.stringify(data), { status: 200 }));
     await fetchLeaderboard();
-    expect(mockFetch).toHaveBeenCalledTimes(3);
-    expect(mockFetch.mock.calls[0][0]).toContain('/leaderboard');
-    expect(mockFetch.mock.calls[1][0]).toContain('/rankings');
-    expect(mockFetch.mock.calls[2][0]).toContain('/top-traders');
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const url = mockFetch.mock.calls[0][0];
+    expect(url).toContain('/data-api/v1/leaderboard');
+    expect(url).toContain('timePeriod=ALL');
+    expect(url).toContain('orderBy=PNL');
+    expect(url).toContain('limit=50');
   });
 
-  it('returns null when all return 404', async () => {
-    mockFetch.mockResolvedValue(new Response('Not Found', { status: 404 }));
+  it('returns null on non-200 response', async () => {
+    mockFetch.mockResolvedValueOnce(new Response('Not Found', { status: 404 }));
+    const result = await fetchLeaderboard();
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(result).toBeNull();
+  });
+
+  it('returns null on AbortError without throwing', async () => {
+    mockFetch.mockRejectedValueOnce(new DOMException('Aborted', 'AbortError'));
     const result = await fetchLeaderboard();
     expect(result).toBeNull();
   });
 
   it('returns cached result from localStorage within 24h', async () => {
-    const cached = { data: [{ rank: 1, name: 'trader1' }], ts: Date.now() };
+    const cached = { data: [{ rank: '1', proxyWallet: '0xabc' }], ts: Date.now() };
     mockLocalStorage['pm_leaderboard_cache'] = JSON.stringify(cached);
     const result = await fetchLeaderboard();
     expect(result).toEqual(cached.data);
@@ -134,7 +148,7 @@ describe('fetchLeaderboard', () => {
   });
 
   it('writes to localStorage on success', async () => {
-    const data = [{ rank: 1, name: 'top' }];
+    const data = [{ rank: '1', proxyWallet: '0xabc', pnl: 100 }];
     mockFetch.mockResolvedValueOnce(new Response(JSON.stringify(data), { status: 200 }));
     await fetchLeaderboard();
     expect(localStorage.setItem).toHaveBeenCalledWith('pm_leaderboard_cache', expect.any(String));

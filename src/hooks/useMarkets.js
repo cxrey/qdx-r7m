@@ -4,6 +4,21 @@ import { enrichWithBaseRate } from '../processMarket';
 import { processAllInWorker, terminateAnalysisWorker } from '../workerManager';
 import { fetchResolvedMarkets, computeBaseRates } from '../BaseRateEngine';
 
+// Plain map + identity check: enrichWithBaseRate returns the same reference
+// when base rate is unchanged (short-circuit), so we only create a new array
+// when at least one market was actually enriched.
+function enrichMarketsUpdater(rates) {
+  return (prev) => {
+    let changed = false;
+    const result = prev.map(m => {
+      const enriched = enrichWithBaseRate(m, rates);
+      if (enriched !== m) changed = true;
+      return enriched;
+    });
+    return changed ? result : prev;
+  };
+}
+
 export function useMarkets() {
   const [rawMarkets, setRawMarkets] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -81,10 +96,11 @@ export function useMarkets() {
           .then(({ resolvedMarkets }) => {
             if (controller.signal.aborted) return;
             const rates = computeBaseRates(resolvedMarkets);
+            if (controller.signal.aborted) return;
             baseRatesRef.current = rates;
 
             // Re-enrich markets with base rate data
-            setRawMarkets((prev) => prev.map((m) => enrichWithBaseRate(m, rates)));
+            setRawMarkets(enrichMarketsUpdater(rates));
           })
           .catch((e) => {
             if (e.name !== 'AbortError') {
@@ -103,9 +119,8 @@ export function useMarkets() {
           })
           .finally(() => setBaseRatesLoading(false));
       } else {
-        // Already have base rates, enrich immediately
-        const rates = baseRatesRef.current;
-        setRawMarkets((prev) => prev.map((m) => enrichWithBaseRate(m, rates)));
+        // Already have base rates, enrich immediately (Immer: only copy changed markets)
+        setRawMarkets(enrichMarketsUpdater(baseRatesRef.current));
       }
     } catch (err) {
       if (err.name === 'AbortError') return;

@@ -13,12 +13,7 @@ import {
   formatUsdcSize, formatTimeAgo, truncateWallet,
 } from '../TradeFlowEngine';
 import { isClobRateLimited, triggerClobRateLimit } from '../clobRateLimit';
-
-const CYAN = '#00d4aa';
-const PINK = '#ff4d6a';
-const PURPLE = '#a78bfa';
-const AMBER = '#f59e0b';
-const RED = '#ef4444';
+import { CYAN, PINK, PURPLE, AMBER, RED } from '../uiConfig';
 
 const RELIABILITY_CONFIG = {
   HIGH: { color: CYAN, bg: 'rgba(0,212,170,0.08)', border: 'rgba(0,212,170,0.3)', label: 'High Reliability' },
@@ -91,22 +86,22 @@ export default function TradeFlowPanel({ market, bookData }) {
       const walletRelevanceMap = new Map();
 
       if (lbIndex.size > 0 && trades.length > 0) {
-        const largeLbWallets = [];
         const seen = new Set();
-        trades
-          .filter((t) => {
+        const largeLbWallets = trades
+          .map((t) => {
             const w = (t.proxyWallet || t.proxy_wallet || t.maker || t.taker || t.user || '').toLowerCase();
             const size = parseFloat(t.usdcSize || t.usdc_size || t.size || 0);
-            return size >= 1000 && lbIndex.has(w) && !seen.has(w);
+            return { w, size };
           })
-          .sort((a, b) => parseFloat(b.usdcSize || b.size || 0) - parseFloat(a.usdcSize || a.size || 0))
-          .forEach((t) => {
-            const w = (t.proxyWallet || t.proxy_wallet || t.maker || t.taker || t.user || '').toLowerCase();
+          .filter(({ w, size }) => size >= 1000 && lbIndex.has(w) && !seen.has(w))
+          .sort((a, b) => b.size - a.size)
+          .reduce((acc, { w }) => {
             if (!seen.has(w)) {
               seen.add(w);
-              largeLbWallets.push({ address: w, entry: lbIndex.get(w) });
+              acc.push({ address: w, entry: lbIndex.get(w) });
             }
-          });
+            return acc;
+          }, []);
 
         // Step 3: Fetch category history for top 5 (with stagger)
         const top5 = largeLbWallets.slice(0, 5);
@@ -132,6 +127,17 @@ export default function TradeFlowPanel({ market, bookData }) {
           if (r) walletRelevanceMap.set(r.wallet, r.relevance);
         });
       }
+
+      // Re-check: background batch may have cached during our API calls
+      const cachedAfterFetch = getCachedTradeFlow(market.id);
+      if (cachedAfterFetch) {
+        setFlowData(cachedAfterFetch);
+        return;
+      }
+
+      // Yield to let React paint loading skeleton before heavy computation
+      await new Promise((r) => setTimeout(r, 0));
+      if (!mountedRef.current) return;
 
       // Step 4: Run analysis
       const analysis = analyzeTradeFlow(trades, holders, lbIndex, market, walletRelevanceMap);

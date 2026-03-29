@@ -56,12 +56,20 @@ export async function fetchMarketHolders(conditionId) {
   for (const url of urls) {
     try {
       const res = await fetch(url, { signal: withTimeout(null, TIMEOUT_DATA_API) });
+      if (res.status === 429 || res.status === 403) {
+        const err = new Error(res.status === 403 ? 'Forbidden' : 'Rate limited');
+        err.status = res.status;
+        throw err;
+      }
       if (!res.ok) continue;
       const data = await res.json();
       if (data && (Array.isArray(data) ? data.length > 0 : Object.keys(data).length > 0)) {
         return data;
       }
-    } catch { /* try next */ }
+    } catch (e) {
+      if (e?.status === 429 || e?.status === 403) throw e;
+      /* try next */
+    }
   }
   // Holders data not available — feature works without it
   return null;
@@ -79,30 +87,32 @@ export async function fetchLeaderboard() {
     }
   } catch { /* ignore */ }
 
-  // Try multiple possible endpoint patterns
-  const endpoints = [
-    `${DATA_API}/leaderboard?window=all&limit=100`,
-    `${DATA_API}/rankings?window=all&limit=100`,
-    `${DATA_API}/top-traders?limit=100`,
-  ];
+  // Official endpoint: https://data-api.polymarket.com/v1/leaderboard
+  // Proxy strips /data-api prefix → request path needs /v1/leaderboard
+  // Params: timePeriod (not "window"), limit max 50, orderBy PNL|VOL
+  const url = `${DATA_API}/v1/leaderboard?timePeriod=ALL&orderBy=PNL&limit=50`;
 
-  for (const url of endpoints) {
-    try {
-      const res = await fetch(url, { signal: withTimeout(null, TIMEOUT_DATA_API) });
-      if (!res.ok) continue;
-      const data = await res.json();
-      const list = Array.isArray(data) ? data : (data?.leaderboard || data?.rankings || data?.data || []);
-      if (list.length > 0) {
-        try {
-          localStorage.setItem(LEADERBOARD_CACHE_KEY, JSON.stringify({ data: list, ts: Date.now() }));
-        } catch { /* storage full */ }
-        return list;
-      }
-    } catch { /* try next */ }
+  try {
+    const res = await fetch(url, { signal: withTimeout(null, TIMEOUT_DATA_API) });
+    if (!res.ok) {
+      console.warn(`[TradeFlow] Leaderboard fetch failed: ${res.status}`);
+      return null;
+    }
+    const data = await res.json();
+    const list = Array.isArray(data) ? data : [];
+    if (list.length > 0) {
+      try {
+        localStorage.setItem(LEADERBOARD_CACHE_KEY, JSON.stringify({ data: list, ts: Date.now() }));
+      } catch { /* storage full */ }
+      return list;
+    }
+  } catch (err) {
+    if (err.name !== 'AbortError') {
+      console.warn('[TradeFlow] Leaderboard fetch error:', err.message);
+    }
   }
 
-  // Leaderboard not publicly available — feature degrades gracefully
-  console.info('[TradeFlow] Leaderboard API not available — trade flow analysis will work without trader rankings');
+  console.info('[TradeFlow] Leaderboard API returned no data — trade flow analysis will work without trader rankings');
   return null;
 }
 
@@ -149,19 +159,15 @@ export function buildLeaderboardIndex(leaderboardData) {
   }
   const index = new Map();
   leaderboardData.forEach((entry, i) => {
-    // Normalize wallet address fields — API may use different key names
-    const wallet = (
-      entry.proxyWallet || entry.proxy_wallet ||
-      entry.userAddress || entry.user_address ||
-      entry.address || entry.wallet || ''
-    ).toLowerCase();
+    // API returns: { proxyWallet, userName, rank, pnl, vol, xUsername, verifiedBadge, profileImage }
+    const wallet = (entry.proxyWallet || entry.proxy_wallet || '').toLowerCase();
     if (!wallet) return;
     index.set(wallet, {
-      rank: entry.rank || i + 1,
-      profit: entry.profit || entry.pnl || entry.total_pnl || 0,
-      volume: entry.volume || entry.total_volume || 0,
-      name: entry.name || null,
-      pseudonym: entry.pseudonym || entry.pseudo || null,
+      rank: entry.rank ? Number(entry.rank) : i + 1,  // API returns rank as string
+      profit: entry.pnl || entry.profit || 0,
+      volume: entry.vol || entry.volume || 0,          // API uses "vol", not "volume"
+      name: entry.userName || entry.name || null,       // API uses "userName", not "name"
+      pseudonym: entry.xUsername || entry.pseudonym || null,
     });
   });
   _leaderboardIndex = index;
@@ -696,6 +702,24 @@ export function tradeFlowEdgeBonus(flowData, structuralDirection) {
 const flowCache = new Map();
 const MAX_FLOW_CACHE = 500; // LRU cap — bounds memory for long sessions
 
+/**
+ * Read-only cache lookup — no LRU promotion.
+ * Use in render paths (VirtualRow) to avoid mutating the Map on every frame.
+ */
+export function peekCachedTradeFlow(marketId) {
+  const entry = flowCache.get(marketId);
+  if (!entry) return null;
+  if (Date.now() - entry.ts > TRADE_FLOW_TTL) {
+    flowCache.delete(marketId);
+    return null;
+  }
+  return entry.data;
+}
+
+/**
+ * Cache lookup with LRU promotion (delete + re-set moves to end of iteration order).
+ * Use in fetch-loop cache-miss checks where promotion accuracy matters.
+ */
 export function getCachedTradeFlow(marketId) {
   const entry = flowCache.get(marketId);
   if (!entry) return null;

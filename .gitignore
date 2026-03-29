@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Benchmark results (except committed baseline)
+src/__benchmarks__/results/
+!src/__benchmarks__/results/baseline.json

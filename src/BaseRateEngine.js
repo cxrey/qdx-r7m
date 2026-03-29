@@ -48,7 +48,8 @@ async function fetchResolvedPage(url, signal, maxRetries = 3) {
       const res = await fetch(url, { signal: withTimeout(signal, TIMEOUT_GAMMA_PAGE) });
       if (res.status === 429) {
         lastWas429 = true;
-        const wait = parseInt(res.headers.get('Retry-After') || '3', 10) * 1000;
+        const raw = parseInt(res.headers.get('Retry-After') || '3', 10) * 1000;
+        const wait = Math.min(Math.max(raw || 3000, 1000), 30000);
         await delay(wait);
         continue;
       }

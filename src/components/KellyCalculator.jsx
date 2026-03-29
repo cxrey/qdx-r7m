@@ -478,8 +478,11 @@ export default function KellyCalculator({ market, portfolio }) {
 
   return (
     <div className="rounded-lg border border-[#1f2937]" style={{ background: '#111827' }}>
-      {/* Header */}
-      <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+      {/* Header — click anywhere to collapse */}
+      <div
+        className="px-4 py-3 border-b border-gray-800 flex items-center justify-between cursor-pointer hover:bg-gray-800/30 transition-colors"
+        onClick={() => setCollapsed(true)}
+      >
         <div className="flex items-center gap-2">
           <span className="text-xs font-semibold text-gray-400 uppercase">Position Sizer (Kelly)</span>
           {journalSaved && (
@@ -488,17 +491,12 @@ export default function KellyCalculator({ market, portfolio }) {
         </div>
         <div className="flex items-center gap-2 relative">
           <button
-            onClick={() => setShowSettings(!showSettings)}
+            onClick={(e) => { e.stopPropagation(); setShowSettings(!showSettings); }}
             className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
           >
             Settings
           </button>
-          <button
-            onClick={() => setCollapsed(true)}
-            className="text-xs text-gray-500 hover:text-gray-300 transition-colors"
-          >
-            collapse
-          </button>
+          <span className="text-xs text-gray-500">collapse</span>
           {showSettings && (
             <SettingsPopover
               settings={settings}
