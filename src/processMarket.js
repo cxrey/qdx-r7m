@@ -1,5 +1,5 @@
 import { analyzeConjunction, conjunctionEdgeBonus } from './ConjunctionEngine';
-import { computeEffectiveFeeRate, computeFeePP, computeRoundTripCostPP, isFeeFree } from './feeCalculator';
+import { computeEffectiveFeeRate, computeFeePP, computeRoundTripCostPP, isFeeFree, FEE_PARAM_SLUGS } from './feeCalculator';
 import { analyzeFLB } from './FLBEngine';
 import { analyzeTheta } from './ThetaEngine';
 import { analyzeResolution } from './ResolutionAnalyzer';
@@ -63,6 +63,47 @@ const GAMMA_CATEGORY_MAP = {
   'legal': 'Legal',
 };
 
+// Map event tag slugs → FEE_PARAMS keys for tags that don't match directly.
+// Direct matches (crypto, sports, business, pop-culture, science, weather,
+// mentions, other) don't need entries — they match FEE_PARAMS keys already.
+const TAG_SLUG_TO_FEE_SLUG = {
+  'politics':    'us-politics',
+  'geopolitics': 'world-politics',
+  'tech':        'technology',
+  'economy':     'economics',
+  'finance':     'business',
+  'legal':       'other',
+};
+
+// Last-resort fallback: map display category → fee slug for markets with no tags.
+const DISPLAY_TO_FEE_SLUG = {
+  'Politics':    'us-politics',
+  'Crypto':      'crypto',
+  'Sports':      'sports',
+  'Finance':     'business',
+  'Geopolitics': 'world-politics',
+  'Tech':        'technology',
+  'Pop Culture': 'pop-culture',
+  'Science':     'science',
+  'Legal':       'other',
+  'Other':       'other',
+};
+
+/**
+ * Extract fee category slug from event tags array.
+ * Returns the first tag slug that matches a FEE_PARAMS key (directly or via mapping).
+ */
+function extractFeeCategoryFromTags(tags) {
+  if (!Array.isArray(tags) || tags.length === 0) return null;
+  for (const tag of tags) {
+    const slug = tag?.slug?.toLowerCase();
+    if (!slug) continue;
+    if (FEE_PARAM_SLUGS.has(slug)) return slug;
+    if (slug in TAG_SLUG_TO_FEE_SLUG) return TAG_SLUG_TO_FEE_SLUG[slug];
+  }
+  return null;
+}
+
 const _loggedSlugs = new Set();
 
 /** Safely coerce to finite number or null. Rejects NaN/Infinity/empty strings from bad API data. */
@@ -118,13 +159,15 @@ export function processMarket(market) {
   const slug = market.events?.[0]?.slug || market.slug || '';
   // Prefer Gamma's own categorization when mapped, fall back to regex
   const rawCategory = market.category || null;
-  const gammaCategory = rawCategory; // raw slug for fee lookup (extracted early for FLB)
   const mappedCategory = rawCategory ? GAMMA_CATEGORY_MAP[rawCategory.toLowerCase()] : null;
   if (rawCategory && !mappedCategory && !_loggedSlugs.has(rawCategory)) {
     _loggedSlugs.add(rawCategory);
     console.debug('[processMarket] Unmapped Gamma category slug:', rawCategory);
   }
   const category = mappedCategory || inferCategory(question, slug);
+  // Fee slug: prefer API category field, then event tags, then inferred display category
+  const tagCategory = extractFeeCategoryFromTags(market.events?.[0]?.tags);
+  const gammaCategory = rawCategory || tagCategory || DISPLAY_TO_FEE_SLUG[category] || null;
 
   let resolutionAnalysis = null;
   try {

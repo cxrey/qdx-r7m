@@ -334,7 +334,7 @@ describe('processMarket', () => {
     expect(m.volume1mo).toBeNull();
     expect(m.acceptingOrders).toBeNull();
     expect(m.feesEnabled).toBe(false);
-    expect(m.gammaCategory).toBeNull();
+    expect(m.gammaCategory).toBe('other'); // no API category or tags → inferred 'Other' → fee slug 'other'
   });
 
   it('extracts openInterest from events[0]', () => {

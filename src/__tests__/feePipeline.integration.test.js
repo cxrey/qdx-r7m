@@ -177,4 +177,54 @@ describe('Fee pipeline integration', () => {
     // Filtered result should be <= unfiltered (it removes non-positive edges)
     expect(filtered.length).toBeLessThanOrEqual(unfiltered.length);
   });
+
+  describe('gammaCategory derivation from event tags', () => {
+    it('direct tag match: crypto tag on non-crypto question gets crypto fee slug', () => {
+      // Question has no crypto keywords — proves gammaCategory came from tag, not inferCategory
+      const m = processMarket(makeRawMarket({
+        id: 'tag-1',
+        question: 'Will it rain tomorrow?',
+        category: undefined,
+        feesEnabled: true,
+        events: [{ slug: 'rain', tags: [{ label: 'Crypto', slug: 'crypto' }] }],
+      }));
+      expect(m.gammaCategory).toBe('crypto');
+      expect(m.effectiveTakerFee).toBeCloseTo(0.018, 6);
+    });
+
+    it('mapped tag: politics tag resolves to us-politics fee slug', () => {
+      const m = processMarket(makeRawMarket({
+        id: 'tag-2',
+        question: 'Will it rain tomorrow?',
+        category: undefined,
+        feesEnabled: true,
+        events: [{ slug: 'rain', tags: [{ label: 'Politics', slug: 'politics' }] }],
+      }));
+      expect(m.gammaCategory).toBe('us-politics');
+    });
+
+    it('no tags falls through to DISPLAY_TO_FEE_SLUG via inferCategory', () => {
+      // "Bitcoin" in question → inferCategory returns 'Crypto' → DISPLAY_TO_FEE_SLUG → 'crypto'
+      const m = processMarket(makeRawMarket({
+        id: 'tag-3',
+        question: 'Will Bitcoin hit $300K?',
+        category: undefined,
+        feesEnabled: true,
+        events: [{ slug: 'btc' }],
+      }));
+      expect(m.gammaCategory).toBe('crypto');
+      expect(m.effectiveTakerFee).toBeCloseTo(0.018, 6);
+    });
+
+    it('rawCategory (if ever present) takes priority over tags', () => {
+      const m = processMarket(makeRawMarket({
+        id: 'tag-4',
+        question: 'Will it rain?',
+        category: 'sports',
+        feesEnabled: true,
+        events: [{ slug: 'rain', tags: [{ label: 'Crypto', slug: 'crypto' }] }],
+      }));
+      expect(m.gammaCategory).toBe('sports');
+    });
+  });
 });
