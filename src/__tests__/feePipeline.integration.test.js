@@ -47,8 +47,7 @@ const DEFAULT_FILTERS = {
   baseRateConfidence: null,
   sortBy: 'edgeScore',
   sortAsc: false,
-  _executionStyle: 'taker',
-};
+  };
 
 const NO_LOOKUP = { isLookupActive: false, fetchedMarkets: [], foundInLoadedId: null };
 const NO_PORTFOLIO = { hasPortfolio: false, isMarketHeld: () => false };
@@ -114,10 +113,11 @@ describe('Fee pipeline integration', () => {
 
     const sorted = filterAndSort({
       markets,
-      filters: { ...DEFAULT_FILTERS, sortBy: 'fee', sortAsc: true, _executionStyle: 'taker' },
+      filters: { ...DEFAULT_FILTERS, sortBy: 'fee', sortAsc: true },
       searchLower: '',
       lookupState: NO_LOOKUP,
       portfolio: NO_PORTFOLIO,
+      executionStyle: 'taker',
     });
 
     // Ascending by taker fee: free (0) < sports < crypto
@@ -140,10 +140,11 @@ describe('Fee pipeline integration', () => {
 
     const sorted = filterAndSort({
       markets,
-      filters: { ...DEFAULT_FILTERS, sortBy: 'fee', sortAsc: true, _executionStyle: 'maker' },
+      filters: { ...DEFAULT_FILTERS, sortBy: 'fee', sortAsc: true },
       searchLower: '',
       lookupState: NO_LOOKUP,
       portfolio: NO_PORTFOLIO,
+      executionStyle: 'maker',
     });
 
     // Maker sort uses negated makerRebatePP — larger rebate → more negative → sorts first ascending

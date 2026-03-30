@@ -13,9 +13,10 @@ import { perfStart, perfEnd } from '../perfMonitor';
  * @param {string}   opts.searchLower     — pre-lowercased search text
  * @param {object}   opts.lookupState     — { isLookupActive, fetchedMarkets, foundInLoadedId }
  * @param {object}   opts.portfolio       — { hasPortfolio, isMarketHeld }
+ * @param {string}   [opts.executionStyle='taker'] — 'maker' or 'taker', controls fee filter/sort behavior
  * @returns {object[]} filtered and sorted markets
  */
-export function filterAndSort({ markets, filters, searchLower, lookupState, portfolio }) {
+export function filterAndSort({ markets, filters, searchLower, lookupState, portfolio, executionStyle = 'taker' }) {
   const { isLookupActive, fetchedMarkets, foundInLoadedId } = lookupState;
 
   // If we have fetched markets from API lookup, show only those
@@ -77,7 +78,7 @@ export function filterAndSort({ markets, filters, searchLower, lookupState, port
       if (filters.hideDeadMoney && m.theta?.zones?.includes('DEAD_MONEY')) continue;
       if (filters.hideEfficient && m.volumeEfficiency?.priority === 'EFFICIENT') continue;
       if (filters.positiveEdgeAfterFees) {
-        const netEdge = filters._executionStyle === 'maker' ? m.flb?.netEdgeMaker : m.flb?.netEdgeTaker;
+        const netEdge = executionStyle === 'maker' ? m.flb?.netEdgeMaker : m.flb?.netEdgeTaker;
         if (netEdge == null || netEdge <= 0) continue;
       }
 
@@ -147,7 +148,7 @@ export function filterAndSort({ markets, filters, searchLower, lookupState, port
       case 'walletImbalance':
         av = Math.abs(a._flowImbalance ?? 0); bv = Math.abs(b._flowImbalance ?? 0); break;
       case 'fee':
-        if (filters._executionStyle === 'maker') {
+        if (executionStyle === 'maker') {
           av = -(a.flb?.makerRebatePP ?? 0); bv = -(b.flb?.makerRebatePP ?? 0);
         } else {
           av = a.effectiveTakerFee ?? 0; bv = b.effectiveTakerFee ?? 0;

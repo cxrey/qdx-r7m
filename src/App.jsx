@@ -243,10 +243,11 @@ function App() {
   const filteredMarkets = useMemo(() => {
     return filterAndSort({
       markets: rawMarketsRef.current,
-      filters: { ...filters, _executionStyle: executionStyle },
+      filters,
       searchLower,
       lookupState: { isLookupActive, fetchedMarkets, foundInLoadedId },
       portfolio,
+      executionStyle,
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [marketsVersion, searchLower, filters, executionStyle, isLookupActive, fetchedMarkets, foundInLoadedId, portfolio.hasPortfolio, portfolio.isMarketHeld]);
