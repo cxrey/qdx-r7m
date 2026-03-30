@@ -11,6 +11,14 @@
  */
 
 // Fee parameters by Gamma category slug (March 30, 2026 values)
+//
+// Verified 2026-03-30: No dedicated fee API endpoint exists.
+//   - CLOB /fees, /fee-rate, /v1/fees, /v1/fee-rate → 404
+//   - CLOB /markets has maker_base_fee/taker_base_fee fields, but all values are 0
+//   - Gamma /markets has feesEnabled (false on all markets) and feeType (null)
+//   - Gamma /markets does NOT return a category field; category comes from event tags
+// Values below are sourced from Polymarket docs, not verified against live API.
+// Re-verify when feesEnabled flips to true on any market.
 const FEE_PARAMS = {
   'crypto':             { feeRate: 0.072, exponent: 1,   makerRebatePct: 0.20 },
   'sports':             { feeRate: 0.03,  exponent: 1,   makerRebatePct: 0.25 },
@@ -28,6 +36,9 @@ const FEE_PARAMS = {
   'other':              { feeRate: 0.2,   exponent: 2,   makerRebatePct: 0.25 },
   '_default':           { feeRate: 0.04,  exponent: 1,   makerRebatePct: 0.25 },
 };
+
+/** Set of valid fee category slugs (excludes '_default'). Used by processMarket to match event tags. */
+export const FEE_PARAM_SLUGS = new Set(Object.keys(FEE_PARAMS).filter(k => k !== '_default'));
 
 /**
  * Get fee parameters for a category. Returns default for unmapped slugs.
