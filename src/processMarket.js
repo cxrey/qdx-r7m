@@ -17,6 +17,10 @@ import {
   VOLUME_EFFICIENCY_SCORES,
   BASE_RATE_GAP_LARGE, BASE_RATE_GAP_SMALL,
   BASE_RATE_NARRATIVE_PREMIUM_SCORE, BASE_RATE_NARRATIVE_DISCOUNT_SCORE, BASE_RATE_DEFAULT_SCORE,
+  FEE_IMPACT_HIGH_THRESHOLD, FEE_IMPACT_HIGH_PENALTY,
+  FEE_IMPACT_MODERATE_THRESHOLD, FEE_IMPACT_MODERATE_PENALTY,
+  FEE_IMPACT_LOW_THRESHOLD, FEE_IMPACT_LOW_PENALTY,
+  FEE_FREE_BONUS,
   MAX_EDGE_SCORE,
 } from './scoringConfig';
 
@@ -260,7 +264,8 @@ export function processMarket(market) {
 
 export function calculateEdgeScore(market) {
   const { volume, yesPrice, noPrice, daysLeft, spread, flb, theta,
-          resolutionAnalysis, volumeEfficiency, baseRate, conjunction } = market;
+          resolutionAnalysis, volumeEfficiency, baseRate, conjunction,
+          takerFeePP, feeFree } = market;
 
   let score = 0;
 
@@ -339,6 +344,18 @@ export function calculateEdgeScore(market) {
   // Conjunction bonus
   if (conjunction) {
     score += conjunctionEdgeBonus(conjunction);
+  }
+
+  // Fee impact penalty/bonus
+  const rawEdgeDecimal = flb?.bestEdge || 0;
+  const rawEdgePP = rawEdgeDecimal * 100;
+  if (takerFeePP > 0 && rawEdgePP > 0) {
+    const feeImpact = takerFeePP / rawEdgePP;
+    if (feeImpact > FEE_IMPACT_HIGH_THRESHOLD) score += FEE_IMPACT_HIGH_PENALTY;
+    else if (feeImpact > FEE_IMPACT_MODERATE_THRESHOLD) score += FEE_IMPACT_MODERATE_PENALTY;
+    else if (feeImpact > FEE_IMPACT_LOW_THRESHOLD) score += FEE_IMPACT_LOW_PENALTY;
+  } else if (feeFree) {
+    score += FEE_FREE_BONUS;
   }
 
   return Math.min(MAX_EDGE_SCORE, score);

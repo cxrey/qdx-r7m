@@ -289,6 +289,21 @@ export default function ThetaCard({ theta, market, priceHistory }) {
             Favors {theta.bestSide === 'YES' ? 'Yes' : 'No'}
           </span>
         </div>
+        <div className="flex justify-between col-span-2">
+          <span className="text-[#9ca3af]">Break-Even</span>
+          {market.feeFree ? (
+            <span className="text-emerald-400 font-semibold">Immediate (fee-free)</span>
+          ) : market.thetaBreakEvenDays != null ? (
+            <span style={{ color:
+              market.thetaBreakEvenDays > market.daysLeft ? '#ef4444' :
+              market.thetaBreakEvenDays > market.daysLeft * 0.5 ? AMBER : CYAN
+            }} className="font-semibold">
+              {market.thetaBreakEvenDays}d (hold {market.thetaBreakEvenDays}+ days)
+            </span>
+          ) : (
+            <span className="text-gray-500">N/A</span>
+          )}
+        </div>
       </div>
 
       {/* Information Residual */}

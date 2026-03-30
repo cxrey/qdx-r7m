@@ -363,6 +363,11 @@ export default function MarketDetailPanel({ market, onBookData, onFlowData, onLi
           {/* Trading Costs */}
           <TradingCostsCard market={market} />
 
+          {/* Fee at different prices */}
+          {market.feesEnabled && !market.feeFree && (
+            <FeePriceBandCard market={market} />
+          )}
+
           {/* Base Rate Analysis */}
           <BaseRateCard baseRate={market.baseRate} flb={market.flb} />
 
@@ -400,6 +405,43 @@ export default function MarketDetailPanel({ market, onBookData, onFlowData, onLi
           </a>
         </div>
       </div>
+    </div>
+  );
+}
+
+const PRICE_BAND_POINTS = [0.20, 0.35, 0.50, 0.65, 0.80, 0.95];
+
+function FeePriceBandCard({ market }) {
+  const rows = PRICE_BAND_POINTS.map(p => {
+    const feePP = computeFeePP(p, market.gammaCategory, true);
+    const feeRate = feePP / (p * 100); // back to rate for display
+    const isCurrent = market.yesPrice != null && Math.abs(p - market.yesPrice) < 0.075;
+    return { price: p, feePP, feeRate, isCurrent };
+  });
+  // Find sweet spot: price range where feePP < 0.25pp
+  const sweetSpot = PRICE_BAND_POINTS.filter(p =>
+    computeFeePP(p, market.gammaCategory, true) < 0.25
+  );
+  const sweetLabel = sweetSpot.length > 0
+    ? `${(sweetSpot[0] * 100).toFixed(0)}-${(sweetSpot[sweetSpot.length - 1] * 100).toFixed(0)}¢`
+    : null;
+
+  return (
+    <div className="rounded-lg border border-[#1f2937] p-4" style={{ background: '#111827' }}>
+      <div className="text-xs font-semibold text-gray-400 uppercase mb-2">Fee by Price</div>
+      <div className="space-y-0.5 text-xs font-mono">
+        {rows.map(r => (
+          <div key={r.price} className={`flex justify-between ${r.isCurrent ? 'text-gray-100 font-semibold' : 'text-gray-400'}`}>
+            <span>{(r.price * 100).toFixed(0)}¢{r.isCurrent ? ' ←' : ''}</span>
+            <span>{r.feePP.toFixed(2)}pp ({(r.feeRate * 100).toFixed(2)}%)</span>
+          </div>
+        ))}
+      </div>
+      {sweetLabel && (
+        <div className="mt-2 text-xs text-emerald-400">
+          Sweet spot: {sweetLabel} where fee &lt; 0.25pp
+        </div>
+      )}
     </div>
   );
 }

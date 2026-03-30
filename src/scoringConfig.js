@@ -103,5 +103,16 @@ export const BASE_RATE_NARRATIVE_PREMIUM_SCORE = 10;
 export const BASE_RATE_NARRATIVE_DISCOUNT_SCORE = 8;
 export const BASE_RATE_DEFAULT_SCORE = 5;
 
+// --- Fees ---
+// Fee impact = takerFeePP / rawEdgePP. Higher impact means fees eat more of the edge.
+// Fee-free markets get a structural bonus.
+export const FEE_IMPACT_HIGH_THRESHOLD = 0.75;
+export const FEE_IMPACT_HIGH_PENALTY = -5;
+export const FEE_IMPACT_MODERATE_THRESHOLD = 0.50;
+export const FEE_IMPACT_MODERATE_PENALTY = -3;
+export const FEE_IMPACT_LOW_THRESHOLD = 0.25;
+export const FEE_IMPACT_LOW_PENALTY = -1;
+export const FEE_FREE_BONUS = 2;
+
 // --- Global ---
 export const MAX_EDGE_SCORE = 100;
