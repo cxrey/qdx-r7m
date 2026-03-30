@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect, memo, lazy, Suspense } from 'react';
 import { usePortfolioContext } from '../contexts/PortfolioContext';
+import { useExecutionStyle } from '../contexts/ExecutionContext';
 const MarketDetailPanel = lazy(() => import('./MarketDetailPanel'));
 import { RulesCell } from './ResolutionCard';
 import { VolPriceCell } from './VolumeEfficiencyCard';
@@ -37,11 +38,15 @@ function EdgeBadge({ score, failures }) {
 
 
 function FeeCell({ market }) {
+  const { isMaker } = useExecutionStyle();
   if (market.feeFree) {
     return <span className="text-emerald-400 text-[9px] font-bold uppercase">Fee-Free</span>;
   }
   if (market.effectiveTakerFee == null || market.effectiveTakerFee === 0) {
     return <span className="text-gray-600 text-xs">&mdash;</span>;
+  }
+  if (isMaker && market.flb?.makerRebatePP > 0) {
+    return <span className="text-emerald-400 text-xs">+{market.flb.makerRebatePP.toFixed(1)}pp</span>;
   }
   const pct = market.effectiveTakerFee * 100;
   let colorClass = 'text-emerald-400';
@@ -51,14 +56,17 @@ function FeeCell({ market }) {
 }
 
 function FLBEdgeCell({ flb }) {
+  const { isMaker } = useExecutionStyle();
   if (!flb || flb.bestEdge == null) return <span className="text-gray-600 text-xs">--</span>;
-  const edgePp = flb.bestEdgeAfterSpread * 100;
+  const netEdge = isMaker ? flb.netEdgeMaker : flb.netEdgeTaker;
+  const edgePp = (netEdge ?? flb.bestEdgeAfterSpread) * 100;
   const rawPp = flb.bestEdge * 100;
   let colorClass = 'text-gray-500';
   if (edgePp > 3) colorClass = 'text-emerald-400';
   else if (edgePp > 1.5) colorClass = 'text-yellow-400';
+  else if (edgePp <= 0) colorClass = 'text-red-400';
 
-  if (flb.spreadKillsEdge) {
+  if (flb.spreadKillsEdge && !isMaker) {
     return (
       <span className="text-gray-500 text-xs line-through" title="Spread eats edge">
         {rawPp.toFixed(1)}pp

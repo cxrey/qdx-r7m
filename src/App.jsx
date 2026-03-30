@@ -11,6 +11,7 @@ import { useDebounce } from './hooks/useDebounce';
 import { useDirectLookup } from './hooks/useDirectLookup';
 import { usePortfolio } from './hooks/usePortfolio';
 import { PortfolioProvider } from './contexts/PortfolioContext';
+import { useExecutionStyle } from './contexts/ExecutionContext';
 import { ALL_CATEGORIES } from './processMarket';
 import { fetchLeaderboard, buildLeaderboardIndex } from './TradeFlowEngine';
 import { filterAndSort } from './utils/filterAndSort';
@@ -22,6 +23,7 @@ import { DEFAULT_FILTERS } from './filterDefaults';
 function App() {
   const { rawMarkets, setRawMarkets, loading, error, progress, lastFetch, baseRatesLoading, gammaRateLimited, refresh, baseRatesRef } = useMarkets();
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
+  const { executionStyle } = useExecutionStyle();
 
   // Ref always points to latest markets array without triggering re-renders
   const rawMarketsRef = useRef(rawMarkets);
@@ -241,13 +243,13 @@ function App() {
   const filteredMarkets = useMemo(() => {
     return filterAndSort({
       markets: rawMarketsRef.current,
-      filters,
+      filters: { ...filters, _executionStyle: executionStyle },
       searchLower,
       lookupState: { isLookupActive, fetchedMarkets, foundInLoadedId },
       portfolio,
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [marketsVersion, searchLower, filters, isLookupActive, fetchedMarkets, foundInLoadedId, portfolio.hasPortfolio, portfolio.isMarketHeld]);
+  }, [marketsVersion, searchLower, filters, executionStyle, isLookupActive, fetchedMarkets, foundInLoadedId, portfolio.hasPortfolio, portfolio.isMarketHeld]);
 
   const handleFiltersChange = useCallback((updater) => {
     setFilters(updater);

@@ -76,6 +76,10 @@ export function filterAndSort({ markets, filters, searchLower, lookupState, port
       if (filters.flbOnly && !m.flb?.isBiasOpportunity) continue;
       if (filters.hideDeadMoney && m.theta?.zones?.includes('DEAD_MONEY')) continue;
       if (filters.hideEfficient && m.volumeEfficiency?.priority === 'EFFICIENT') continue;
+      if (filters.positiveEdgeAfterFees) {
+        const netEdge = filters._executionStyle === 'maker' ? m.flb?.netEdgeMaker : m.flb?.netEdgeTaker;
+        if (netEdge == null || netEdge <= 0) continue;
+      }
 
       // Resolution types
       if (hasResTypes) {

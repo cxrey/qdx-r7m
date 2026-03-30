@@ -1,6 +1,7 @@
 import { useCallback, useMemo } from 'react';
 import DualRangeSlider from './DualRangeSlider';
 import { DEFAULT_FILTERS } from '../filterDefaults';
+import { useExecutionStyle } from '../contexts/ExecutionContext';
 
 const SORT_OPTIONS = [
   { value: 'edgeScore', label: 'Edge Score' },
@@ -58,6 +59,7 @@ function filtersEqual(a, b) {
 }
 
 export default function FilterPanel({ filters, setFilters, categories, hasPortfolio }) {
+  const { executionStyle, setExecutionStyle } = useExecutionStyle();
   const update = (key, val) => setFilters((f) => ({ ...f, [key]: val }));
 
   const hasActiveFilters = useMemo(() => {
@@ -101,6 +103,36 @@ export default function FilterPanel({ filters, setFilters, categories, hasPortfo
           </button>
         </div>
       )}
+
+      {/* Execution Style Toggle */}
+      <div className="mb-4">
+        <div className="text-xs font-semibold text-gray-400 uppercase mb-1">Execution Style</div>
+        <div className="flex rounded overflow-hidden border border-gray-700">
+          <button
+            onClick={() => setExecutionStyle('taker')}
+            className={`flex-1 text-xs py-1.5 font-semibold transition-colors ${executionStyle === 'taker' ? 'bg-gray-700 text-gray-100' : 'bg-gray-800 text-gray-500 hover:text-gray-300'}`}
+          >
+            Taker
+          </button>
+          <button
+            onClick={() => setExecutionStyle('maker')}
+            className={`flex-1 text-xs py-1.5 font-semibold transition-colors ${executionStyle === 'maker' ? 'bg-emerald-900/60 text-emerald-300' : 'bg-gray-800 text-gray-500 hover:text-gray-300'}`}
+          >
+            Maker
+          </button>
+        </div>
+      </div>
+
+      {/* Positive Edge After Fees Filter */}
+      <label className="flex items-center gap-2 mb-4 text-sm cursor-pointer select-none">
+        <input
+          type="checkbox"
+          checked={filters.positiveEdgeAfterFees || false}
+          onChange={(e) => update('positiveEdgeAfterFees', e.target.checked)}
+          className="accent-emerald-400"
+        />
+        <span className="text-gray-300">Positive edge after fees only</span>
+      </label>
 
       {/* Volume Range */}
       <DualRangeSlider

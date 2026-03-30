@@ -1,4 +1,5 @@
 import AnalysisCard from './AnalysisCard';
+import { useExecutionStyle } from '../contexts/ExecutionContext';
 
 const CYAN = '#00d4aa';
 const PINK = '#ff4d6a';
@@ -88,6 +89,7 @@ function recColor(rec) {
 }
 
 export default function FLBCard({ flb, yesPrice, noPrice }) {
+  const { isMaker } = useExecutionStyle();
   if (!flb || flb.adjustedYesProb == null) {
     return (
       <AnalysisCard title="FLB Analysis" emptyWhen emptyMessage="Insufficient data for FLB analysis." />

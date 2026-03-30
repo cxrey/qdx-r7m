@@ -14,7 +14,7 @@ import ConjunctionCard from './ConjunctionCard';
 import PortfolioImpact from './PortfolioImpact';
 import TradeFlowPanel from './TradeFlowPanel';
 import { formatVolume } from '../formatters';
-import { computeRoundTripCostPP } from '../feeCalculator';
+import { computeRoundTripCostPP, computeFeePP } from '../feeCalculator';
 
 // Code-split heavy components
 const KellyCalculator = lazy(() => import('./KellyCalculator'));
@@ -458,6 +458,11 @@ function TradingCostsCard({ market }) {
           </>
         )}
       </div>
+      {market.takerFeePP > 0 && (
+        <div className="mt-2 text-xs text-gray-500">
+          Geopolitics markets are fee-free (saves {market.takerFeePP.toFixed(2)}pp per trade)
+        </div>
+      )}
     </div>
   );
 }
