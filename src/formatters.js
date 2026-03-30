@@ -4,6 +4,7 @@
  */
 
 export function formatVolume(v) {
+  if (v == null || isNaN(v)) return '\u2014';
   if (v >= 1_000_000) return `$${(v / 1_000_000).toFixed(1)}M`;
   if (v >= 1_000) return `$${(v / 1_000).toFixed(1)}K`;
   return `$${v.toFixed(0)}`;
@@ -31,6 +32,7 @@ export function formatPct(val) {
 }
 
 export function formatTimeAgo(timestamp) {
+  if (timestamp == null || isNaN(timestamp)) return '\u2014';
   const now = Date.now() / 1000;
   const diff = now - timestamp;
   if (diff < 60) return 'just now';
