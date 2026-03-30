@@ -56,7 +56,7 @@ function filtersEqual(a, b) {
   return false;
 }
 
-export default function FilterPanel({ filters, setFilters, categories, lookupState, onPaste, onClearSearch, hasPortfolio }) {
+export default function FilterPanel({ filters, setFilters, categories, hasPortfolio }) {
   const update = (key, val) => setFilters((f) => ({ ...f, [key]: val }));
 
   const hasActiveFilters = useMemo(() => {
@@ -69,21 +69,6 @@ export default function FilterPanel({ filters, setFilters, categories, lookupSta
   const handleReset = useCallback(() => {
     setFilters(prev => ({ ...DEFAULT_FILTERS, search: prev.search }));
   }, [setFilters]);
-
-  const handlePaste = useCallback((e) => {
-    if (!onPaste) return;
-    e.preventDefault();
-    const pasted = (e.clipboardData || window.clipboardData).getData('text');
-    const cleaned = pasted.trim().replace(/^["']+|["']+$/g, '');
-    // Set the search value and trigger immediate lookup
-    update('search', cleaned);
-    onPaste(cleaned);
-  }, [onPaste, update]);
-
-  const handleClear = useCallback(() => {
-    update('search', '');
-    if (onClearSearch) onClearSearch();
-  }, [update, onClearSearch]);
 
   const toggleCategory = useCallback((cat) => {
     setFilters((f) => {
@@ -105,62 +90,16 @@ export default function FilterPanel({ filters, setFilters, categories, lookupSta
 
   return (
     <div className="w-full lg:w-72 shrink-0 bg-gray-900 border-r border-gray-800 p-4 overflow-y-auto">
-      {/* Search */}
-      <div className="mb-4">
-        <div className="flex items-center justify-between">
-          <label className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Search</label>
-          {hasActiveFilters && (
-            <button
-              onClick={handleReset}
-              className="text-xs text-gray-500 hover:text-gray-200 transition-colors"
-            >
-              Reset
-            </button>
-          )}
+      {hasActiveFilters && (
+        <div className="mb-3 flex justify-end">
+          <button
+            onClick={handleReset}
+            className="text-xs text-gray-500 hover:text-gray-200 transition-colors"
+          >
+            Reset filters
+          </button>
         </div>
-        <div className="mt-1 relative">
-          <input
-            type="text"
-            placeholder="Search markets or paste a Polymarket link..."
-            value={filters.search}
-            onChange={(e) => update('search', e.target.value)}
-            onPaste={handlePaste}
-            className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 pr-8 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-emerald-500"
-          />
-          {/* Clear button */}
-          {filters.search && (
-            <button
-              onClick={handleClear}
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300 text-sm leading-none"
-              title="Clear search"
-            >
-              ✕
-            </button>
-          )}
-        </div>
-        {/* Link detection indicator */}
-        {lookupState?.isLookupActive && (
-          <div className="mt-1">
-            {lookupState.lookupLoading ? (
-              <span className="text-xs" style={{ color: '#00d4aa' }}>
-                ⏳ Searching Polymarket...
-              </span>
-            ) : (
-              <span className="text-xs" style={{ color: '#00d4aa' }}>
-                Market link detected
-              </span>
-            )}
-          </div>
-        )}
-        {/* Lookup error */}
-        {lookupState?.lookupError && (
-          <div className="mt-1">
-            <span className="text-xs" style={{ color: '#f59e0b' }}>
-              {lookupState.lookupError}
-            </span>
-          </div>
-        )}
-      </div>
+      )}
 
       {/* Volume Range */}
       <DualRangeSlider

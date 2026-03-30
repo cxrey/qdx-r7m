@@ -217,6 +217,18 @@ function App() {
     runLookup(cleanedValue, true);
   }, [runLookup]);
 
+  const handleSearchChange = useCallback((e) => {
+    setFilters((f) => ({ ...f, search: e.target.value }));
+  }, []);
+
+  const handleSearchPaste = useCallback((e) => {
+    e.preventDefault();
+    const pasted = (e.clipboardData || window.clipboardData).getData('text');
+    const cleaned = pasted.trim().replace(/^["']+|["']+$/g, '');
+    setFilters((f) => ({ ...f, search: cleaned }));
+    runLookup(cleaned, true);
+  }, [runLookup]);
+
   const handleClearSearch = useCallback(() => {
     clearLookup();
     setFilters((f) => ({ ...f, search: '' }));
@@ -276,6 +288,42 @@ function App() {
             </span>
           )}
         </div>
+
+        {/* Search Bar */}
+        <div className="flex-1 max-w-md mx-4 relative">
+          <input
+            type="text"
+            placeholder="Search markets or paste a Polymarket link..."
+            value={filters.search}
+            onChange={handleSearchChange}
+            onPaste={handleSearchPaste}
+            className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-1.5 pr-8 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-emerald-500"
+          />
+          {filters.search && (
+            <button
+              onClick={handleClearSearch}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300 text-sm leading-none"
+              title="Clear search"
+            >
+              ✕
+            </button>
+          )}
+          {lookup.isLookupActive && (
+            <div className="absolute left-0 top-full mt-1">
+              {lookup.lookupLoading ? (
+                <span className="text-xs" style={{ color: '#00d4aa' }}>⏳ Searching Polymarket...</span>
+              ) : (
+                <span className="text-xs" style={{ color: '#00d4aa' }}>Market link detected</span>
+              )}
+            </div>
+          )}
+          {lookup.lookupError && (
+            <div className="absolute left-0 top-full mt-1">
+              <span className="text-xs" style={{ color: '#f59e0b' }}>{lookup.lookupError}</span>
+            </div>
+          )}
+        </div>
+
         <div className="flex items-center gap-3">
           {/* Auto-refresh toggle */}
           <button
@@ -359,9 +407,6 @@ function App() {
             filters={filters}
             setFilters={handleFiltersChange}
             categories={ALL_CATEGORIES}
-            lookupState={lookup}
-            onPaste={handlePaste}
-            onClearSearch={handleClearSearch}
             hasPortfolio={portfolio.hasPortfolio}
           />
           <PortfolioProvider value={portfolio}>
