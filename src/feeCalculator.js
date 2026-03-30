@@ -34,7 +34,13 @@ const FEE_PARAMS = {
  */
 export function getFeeParams(gammaCategory) {
   if (!gammaCategory) return FEE_PARAMS['_default'];
-  return FEE_PARAMS[gammaCategory.toLowerCase()] || FEE_PARAMS['_default'];
+  const key = gammaCategory.toLowerCase();
+  const params = FEE_PARAMS[key];
+  if (!params) {
+    console.warn(`[feeCalculator] Unknown category "${gammaCategory}", using _default fee params`);
+    return FEE_PARAMS['_default'];
+  }
+  return params;
 }
 
 /**

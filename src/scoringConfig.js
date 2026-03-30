@@ -114,5 +114,10 @@ export const FEE_IMPACT_LOW_THRESHOLD = 0.25;
 export const FEE_IMPACT_LOW_PENALTY = -1;
 export const FEE_FREE_BONUS = 2;
 
+// --- Fee Display ---
+// Color thresholds for the fee column in the table (percentage of trade value).
+export const FEE_DISPLAY_YELLOW_PCT = 0.5;
+export const FEE_DISPLAY_RED_PCT = 1.0;
+
 // --- Global ---
 export const MAX_EDGE_SCORE = 100;

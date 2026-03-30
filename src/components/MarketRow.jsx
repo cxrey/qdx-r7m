@@ -10,6 +10,7 @@ import { ConjunctionCell } from './ConjunctionCard';
 import { FlowCell } from './TradeFlowPanel';
 import { ROW_HEIGHT, CYAN, PINK, AMBER } from '../uiConfig';
 import { formatVolume, formatPrice } from '../formatters';
+import { FEE_DISPLAY_YELLOW_PCT, FEE_DISPLAY_RED_PCT } from '../scoringConfig';
 
 // Pre-warm: download + parse chunk during idle time so first expand is instant
 if (typeof window !== 'undefined') {
@@ -50,8 +51,8 @@ function FeeCell({ market }) {
   }
   const pct = market.effectiveTakerFee * 100;
   let colorClass = 'text-emerald-400';
-  if (pct > 1.0) colorClass = 'text-red-400';
-  else if (pct >= 0.5) colorClass = 'text-yellow-400';
+  if (pct > FEE_DISPLAY_RED_PCT) colorClass = 'text-red-400';
+  else if (pct >= FEE_DISPLAY_YELLOW_PCT) colorClass = 'text-yellow-400';
   return <span className={`text-xs ${colorClass}`}>{pct.toFixed(2)}%</span>;
 }
 

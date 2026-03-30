@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   computeEffectiveFeeRate,
   computeFeePP,
@@ -16,9 +16,12 @@ describe('getFeeParams', () => {
     expect(p.makerRebatePct).toBe(0.20);
   });
 
-  it('returns default for unknown slug', () => {
+  it('returns default for unknown slug and warns', () => {
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const p = getFeeParams('unknown-slug');
     expect(p.feeRate).toBe(0.04);
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining('Unknown category'));
+    spy.mockRestore();
   });
 
   it('returns default for null', () => {
@@ -41,7 +44,9 @@ describe('isFeeFree', () => {
   });
 
   it('returns false for unknown slug (uses default)', () => {
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     expect(isFeeFree('some-new-category')).toBe(false);
+    spy.mockRestore();
   });
 });
 
