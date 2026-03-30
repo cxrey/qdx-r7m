@@ -1,3 +1,5 @@
+import { computeEffectiveFeeRate } from './feeCalculator';
+
 /**
  * KellyEngine.js — Pure JS utility for Kelly Criterion position sizing.
  * Provides bet sizing calculations with sensitivity analysis, scenario modeling,
@@ -47,7 +49,7 @@ export function saveKellySettings(settings) {
  * @param {string} side - 'YES' or 'NO'
  * @returns {Object} Kelly analysis result
  */
-export function calculateKelly(estProb, marketPrice, side = 'YES') {
+export function calculateKelly(estProb, marketPrice, side = 'YES', feeOptions = {}) {
   // Validate inputs
   if (estProb < 0 || estProb > 1 || marketPrice <= 0 || marketPrice >= 1) {
     return { valid: false, reason: 'Invalid inputs' };
@@ -68,6 +70,10 @@ export function calculateKelly(estProb, marketPrice, side = 'YES') {
 
   // Edge = expected value per dollar
   const edge = (b * p) - q;
+  // Fee adjustment: effectiveFeeRate is per-dollar like edge
+  const { gammaCategory, feesEnabled } = feeOptions;
+  const takerFeeRate = computeEffectiveFeeRate(marketPrice, gammaCategory, feesEnabled);
+  const feeAdjustedEdge = edge - takerFeeRate;
   const edgePp = edge * 100;
 
   // Break-even probability for the selected side
@@ -90,6 +96,8 @@ export function calculateKelly(estProb, marketPrice, side = 'YES') {
       breakEvenProb,
       gapPp,
       edge: edgePp,
+      feeAdjustedEdge: feeAdjustedEdge * 100,
+      takerFeeRate,
       fullKelly: 0,
       reason: gapPp <= 0
         ? 'Market price already reflects or exceeds your estimate'
@@ -100,15 +108,22 @@ export function calculateKelly(estProb, marketPrice, side = 'YES') {
   // Full Kelly fraction: f* = (bp - q) / b
   const fullKelly = Math.max(0, (b * p - q) / b);
 
+  // Fee-adjusted Kelly: if fees consume the edge, fraction = 0
+  const feeAdjustedFullKelly = feeAdjustedEdge > 0
+    ? Math.max(0, feeAdjustedEdge / b)
+    : 0;
+
   // Robustness assessment
   const robustness = assessRobustness(gapPp, estProb);
 
-  // Fractional Kelly based on robustness
+  // Fractional Kelly based on robustness — use fee-adjusted full Kelly
   const fractionMultiplier = robustness.kellyFraction;
-  const fractionalKelly = fullKelly * fractionMultiplier;
+  const fractionalKelly = feeAdjustedFullKelly * fractionMultiplier;
 
   // Expected growth rate (log utility)
-  const growthRate = p * Math.log(1 + fractionalKelly * b) + q * Math.log(1 - fractionalKelly);
+  const growthRate = fractionalKelly > 0
+    ? p * Math.log(1 + fractionalKelly * b) + q * Math.log(1 - fractionalKelly)
+    : 0;
 
   return {
     valid: true,
@@ -119,7 +134,10 @@ export function calculateKelly(estProb, marketPrice, side = 'YES') {
     breakEvenProb,
     gapPp,
     edge: edgePp,
+    feeAdjustedEdge: feeAdjustedEdge * 100,
+    takerFeeRate,
     fullKelly,
+    feeAdjustedFullKelly,
     fractionalKelly,
     fractionMultiplier,
     robustness,

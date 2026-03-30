@@ -1,4 +1,5 @@
 import { analyzeConjunction, conjunctionEdgeBonus } from './ConjunctionEngine';
+import { computeEffectiveFeeRate, computeFeePP, computeRoundTripCostPP, isFeeFree } from './feeCalculator';
 import { analyzeFLB } from './FLBEngine';
 import { analyzeTheta } from './ThetaEngine';
 import { analyzeResolution } from './ResolutionAnalyzer';
@@ -113,6 +114,7 @@ export function processMarket(market) {
   const slug = market.events?.[0]?.slug || market.slug || '';
   // Prefer Gamma's own categorization when mapped, fall back to regex
   const rawCategory = market.category || null;
+  const gammaCategory = rawCategory; // raw slug for fee lookup (extracted early for FLB)
   const mappedCategory = rawCategory ? GAMMA_CATEGORY_MAP[rawCategory.toLowerCase()] : null;
   if (rawCategory && !mappedCategory && !_loggedSlugs.has(rawCategory)) {
     _loggedSlugs.add(rawCategory);
@@ -130,7 +132,7 @@ export function processMarket(market) {
 
   let flb = null;
   try {
-    flb = analyzeFLB({ yesPrice, noPrice, spread, resolutionAnalysis });
+    flb = analyzeFLB({ yesPrice, noPrice, spread, resolutionAnalysis, gammaCategory, feesEnabled: market.feesEnabled ?? false });
   } catch (e) {
     console.warn('[processMarket] FLB analysis failed for', market.id, e.message);
     _engineFailures.push('flb');
@@ -190,8 +192,23 @@ export function processMarket(market) {
   const volume1mo = safeNum(market.volume1mo);
   const acceptingOrders = typeof market.acceptingOrders === 'boolean' ? market.acceptingOrders : null;
   const feesEnabled = market.feesEnabled ?? false;
-  const gammaCategory = market.category || null;
+  // gammaCategory already extracted above (before engine calls)
   const openInterest = safeNum(market.events?.[0]?.openInterest);
+
+  // Fee calculations
+  const effectiveTakerFee = computeEffectiveFeeRate(yesPrice, gammaCategory, feesEnabled);
+  const takerFeePP = computeFeePP(yesPrice, gammaCategory, feesEnabled);
+  const feeFree = isFeeFree(gammaCategory);
+
+  // Theta break-even: how many days of theta needed to overcome round-trip costs
+  let thetaBreakEvenDays = null;
+  if (theta && spread != null) {
+    const roundTrip = computeRoundTripCostPP(yesPrice, spread, gammaCategory, feesEnabled);
+    const dailyThetaPP = Math.abs(theta.bestTheta) * 100;
+    thetaBreakEvenDays = roundTrip.totalCostPP > 0 && dailyThetaPP > 0
+      ? Math.ceil(roundTrip.totalCostPP / dailyThetaPP)
+      : null;
+  }
 
   return {
     id: market.id,
@@ -233,6 +250,10 @@ export function processMarket(market) {
     feesEnabled,
     gammaCategory,
     openInterest,
+    effectiveTakerFee,
+    takerFeePP,
+    feeFree,
+    thetaBreakEvenDays,
     _engineFailures,
   };
 }
