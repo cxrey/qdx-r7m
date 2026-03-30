@@ -253,6 +253,30 @@ describe('processMarket', () => {
     expect(m.gammaSpread).toBeNull();
   });
 
+  it('falls back to overround when book is crossed (bestBid > bestAsk)', () => {
+    const m = processMarket(makeRawMarket({
+      outcomePrices: JSON.stringify([0.60, 0.38]),
+      bestBid: 0.60, bestAsk: 0.50,
+    }));
+    // Crossed book ignored → overround = |1 - 0.60 - 0.38| = 0.02
+    expect(m.spread).toBeCloseTo(0.02);
+  });
+
+  it('coerces string values from API to numbers', () => {
+    const m = processMarket(makeRawMarket({
+      bestBid: '0.50', bestAsk: '0.56', spread: '0.14',
+      oneDayPriceChange: '-0.005', lastTradePrice: '0.36',
+      liquidityClob: '5000', competitive: '0.85',
+    }));
+    expect(m.gammaBestBid).toBe(0.50);
+    expect(m.gammaBestAsk).toBe(0.56);
+    expect(m.gammaSpread).toBe(0.14);
+    expect(m.oneDayPriceChange).toBe(-0.005);
+    expect(m.lastTradePrice).toBe(0.36);
+    expect(m.liquidityClob).toBe(5000);
+    expect(m.competitive).toBe(0.85);
+  });
+
   it('extracts market metadata fields when present', () => {
     const m = processMarket(makeRawMarket({
       liquidityClob: 5000,

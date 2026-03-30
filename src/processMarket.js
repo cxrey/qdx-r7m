@@ -88,6 +88,9 @@ export function processMarket(market) {
   const gammaSpread = market.spread != null ? Number(market.spread) : null;
 
   // Prefer real bid-ask spread when available, fall back to overround estimate
+  if (gammaBestBid != null && gammaBestAsk != null && gammaBestBid > gammaBestAsk) {
+    console.warn('[processMarket] Crossed book for', market.id, `bid=${gammaBestBid} ask=${gammaBestAsk}`);
+  }
   let spread;
   if (gammaBestBid != null && gammaBestAsk != null && gammaBestAsk > gammaBestBid) {
     spread = gammaBestAsk - gammaBestBid;
@@ -162,7 +165,7 @@ export function processMarket(market) {
     _engineFailures.push('edgeScore');
   }
 
-  // ── Gamma API field extraction (no new API calls) ─────────────���───────────
+  // ── Gamma API field extraction (no new API calls) ────────────────────────
   const oneDayPriceChange = market.oneDayPriceChange != null ? Number(market.oneDayPriceChange) : null;
   const lastTradePrice = market.lastTradePrice != null ? Number(market.lastTradePrice) : null;
   const liquidityClob = market.liquidityClob != null ? Number(market.liquidityClob) : null;

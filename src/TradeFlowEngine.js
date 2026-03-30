@@ -26,8 +26,8 @@ const TRADE_FLOW_TTL = CACHE_TTL_5M;
 export async function fetchMarketTrades(conditionId) {
   // Try multiple param names — API may accept market= or conditionId=
   const urls = [
-    `${DATA_API}/trades?market=${conditionId}&limit=200`,
-    `${DATA_API}/trades?conditionId=${conditionId}&limit=200`,
+    `${DATA_API}/trades?market=${encodeURIComponent(conditionId)}&limit=200`,
+    `${DATA_API}/trades?conditionId=${encodeURIComponent(conditionId)}&limit=200`,
   ];
   for (const url of urls) {
     try {
@@ -46,7 +46,7 @@ export async function fetchMarketTrades(conditionId) {
 }
 
 export async function fetchMarketHolders(conditionId) {
-  const url = `${DATA_API}/holders?market=${conditionId}&limit=20`;
+  const url = `${DATA_API}/holders?market=${encodeURIComponent(conditionId)}&limit=20`;
   try {
     const res = await fetch(url, { signal: withTimeout(null, TIMEOUT_DATA_API) });
     throwIfRateLimited(res);
