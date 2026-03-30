@@ -76,6 +76,8 @@ const TAG_SLUG_TO_FEE_SLUG = {
 };
 
 // Last-resort fallback: map display category → fee slug for markets with no tags.
+// Must stay in sync with CATEGORY_RULES categories — if a new category is added there,
+// add a corresponding entry here or it will silently fall through to _default fee params.
 const DISPLAY_TO_FEE_SLUG = {
   'Politics':    'us-politics',
   'Crypto':      'crypto',
@@ -92,6 +94,9 @@ const DISPLAY_TO_FEE_SLUG = {
 /**
  * Extract fee category slug from event tags array.
  * Returns the first tag slug that matches a FEE_PARAMS key (directly or via mapping).
+ * Note: returns the first match in tag order — if the API returns tags in a different
+ * order, a different fee slug could win. Currently safe because non-fee-relevant tags
+ * (courts, earn-4, etc.) don't appear in FEE_PARAM_SLUGS or TAG_SLUG_TO_FEE_SLUG.
  */
 function extractFeeCategoryFromTags(tags) {
   if (!Array.isArray(tags) || tags.length === 0) return null;
