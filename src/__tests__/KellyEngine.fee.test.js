@@ -57,10 +57,9 @@ describe('calculateKelly with fee options', () => {
     });
 
     // 0.505 vs 0.50 gives ~1pp raw edge, crypto fee = 1.8% effective rate
-    // Fee exceeds edge, so fee-adjusted Kelly should be 0
-    if (result.valid && !result.noEdge) {
-      expect(result.feeAdjustedFullKelly).toBe(0);
-    }
+    // Fee exceeds edge → either noEdge is true, or feeAdjustedFullKelly is 0
+    expect(result.valid).toBe(true);
+    expect(result.noEdge || result.feeAdjustedFullKelly === 0).toBe(true);
   });
 
   it('fee-free category has zero fee impact', () => {

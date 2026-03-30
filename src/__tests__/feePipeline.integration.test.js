@@ -126,8 +126,16 @@ describe('Fee pipeline integration', () => {
   });
 
   it('filterAndSort fee sort in maker mode sorts by negated rebate', () => {
-    const crypto = processMarket(makeRawMarket({ id: 'c1' }));
-    const biz = processMarket(makeRawMarket({ id: 'b1', category: 'business' }));
+    // Use off-center prices so FLB produces a bestSide with non-zero makerRebatePP
+    const crypto = processMarket(makeRawMarket({
+      id: 'c1',
+      outcomePrices: JSON.stringify([0.20, 0.80]),
+    }));
+    const biz = processMarket(makeRawMarket({
+      id: 'b1',
+      category: 'business',
+      outcomePrices: JSON.stringify([0.20, 0.80]),
+    }));
     const markets = [crypto, biz];
 
     const sorted = filterAndSort({
@@ -138,10 +146,10 @@ describe('Fee pipeline integration', () => {
       portfolio: NO_PORTFOLIO,
     });
 
-    // Maker sort uses negated makerRebatePP — larger rebate sorts first (lower negated value)
-    // Business has 50% rebate pct, crypto has 20% — but business also has lower feeRate
-    // Just verify both are present and sorted deterministically
+    // Maker sort uses negated makerRebatePP — larger rebate → more negative → sorts first ascending
+    // Verify deterministic ordering (actual rebate values depend on FLB bestSide)
     expect(sorted).toHaveLength(2);
+    expect(sorted[0].flb?.makerRebatePP ?? 0).toBeGreaterThanOrEqual(sorted[1].flb?.makerRebatePP ?? 0);
   });
 
   it('positiveEdgeAfterFees filter removes markets with non-positive net edge', () => {
