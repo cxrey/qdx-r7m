@@ -24,25 +24,17 @@ const TRADE_FLOW_TTL = CACHE_TTL_5M;
 // ─── Data Fetching ──────────────────────────────────────────────────
 
 export async function fetchMarketTrades(conditionId) {
-  // Try multiple param names — API may accept market= or conditionId=
-  const urls = [
-    `${DATA_API}/trades?market=${encodeURIComponent(conditionId)}&limit=200`,
-    `${DATA_API}/trades?conditionId=${encodeURIComponent(conditionId)}&limit=200`,
-  ];
-  for (const url of urls) {
-    try {
-      const res = await fetch(url, { signal: withTimeout(null, TIMEOUT_DATA_API) });
-      throwIfRateLimited(res);
-      if (!res.ok) continue;
-      const data = await res.json();
-      const list = Array.isArray(data) ? data : (data?.trades || data?.data || []);
-      if (list.length > 0) return list;
-    } catch (e) {
-      if (e?.status === 429 || e?.status === 403) throw e;
-      /* try next */
-    }
+  const url = `${DATA_API}/trades?conditionId=${encodeURIComponent(conditionId)}&limit=200`;
+  try {
+    const res = await fetch(url, { signal: withTimeout(null, TIMEOUT_DATA_API) });
+    throwIfRateLimited(res);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data) ? data : (data?.trades || data?.data || []);
+  } catch (e) {
+    if (e?.status === 429 || e?.status === 403) throw e;
+    return [];
   }
-  return [];
 }
 
 export async function fetchMarketHolders(conditionId) {

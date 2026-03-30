@@ -31,29 +31,19 @@ afterEach(() => { vi.restoreAllMocks(); });
 // ── fetchMarketTrades ──────────────────────────────────────────────
 
 describe('fetchMarketTrades', () => {
-  it('tries /data-api/trades?market= first', async () => {
+  it('calls single conditionId= URL and returns trades', async () => {
     const trades = [{ id: 't1', price: '0.55' }];
     mockFetch.mockResolvedValueOnce(new Response(JSON.stringify(trades), { status: 200 }));
     const result = await fetchMarketTrades('cond-abc');
     expect(mockFetch).toHaveBeenCalledTimes(1);
-    expect(mockFetch.mock.calls[0][0]).toContain('/data-api/trades?market=cond-abc');
+    expect(mockFetch.mock.calls[0][0]).toContain('/data-api/trades?conditionId=cond-abc');
     expect(result).toEqual(trades);
   });
 
-  it('falls back to conditionId= param on first failure', async () => {
-    mockFetch
-      .mockResolvedValueOnce(new Response('Not Found', { status: 404 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify([{ id: 't1' }]), { status: 200 }));
+  it('returns empty array on non-200 response', async () => {
+    mockFetch.mockResolvedValueOnce(new Response('Not Found', { status: 404 }));
     const result = await fetchMarketTrades('cond-abc');
-    expect(mockFetch).toHaveBeenCalledTimes(2);
-    expect(mockFetch.mock.calls[1][0]).toContain('conditionId=cond-abc');
-    expect(result).toEqual([{ id: 't1' }]);
-  });
-
-  it('returns empty array when both URLs fail', async () => {
-    mockFetch.mockResolvedValue(new Response('Not Found', { status: 404 }));
-    const result = await fetchMarketTrades('cond-abc');
-    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(result).toEqual([]);
   });
 
