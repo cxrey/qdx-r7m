@@ -28,41 +28,41 @@ describe('acquireClobSlot', () => {
     expect(getClobConcurrencyStats().inFlight).toBe(0);
   });
 
-  it('allows up to DEFAULT_MAX (5) concurrent slots', async () => {
+  it('allows up to DEFAULT_MAX (8) concurrent slots', async () => {
     const releases = [];
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 8; i++) {
       releases.push(await acquireClobSlot());
     }
-    expect(getClobConcurrencyStats().inFlight).toBe(5);
+    expect(getClobConcurrencyStats().inFlight).toBe(8);
     expect(hasClobSlotAvailable()).toBe(false);
     releases.forEach(r => r());
   });
 
   it('blocks beyond maxConcurrent until a slot is released', async () => {
     const releases = [];
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 8; i++) {
       releases.push(await acquireClobSlot());
     }
 
-    // 6th call should block
-    let sixthResolved = false;
-    const sixthPromise = acquireClobSlot().then(release => {
-      sixthResolved = true;
+    // 9th call should block
+    let ninthResolved = false;
+    const ninthPromise = acquireClobSlot().then(release => {
+      ninthResolved = true;
       return release;
     });
 
     // Give microtasks a chance to run
     await vi.advanceTimersByTimeAsync(0);
-    expect(sixthResolved).toBe(false);
+    expect(ninthResolved).toBe(false);
     expect(getClobConcurrencyStats().waiting).toBe(1);
 
-    // Release one slot — the 6th waiter should resolve
+    // Release one slot — the 9th waiter should resolve
     releases[0]();
     await vi.advanceTimersByTimeAsync(0);
-    expect(sixthResolved).toBe(true);
+    expect(ninthResolved).toBe(true);
 
-    const sixthRelease = await sixthPromise;
-    sixthRelease();
+    const ninthRelease = await ninthPromise;
+    ninthRelease();
     releases.slice(1).forEach(r => r());
   });
 
@@ -76,7 +76,7 @@ describe('acquireClobSlot', () => {
 
   it('waiters are served FIFO', async () => {
     const releases = [];
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 8; i++) {
       releases.push(await acquireClobSlot());
     }
 
@@ -99,7 +99,7 @@ describe('acquireClobSlot', () => {
 
   it('release wakes exactly one waiter', async () => {
     const releases = [];
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 8; i++) {
       releases.push(await acquireClobSlot());
     }
 
@@ -128,7 +128,7 @@ describe('hasClobSlotAvailable', () => {
 
   it('returns false when all slots occupied', async () => {
     const releases = [];
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 8; i++) {
       releases.push(await acquireClobSlot());
     }
     expect(hasClobSlotAvailable()).toBe(false);
@@ -150,7 +150,7 @@ describe('AbortSignal', () => {
 
   it('signal abort while waiting rejects with AbortError', async () => {
     const releases = [];
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 8; i++) {
       releases.push(await acquireClobSlot());
     }
 
@@ -162,14 +162,14 @@ describe('AbortSignal', () => {
 
     await expect(promise).rejects.toThrow('Aborted');
     expect(getClobConcurrencyStats().waiting).toBe(0); // removed from queue
-    expect(getClobConcurrencyStats().inFlight).toBe(5); // no slot was acquired
+    expect(getClobConcurrencyStats().inFlight).toBe(8); // no slot was acquired
 
     releases.forEach(r => r());
   });
 
   it('signal abort does not affect other waiters', async () => {
     const releases = [];
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 8; i++) {
       releases.push(await acquireClobSlot());
     }
 
@@ -201,7 +201,7 @@ describe('AbortSignal', () => {
 describe('resetClobConcurrency', () => {
   it('clears in-flight count, wait queue, and resets maxConcurrent', async () => {
     const releases = [];
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 8; i++) {
       releases.push(await acquireClobSlot());
     }
     onRateLimitHit(); // drops to FLOOR=2
@@ -211,7 +211,7 @@ describe('resetClobConcurrency', () => {
     const stats = getClobConcurrencyStats();
     expect(stats.inFlight).toBe(0);
     expect(stats.waiting).toBe(0);
-    expect(stats.maxConcurrent).toBe(5); // back to DEFAULT_MAX
+    expect(stats.maxConcurrent).toBe(8); // back to DEFAULT_MAX
   });
 });
 
@@ -219,7 +219,7 @@ describe('resetClobConcurrency', () => {
 
 describe('onRateLimitHit', () => {
   it('drops maxConcurrent to FLOOR (2)', () => {
-    expect(getClobConcurrencyStats().maxConcurrent).toBe(5);
+    expect(getClobConcurrencyStats().maxConcurrent).toBe(8);
     onRateLimitHit();
     expect(getClobConcurrencyStats().maxConcurrent).toBe(2);
   });
@@ -229,7 +229,7 @@ describe('onRateLimitHit', () => {
     releases.push(await acquireClobSlot());
     releases.push(await acquireClobSlot());
 
-    // 2 in-flight, max=5 → still available
+    // 2 in-flight, max=8 → still available
     expect(hasClobSlotAvailable()).toBe(true);
 
     onRateLimitHit(); // drops to 2
@@ -250,15 +250,15 @@ describe('onRateLimitHit', () => {
     expect(getClobConcurrencyStats().maxConcurrent).toBe(4);
   });
 
-  it('recovery stops at CEILING (6)', () => {
+  it('recovery stops at CEILING (12)', () => {
     onRateLimitHit(); // 2
-    // 4 recovery ticks to reach 6
-    vi.advanceTimersByTime(60_000 * 4);
-    expect(getClobConcurrencyStats().maxConcurrent).toBe(6);
+    // 10 recovery ticks to reach 12
+    vi.advanceTimersByTime(60_000 * 10);
+    expect(getClobConcurrencyStats().maxConcurrent).toBe(12);
 
     // One more tick should not go above ceiling
     vi.advanceTimersByTime(60_000);
-    expect(getClobConcurrencyStats().maxConcurrent).toBe(6);
+    expect(getClobConcurrencyStats().maxConcurrent).toBe(12);
   });
 
   it('second onRateLimitHit during recovery resets to FLOOR', () => {

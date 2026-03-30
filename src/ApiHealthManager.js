@@ -22,9 +22,9 @@ const RECOVERY_429 = 60 * 1000;       // 60s for soft rate limit
 const RECOVERY_403 = 5 * 60 * 1000;   // 5min for IP block
 
 // Concurrency limits
-const CONCURRENCY_DEFAULT = 5;
+const CONCURRENCY_DEFAULT = 8;
 const CONCURRENCY_FLOOR = 2;
-const CONCURRENCY_CEILING = 6;
+const CONCURRENCY_CEILING = 12;
 const CONCURRENCY_RECOVERY_INTERVAL = 60_000; // +1 slot every 60s
 
 // Backoff multiplier
