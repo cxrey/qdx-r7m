@@ -6,15 +6,26 @@ import {
   getClobConcurrencyStats,
   resetClobConcurrency,
 } from '../clobConcurrency';
+import {
+  handleRateLimit,
+  isClobRateLimited,
+  clearClobRateLimit,
+  getBackoffMultiplier,
+  resetBackoff,
+} from '../ApiHealthManager';
 
 beforeEach(() => {
   vi.useFakeTimers();
   resetClobConcurrency();
+  clearClobRateLimit();
+  resetBackoff();
 });
 
 afterEach(() => {
   vi.useRealTimers();
   resetClobConcurrency();
+  clearClobRateLimit();
+  resetBackoff();
 });
 
 // ── Core semaphore ────────────────────────────────────────────────
@@ -291,5 +302,44 @@ describe('onRateLimitHit', () => {
     expect(thirdResolved).toBe(true);
 
     releases.forEach(r => r());
+  });
+});
+
+// ── handleRateLimit integration ──────────────────────────────────
+
+describe('handleRateLimit (unified entry point)', () => {
+  it('trips circuit breaker, drops concurrency, and escalates backoff in one call', () => {
+    expect(isClobRateLimited()).toBe(false);
+    expect(getClobConcurrencyStats().maxConcurrent).toBe(8);
+    expect(getBackoffMultiplier()).toBe(1);
+
+    handleRateLimit(429);
+
+    // Circuit breaker tripped
+    expect(isClobRateLimited()).toBe(true);
+    // Concurrency dropped to floor
+    expect(getClobConcurrencyStats().maxConcurrent).toBe(2);
+    // Backoff doubled
+    expect(getBackoffMultiplier()).toBe(2);
+  });
+
+  it('duplicate 429 while already rate-limited is a no-op', () => {
+    handleRateLimit(429);
+    expect(getBackoffMultiplier()).toBe(2);
+
+    handleRateLimit(429); // duplicate — should be suppressed
+    // Backoff should NOT escalate again
+    expect(getBackoffMultiplier()).toBe(2);
+    expect(getClobConcurrencyStats().maxConcurrent).toBe(2);
+  });
+
+  it('403 upgrades an existing 429 rate limit', () => {
+    handleRateLimit(429);
+    expect(getBackoffMultiplier()).toBe(2);
+
+    handleRateLimit(403); // upgrade — should fire all 3 systems
+    expect(getBackoffMultiplier()).toBe(4); // doubled again
+    expect(isClobRateLimited()).toBe(true);
+    expect(getClobConcurrencyStats().maxConcurrent).toBe(2);
   });
 });
