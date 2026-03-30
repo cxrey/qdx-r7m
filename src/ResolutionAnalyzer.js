@@ -261,6 +261,8 @@ export function calculateStrictnessScore(characteristics, yesPrice) {
     }
   }
 
+  // Cap multiplier at 2.0 to keep scores meaningful when many penalties cascade
+  penaltyMultiplier = Math.min(penaltyMultiplier, 2.0);
   const rawScore = 50 * penaltyMultiplier;
   const score = Math.min(Math.round(rawScore), 100);
 

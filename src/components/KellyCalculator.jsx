@@ -17,6 +17,7 @@ import {
   calculateReEvalTrigger,
   applyPortfolioConstraints,
   getKellySettings,
+  saveKellySettings,
   saveJournalEntry,
 } from '../KellyEngine';
 

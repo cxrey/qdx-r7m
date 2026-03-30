@@ -10,6 +10,7 @@ import { useAutoRefresh } from './hooks/useAutoRefresh';
 import { useDebounce } from './hooks/useDebounce';
 import { useDirectLookup } from './hooks/useDirectLookup';
 import { usePortfolio } from './hooks/usePortfolio';
+import { PortfolioProvider } from './contexts/PortfolioContext';
 import { ALL_CATEGORIES } from './processMarket';
 import { fetchLeaderboard, buildLeaderboardIndex } from './TradeFlowEngine';
 import { filterAndSort } from './utils/filterAndSort';
@@ -53,6 +54,18 @@ function App() {
 
   // Portfolio hook
   const portfolio = usePortfolio(rawMarkets);
+
+  // Callback for live price updates from order book / price history (detail panel)
+  const handleLivePriceUpdate = useCallback((marketId, yesPrice, noPrice) => {
+    const existing = pendingPriceUpdatesRef.current.get(marketId);
+    if (existing) {
+      if (yesPrice != null) existing.yesPrice = yesPrice;
+      if (noPrice != null) existing.noPrice = noPrice;
+    } else {
+      pendingPriceUpdatesRef.current.set(marketId, { yesPrice, noPrice });
+    }
+    pricesDirtyRef.current = true;
+  }, [pendingPriceUpdatesRef, pricesDirtyRef]);
 
   // Fetch leaderboard on app load (once)
   useEffect(() => {
@@ -124,12 +137,16 @@ function App() {
 
       // Only run filterAndSort if prices changed or max-skip reached
       if (pricesDirtyRef.current || skipCountRef.current >= MAX_FILTER_SORT_SKIPS) {
-        // Apply all accumulated price updates in one Immer pass.
-        // `applied` is set inside the setRawMarkets updater, which runs
-        // synchronously within setInterval callbacks in React 18/19.
-        let applied = false;
+        // Snapshot pending updates and clear ref BEFORE calling setRawMarkets.
+        // React 18 automatic batching defers the updater function — if we clear
+        // the ref after setRawMarkets, the updater sees an empty map.
+        const snapshot = pendingPriceUpdatesRef.current;
+        const hadUpdates = snapshot.size > 0;
+        if (hadUpdates) {
+          pendingPriceUpdatesRef.current = new Map();
+        }
 
-        if (pendingPriceUpdatesRef.current.size > 0) {
+        if (hadUpdates) {
           setRawMarkets(prev => {
             const idxMap = new Map();
             for (let i = 0; i < prev.length; i++) {
@@ -138,7 +155,7 @@ function App() {
 
             let changed = false;
             const next = produce(prev, draft => {
-              for (const [marketId, update] of pendingPriceUpdatesRef.current) {
+              for (const [marketId, update] of snapshot) {
                 const idx = idxMap.get(marketId);
                 if (idx == null) continue;
                 const m = draft[idx];
@@ -151,14 +168,15 @@ function App() {
               }
             });
 
-            if (changed) applied = true;
             return changed ? next : prev;
           });
-          pendingPriceUpdatesRef.current.clear();
-        }
 
-        // Only bump version if prices actually changed or max-skip forced it
-        if (applied || skipCountRef.current >= MAX_FILTER_SORT_SKIPS) {
+          // Always bump version when we had pending updates.
+          // Since the updater runs asynchronously (React 18 batching), we can't
+          // know here whether `changed` was true. The useMemo downstream is cheap
+          // when the actual data hasn't changed.
+          setMarketsVersion(v => v + 1);
+        } else if (skipCountRef.current >= MAX_FILTER_SORT_SKIPS) {
           setMarketsVersion(v => v + 1);
         }
 
@@ -346,17 +364,19 @@ function App() {
             onClearSearch={handleClearSearch}
             hasPortfolio={portfolio.hasPortfolio}
           />
-          <ErrorBoundary name="ResultsTable">
-            <ResultsTable
-              markets={filteredMarkets}
-              lookupState={lookup}
-              onClearSearch={handleClearSearch}
-              portfolio={portfolio}
-              filters={filters}
-              leaderboardReady={leaderboardReady}
-              priceFlashes={priceFlashes}
-            />
-          </ErrorBoundary>
+          <PortfolioProvider value={portfolio}>
+            <ErrorBoundary name="ResultsTable">
+              <ResultsTable
+                markets={filteredMarkets}
+                lookupState={lookup}
+                onClearSearch={handleClearSearch}
+                filters={filters}
+                leaderboardReady={leaderboardReady}
+                priceFlashes={priceFlashes}
+                onLivePriceUpdate={handleLivePriceUpdate}
+              />
+            </ErrorBoundary>
+          </PortfolioProvider>
         </div>
       ) : (
         <ErrorBoundary name="PortfolioDashboard">

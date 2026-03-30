@@ -4,6 +4,7 @@ import {
   projectDecayCurveDense,
   calculateInformationResidual,
 } from '../ThetaEngine';
+import AnalysisCard from './AnalysisCard';
 
 const CYAN = '#00d4aa';
 const AMBER = '#f59e0b';
@@ -197,19 +198,13 @@ function ProjectionChart({ yesPrice, daysRemaining, marketStructure }) {
 
 export default function ThetaCard({ theta, market, priceHistory }) {
   if (!theta) {
+    const msg = market.daysLeft == null
+      ? 'No resolution date — theta N/A'
+      : market.daysLeft < 0
+        ? 'Past resolution date'
+        : 'Insufficient data for theta analysis';
     return (
-      <div className="rounded-lg border border-[#1f2937] p-4" style={{ background: '#111827' }}>
-        <div className="flex items-center gap-2 text-xs font-semibold text-gray-400 uppercase mb-2">
-          <span>Time Decay Analysis</span>
-        </div>
-        <div className="text-sm text-gray-600">
-          {market.daysLeft == null
-            ? 'No resolution date — theta N/A'
-            : market.daysLeft < 0
-              ? 'Past resolution date'
-              : 'Insufficient data for theta analysis'}
-        </div>
-      </div>
+      <AnalysisCard title="Time Decay Analysis" emptyWhen emptyMessage={msg} />
     );
   }
 
@@ -252,20 +247,15 @@ export default function ThetaCard({ theta, market, priceHistory }) {
   }, [market.yesPrice, market.daysLeft, theta.structureType]);
 
   return (
-    <div className="rounded-lg border border-[#1f2937] p-4" style={{ background: '#111827' }}>
-      {/* Header */}
-      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-semibold text-gray-400 uppercase">Time Decay</span>
-          <StructureBadge type={theta.structureType} confidence={theta.structureConfidence} />
+    <AnalysisCard
+      title="Time Decay"
+      badge={<StructureBadge type={theta.structureType} confidence={theta.structureConfidence} />}
+      headerExtra={theta.zones.length > 0 ? (
+        <div className="flex gap-1 flex-wrap">
+          {theta.zones.map((z) => <ZoneBadge key={z} zone={z} />)}
         </div>
-        {theta.zones.length > 0 && (
-          <div className="flex gap-1 flex-wrap">
-            {theta.zones.map((z) => <ZoneBadge key={z} zone={z} />)}
-          </div>
-        )}
-      </div>
-
+      ) : undefined}
+    >
       {/* Theta metrics grid */}
       <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm mb-4">
         <div className="flex justify-between">
@@ -345,6 +335,6 @@ export default function ThetaCard({ theta, market, priceHistory }) {
           )}
         </>
       )}
-    </div>
+    </AnalysisCard>
   );
 }

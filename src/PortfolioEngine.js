@@ -543,9 +543,8 @@ export function screenNewTrade(market, portfolioPositions, clusters, simulatedSi
     if (joinCluster) break;
   }
 
-  // Calculate current and new diversification scores
-  const { clusters: currentClusters } = buildCorrelationClusters(portfolioPositions);
-  const currentConcentration = calculateConcentration(portfolioPositions, currentClusters);
+  // Reuse passed-in clusters for current score; only rebuild for the new set
+  const currentConcentration = calculateConcentration(portfolioPositions, clusters);
 
   const newPositions = [...portfolioPositions, candidatePos];
   const { clusters: newClusters } = buildCorrelationClusters(newPositions);

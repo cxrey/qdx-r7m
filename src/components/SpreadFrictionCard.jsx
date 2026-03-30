@@ -7,6 +7,8 @@ import {
   calculateFrictionScore,
   calculateEdgeSurvival,
 } from '../SpreadFrictionEngine';
+import { formatCents, formatPct, formatDollars } from '../formatters';
+import AnalysisCard from './AnalysisCard';
 
 const ENTRY_SIZES = [25, 50, 100, 250, 500, 1000];
 const CYAN = '#00d4aa';
@@ -18,22 +20,6 @@ function scoreColor(score) {
   if (score >= 60) return AMBER;
   if (score >= 35) return '#ef4444';
   return '#dc2626';
-}
-
-function formatCents(val) {
-  if (val == null) return '—';
-  return `${(val * 100).toFixed(2)}¢`;
-}
-
-function formatPct(val) {
-  if (val == null) return '—';
-  return `${(val * 100).toFixed(2)}%`;
-}
-
-function formatDollars(val) {
-  if (val == null) return '—';
-  if (val >= 1000) return `$${(val / 1000).toFixed(1)}K`;
-  return `$${val.toFixed(0)}`;
 }
 
 /**
@@ -103,43 +89,34 @@ export default function SpreadFrictionCard({ market, bookData }) {
 
   if (!bookData) {
     return (
-      <div className="rounded-lg border border-[#1f2937] p-4" style={{ background: '#111827' }}>
-        <div className="text-xs font-semibold text-gray-400 uppercase mb-2">Spread & Friction</div>
-        <div className="text-xs text-gray-600">Expand market to load order book data</div>
-      </div>
+      <AnalysisCard title="Spread & Friction" emptyWhen emptyMessage="Expand market to load order book data" />
     );
   }
 
   if (!spreadData) {
     return (
-      <div className="rounded-lg border border-[#1f2937] p-4" style={{ background: '#111827' }}>
-        <div className="text-xs font-semibold text-gray-400 uppercase mb-2">Spread & Friction</div>
-        <div className="text-xs text-gray-600">No bid/ask data available</div>
-      </div>
+      <AnalysisCard title="Spread & Friction" emptyWhen emptyMessage="No bid/ask data available" />
     );
   }
 
   return (
-    <div className="rounded-lg border border-[#1f2937] p-4" style={{ background: '#111827' }}>
-      {/* Header with friction score */}
-      <div className="flex items-center justify-between mb-3">
-        <div className="text-xs font-semibold text-gray-400 uppercase">Spread & Friction</div>
-        {frictionScore && (
-          <div className="flex items-center gap-2">
-            <span
-              className="px-2 py-0.5 rounded text-xs font-bold"
-              style={{
-                color: scoreColor(frictionScore.score),
-                background: `${scoreColor(frictionScore.score)}15`,
-                border: `1px solid ${scoreColor(frictionScore.score)}30`,
-              }}
-            >
-              {frictionScore.score} {frictionScore.label}
-            </span>
-          </div>
-        )}
-      </div>
-
+    <AnalysisCard
+      title="Spread & Friction"
+      headerExtra={frictionScore ? (
+        <div className="flex items-center gap-2">
+          <span
+            className="px-2 py-0.5 rounded text-xs font-bold"
+            style={{
+              color: scoreColor(frictionScore.score),
+              background: `${scoreColor(frictionScore.score)}15`,
+              border: `1px solid ${scoreColor(frictionScore.score)}30`,
+            }}
+          >
+            {frictionScore.score} {frictionScore.label}
+          </span>
+        </div>
+      ) : undefined}
+    >
       {/* Spread basics */}
       <div className="grid grid-cols-4 gap-3 mb-4">
         <div>
@@ -243,7 +220,7 @@ export default function SpreadFrictionCard({ market, bookData }) {
           </div>
         </div>
       )}
-    </div>
+    </AnalysisCard>
   );
 }
 

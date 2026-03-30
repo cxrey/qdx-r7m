@@ -1,9 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
-vi.mock('../clobConcurrency', () => ({
-  onRateLimitHit: vi.fn(),
-}));
-
 import {
   isClobRateLimited,
   triggerClobRateLimit,
@@ -11,12 +7,14 @@ import {
   onClobRateLimitChange,
   getClobRecoverySeconds,
 } from '../clobRateLimit';
-import { onRateLimitHit } from '../clobConcurrency';
+import { getClobConcurrencyStats, resetClobConcurrency, resetBackoff } from '../ApiHealthManager';
 
 beforeEach(() => {
   vi.useFakeTimers();
   vi.clearAllMocks();
-  clearClobRateLimit(); // reset state between tests
+  clearClobRateLimit();
+  resetClobConcurrency();
+  resetBackoff();
 });
 
 afterEach(() => { vi.useRealTimers(); });
@@ -181,23 +179,27 @@ describe('clobRateLimit', () => {
     expect(getClobRecoverySeconds()).toBe(0);
   });
 
-  // ── Concurrency limiter integration ──
+  // ── Concurrency limiter integration (via ApiHealthManager) ──
 
-  it('calls onRateLimitHit from clobConcurrency on trigger', () => {
+  it('drops concurrency to floor on trigger', () => {
     triggerClobRateLimit(429);
-    expect(onRateLimitHit).toHaveBeenCalledTimes(1);
+    const stats = getClobConcurrencyStats();
+    expect(stats.maxConcurrent).toBe(stats.floor);
   });
 
-  it('calls onRateLimitHit on 403 upgrade', () => {
+  it('drops concurrency on 403 upgrade', () => {
     triggerClobRateLimit(429);
     triggerClobRateLimit(403);
-    // First trigger + 403 upgrade = 2 calls
-    expect(onRateLimitHit).toHaveBeenCalledTimes(2);
+    const stats = getClobConcurrencyStats();
+    expect(stats.maxConcurrent).toBe(stats.floor);
   });
 
-  it('does NOT call onRateLimitHit on duplicate 429', () => {
+  it('duplicate 429 is idempotent — still at floor', () => {
     triggerClobRateLimit(429);
     triggerClobRateLimit(429); // duplicate — should be no-op
-    expect(onRateLimitHit).toHaveBeenCalledTimes(1);
+    const stats = getClobConcurrencyStats();
+    expect(stats.maxConcurrent).toBe(stats.floor);
+    // Circuit breaker stays tripped
+    expect(isClobRateLimited()).toBe(true);
   });
 });

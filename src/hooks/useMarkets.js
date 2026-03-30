@@ -41,6 +41,28 @@ export function useMarkets() {
     setProgress(0);
 
     try {
+      // Start base rate fetch in parallel with market fetch
+      const baseRatePromise = !baseRatesRef.current
+        ? fetchResolvedMarkets(controller.signal)
+            .then(({ resolvedMarkets }) => computeBaseRates(resolvedMarkets))
+            .catch((e) => {
+              if (e.name !== 'AbortError') {
+                if (e?.status === 429) {
+                  setGammaRateLimited(true);
+                  if (gammaTimerRef.current) clearTimeout(gammaTimerRef.current);
+                  gammaTimerRef.current = setTimeout(() => {
+                    gammaTimerRef.current = null;
+                    setGammaRateLimited(false);
+                  }, 30_000);
+                  console.warn('[useMarkets] Gamma API rate limited during base rate fetch');
+                } else {
+                  console.warn('[useMarkets] Base rate fetch failed:', e.message);
+                }
+              }
+              return null;
+            })
+        : Promise.resolve(baseRatesRef.current);
+
       // Retry wrapper — covers total-level failures (network down, DNS)
       let raw = null;
       let fetchAttempt = 0;
@@ -86,41 +108,36 @@ export function useMarkets() {
       const allProcessed = await processAllInWorker(deduped);
       if (controller.signal.aborted) return;
       const processed = allProcessed.filter((m) => m.question);
-      setRawMarkets(processed);
-      setLastFetch(new Date());
 
-      // Background: fetch resolved markets and enrich with base rates
-      if (!baseRatesRef.current) {
-        setBaseRatesLoading(true);
-        fetchResolvedMarkets(controller.signal)
-          .then(({ resolvedMarkets }) => {
-            if (controller.signal.aborted) return;
-            const rates = computeBaseRates(resolvedMarkets);
-            if (controller.signal.aborted) return;
-            baseRatesRef.current = rates;
+      // Wait for base rates (with a timeout so we don't block forever)
+      const raceResult = await Promise.race([
+        baseRatePromise,
+        new Promise(resolve => setTimeout(() => resolve(null), 5000))  // 5s timeout
+      ]);
 
-            // Re-enrich markets with base rate data
-            setRawMarkets(enrichMarketsUpdater(rates));
-          })
-          .catch((e) => {
-            if (e.name !== 'AbortError') {
-              if (e?.status === 429) {
-                setGammaRateLimited(true);
-                if (gammaTimerRef.current) clearTimeout(gammaTimerRef.current);
-                gammaTimerRef.current = setTimeout(() => {
-                  gammaTimerRef.current = null;
-                  setGammaRateLimited(false);
-                }, 30_000);
-                console.warn('[useMarkets] Gamma API rate limited during base rate fetch');
-              } else {
-                console.warn('[useMarkets] Base rate fetch failed:', e.message);
-              }
-            }
-          })
-          .finally(() => setBaseRatesLoading(false));
+      if (controller.signal.aborted) return;
+
+      if (raceResult) {
+        // Base rates arrived in time — enrich before first render
+        baseRatesRef.current = raceResult;
+        const enriched = processed.map(m => enrichWithBaseRate(m, raceResult));
+        setRawMarkets(enriched);
+        setLastFetch(new Date());
+        setBaseRatesLoading(false);
       } else {
-        // Already have base rates, enrich immediately (Immer: only copy changed markets)
-        setRawMarkets(enrichMarketsUpdater(baseRatesRef.current));
+        // Fallback: display immediately, enrich when base rates arrive
+        setRawMarkets(processed);
+        setLastFetch(new Date());
+        setBaseRatesLoading(true);
+        baseRatePromise.then(rates => {
+          // Use controllerRef.current (not captured `controller`) to avoid
+          // stale closure if loadMarkets was called again while pending.
+          if (rates && controllerRef.current === controller && !controller.signal.aborted) {
+            baseRatesRef.current = rates;
+            setRawMarkets(enrichMarketsUpdater(rates));
+            setBaseRatesLoading(false);
+          }
+        });
       }
     } catch (err) {
       if (err.name === 'AbortError') return;

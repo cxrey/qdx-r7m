@@ -9,7 +9,8 @@ import {
   SPREAD_FETCH_DELAY, SPREAD_BATCH_START, FLOW_FETCH_DELAY, FLOW_BATCH_START,
   HOVER_DEBOUNCE_DELAY, PREFETCH_CACHE_TTL, PREFETCH_LRU_CAP, SPREAD_CACHE_CAP,
 } from '../uiConfig';
-import { isClobRateLimited, triggerClobRateLimit, clearClobRateLimit, onClobRateLimitChange, getClobRecoverySeconds } from '../clobRateLimit';
+import { isClobRateLimited, clearClobRateLimit, onClobRateLimitChange, getClobRecoverySeconds } from '../clobRateLimit';
+import { handleClobError } from '../clobErrorHandler';
 import { acquireClobSlot, hasClobSlotAvailable } from '../clobConcurrency';
 
 // LRU insert into spread cache Map (ref-based, no state)
@@ -29,14 +30,14 @@ const GRID_COLS = '1fr 55px 55px 80px 75px 45px 80px 45px 60px 70px 75px 60px 58
 // In v2, rowProps are spread directly as component props (not wrapped in `data`)
 function VirtualRow({
   index, style, ariaAttributes,
-  markets, expandedMarketId, scrollWidth,
-  spreadCacheRef, priceFlashesRef, portfolioRef,
+  marketsRef, expandedMarketId, scrollWidth,
+  spreadCacheRef, priceFlashesRef,
   foundInLoadedId, isApiFetched, handleToggleExpand, handleBookData,
-  handleFlowData, hasPortfolio, isMarketHeld, getHeldPosition, addManualPosition,
+  handleFlowData, onLivePriceUpdate,
   filters, handleRowHover, handleRowHoverEnd,
 }) {
 
-  const m = markets[index];
+  const m = marketsRef.current[index];
   if (!m) return null;
 
   const isHighlighted =
@@ -67,11 +68,7 @@ function VirtualRow({
         onBookData={handleBookData}
         cachedFlow={peekCachedTradeFlow(m.id)}
         onFlowData={handleFlowData}
-        hasPortfolio={hasPortfolio}
-        isMarketHeld={isMarketHeld}
-        getHeldPosition={getHeldPosition}
-        addManualPosition={addManualPosition}
-        portfolio={portfolioRef.current}
+        onLivePriceUpdate={onLivePriceUpdate}
         filters={filters}
         gridColumns={GRID_COLS}
         priceFlash={priceFlashes?.[m.id] || null}
@@ -80,7 +77,7 @@ function VirtualRow({
   );
 }
 
-export default function ResultsTable({ markets, lookupState, onClearSearch, portfolio, filters, leaderboardReady, priceFlashes }) {
+export default function ResultsTable({ markets, lookupState, onClearSearch, filters, leaderboardReady, priceFlashes, onLivePriceUpdate }) {
   const listRef = useRef(null);
   const containerRef = useRef(null);
   const [scrollWidth, setScrollWidth] = useState(0);
@@ -122,8 +119,6 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, port
   // Refs for props that change frequently but shouldn't recreate rowData
   const priceFlashesRef = useRef(priceFlashes);
   priceFlashesRef.current = priceFlashes;
-  const portfolioRef = useRef(portfolio);
-  portfolioRef.current = portfolio;
 
   // Hover-to-prefetch
   const prefetchCache = useRef(new Map());
@@ -252,8 +247,7 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, port
           }
         } catch (err) {
           if (err.name === 'AbortError') break;
-          if (err?.status === 429 || err?.status === 403) {
-            triggerClobRateLimit(err.status);
+          if (handleClobError(err)) {
             break;
           }
           console.warn('[ResultsTable] Order book fetch failed:', err);
@@ -321,8 +315,7 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, port
           }
         } catch (err) {
           if (err.name === 'AbortError') break;
-          if (err?.status === 429 || err?.status === 403) {
-            triggerClobRateLimit(err.status);
+          if (handleClobError(err)) {
             break;
           }
           console.warn('[ResultsTable] Trade flow fetch failed:', err);
@@ -401,8 +394,7 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, port
               }
             }
           } catch (err) {
-            if (err?.status === 429 || err?.status === 403) {
-              triggerClobRateLimit(err.status);
+            if (handleClobError(err)) {
               break;
             }
           } finally {
@@ -425,8 +417,7 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, port
                 anyFlow = true;
               }
             } catch (err) {
-              if (err?.status === 429 || err?.status === 403) {
-                triggerClobRateLimit(err.status);
+              if (handleClobError(err)) {
                 break;
               }
             } finally {
@@ -510,11 +501,11 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, port
           hasSpread
             ? Promise.resolve(null)  // skip — already cached by spread effect
             : fetchOrderBook(yesTokenId).catch((err) => {
-                if (err?.status === 429 || err?.status === 403) triggerClobRateLimit(err.status);
+                handleClobError(err);
                 return null;
               }),
           fetchPriceHistory(yesTokenId, '1d', null, null, null, signal).catch((err) => {
-            if (err?.status === 429 || err?.status === 403) triggerClobRateLimit(err.status);
+            handleClobError(err);
             return null;
           }),
         ]);
@@ -539,26 +530,21 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, port
   }, []);
 
   // ── Row data (stable object to avoid re-creating on every render) ──
-  // spreadCache, priceFlashes, and portfolio are read from refs
+  // spreadCache and priceFlashes are read from refs
   // inside VirtualRow — NOT listed as deps here. This prevents rowData
   // recreation on every background fetch or price flash, which was the
   // primary re-render cascade source (every visible MarketRow's memo ran).
 
   const rowData = useMemo(() => ({
-    markets: marketsRef.current, expandedMarketId, scrollWidth,
-    spreadCacheRef, priceFlashesRef, portfolioRef,
+    marketsRef, expandedMarketId, scrollWidth,
+    spreadCacheRef, priceFlashesRef,
     foundInLoadedId, isApiFetched, handleToggleExpand, handleBookData,
-    handleFlowData,
-    hasPortfolio: portfolio.hasPortfolio,
-    isMarketHeld: portfolio.isMarketHeld,
-    getHeldPosition: portfolio.getHeldPosition,
-    addManualPosition: portfolio.addManualPosition,
+    handleFlowData, onLivePriceUpdate,
     filters, handleRowHover, handleRowHoverEnd,
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [expandedMarketId, scrollWidth,
        foundInLoadedId, isApiFetched, handleToggleExpand, handleBookData,
-       handleFlowData, portfolio.hasPortfolio, portfolio.isMarketHeld,
-       portfolio.getHeldPosition, portfolio.addManualPosition,
+       handleFlowData, onLivePriceUpdate,
        filters, handleRowHover, handleRowHoverEnd]);
 
   // ── Render ───────────────────────────────────────────────────

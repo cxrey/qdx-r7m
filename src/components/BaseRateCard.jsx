@@ -1,4 +1,5 @@
 import { getBaseRateEdgeConfidence } from '../BaseRateEngine';
+import AnalysisCard from './AnalysisCard';
 
 const CYAN = '#00d4aa';
 const PINK = '#ff4d6a';
@@ -85,12 +86,10 @@ export default function BaseRateCard({ baseRate, flb }) {
   const maxBar = Math.max(baseRate.marketPrice, baseRate.baseRate, 0.01);
 
   return (
-    <div className="rounded-lg border border-[#1f2937] p-4" style={{ background: '#111827' }}>
-      <div className="flex items-center justify-between mb-3">
-        <div className="text-xs font-semibold text-gray-400 uppercase">Base Rate Analysis</div>
-        <ConfidenceBadge level={edgeConfidence} />
-      </div>
-
+    <AnalysisCard
+      title="Base Rate Analysis"
+      headerExtra={<ConfidenceBadge level={edgeConfidence} />}
+    >
       {/* Comparison Bars */}
       <div className="space-y-2 mb-4">
         <ComparisonBar
@@ -168,6 +167,6 @@ export default function BaseRateCard({ baseRate, flb }) {
 
       {/* Source Breakdown */}
       <SourceTable sources={baseRate.sources} />
-    </div>
+    </AnalysisCard>
   );
 }

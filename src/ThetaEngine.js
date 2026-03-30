@@ -1,18 +1,25 @@
 // Theta Decay Engine — models how time alone affects binary market prices
 // Analogous to options theta: No bets appreciate passively as the clock ticks
 
+import {
+  PRICE_VALID_MIN, PRICE_VALID_MAX, PRICE_CLAMP_MIN, PRICE_CLAMP_MAX,
+  MIN_DAYS_REMAINING, HAZARD_RATE_MIN, HAZARD_RATE_MAX,
+  DAILY_CLOSE_CORRECTION_FACTOR, THETA_ACCELERATION_LOOKAHEAD_DAYS,
+  THETA_CRUSH_ZONE, DEAD_MONEY_ZONE, THETA_EXHAUSTED_ZONE, PROJECTION_DAYS,
+} from './engineConfig';
+
 /**
  * Infer the daily hazard rate from market-implied probability and days remaining.
  * h = 1 - (1 - p)^(1/d)
  */
 export function inferHazardRate(yesPrice, daysRemaining) {
   if (yesPrice == null || daysRemaining == null) return null;
-  if (daysRemaining < 0.5) return null;
-  if (yesPrice > 0.95 || yesPrice < 0.02) return null;
+  if (daysRemaining < MIN_DAYS_REMAINING) return null;
+  if (yesPrice > PRICE_VALID_MAX || yesPrice < PRICE_VALID_MIN) return null;
 
-  const p = Math.max(0.001, Math.min(0.999, yesPrice));
+  const p = Math.max(PRICE_CLAMP_MIN, Math.min(PRICE_CLAMP_MAX, yesPrice));
   const h = 1 - Math.pow(1 - p, 1 / daysRemaining);
-  return Math.max(0.0001, Math.min(0.5, h));
+  return Math.max(HAZARD_RATE_MIN, Math.min(HAZARD_RATE_MAX, h));
 }
 
 const CUMULATIVE_PATTERNS = [
@@ -60,8 +67,8 @@ export function classifyMarketStructure(market) {
  * measurementFrequency is optional — used for daily close correction.
  */
 export function calculateTheta(yesPrice, daysRemaining, marketStructure, measurementFrequency) {
-  if (yesPrice == null || daysRemaining == null || daysRemaining < 0.5) return null;
-  if (yesPrice > 0.95 || yesPrice < 0.02) return null;
+  if (yesPrice == null || daysRemaining == null || daysRemaining < MIN_DAYS_REMAINING) return null;
+  if (yesPrice > PRICE_VALID_MAX || yesPrice < PRICE_VALID_MIN) return null;
 
   let dailyYesTheta, dailyNoTheta, impliedHazardRate;
 
@@ -82,10 +89,14 @@ export function calculateTheta(yesPrice, daysRemaining, marketStructure, measure
     dailyNoTheta = -dailyYesTheta; // negative
     impliedHazardRate = h;
   } else if (marketStructure === 'CUMULATIVE') {
-    // Each passing day INCREASES yes probability
-    const q = 1 - Math.pow(yesPrice, 1 / daysRemaining);
-    const pTomorrow = Math.pow(1 - q, daysRemaining - 1);
-    dailyYesTheta = pTomorrow - yesPrice;
+    // Cumulative event model: YES = probability event occurs within remaining days.
+    // Model: yesPrice = 1 - (1-q)^d  where q = daily disruption rate.
+    // Solve for q: (1-q)^d = 1 - yesPrice  →  q = 1 - (1 - yesPrice)^(1/d)
+    const noPrice = 1 - yesPrice;
+    const q = 1 - Math.pow(noPrice, 1 / daysRemaining);
+    const pToday = 1 - Math.pow(1 - q, daysRemaining);       // = yesPrice
+    const pTomorrow = 1 - Math.pow(1 - q, daysRemaining - 1); // YES prob with one fewer day
+    dailyYesTheta = pTomorrow - pToday; // negative: fewer days = lower YES prob
     dailyNoTheta = -dailyYesTheta;
     impliedHazardRate = q; // daily disruption probability
   } else {
@@ -95,7 +106,7 @@ export function calculateTheta(yesPrice, daysRemaining, marketStructure, measure
 
     // Daily close correction: continuous hazard overestimates for daily-check markets
     if (measurementFrequency === 'DAILY_CLOSE') {
-      h = h * 0.85;
+      h = h * DAILY_CLOSE_CORRECTION_FACTOR;
     }
 
     const pToday = 1 - Math.pow(1 - h, daysRemaining);
@@ -107,13 +118,13 @@ export function calculateTheta(yesPrice, daysRemaining, marketStructure, measure
 
   // Theta acceleration: compare theta today vs theta 7 days from now
   let thetaAcceleration = 0;
-  const futureDays = daysRemaining - 7;
+  const futureDays = daysRemaining - THETA_ACCELERATION_LOOKAHEAD_DAYS;
   if (futureDays >= 1 && Math.abs(dailyYesTheta) > 0.00001) {
     let futureTheta;
     if (marketStructure === 'CUMULATIVE') {
-      const q = 1 - Math.pow(yesPrice, 1 / daysRemaining);
-      const pFuture = Math.pow(1 - q, futureDays);
-      const pFutureMinus1 = Math.pow(1 - q, futureDays - 1);
+      const q = impliedHazardRate;
+      const pFuture = 1 - Math.pow(1 - q, futureDays);
+      const pFutureMinus1 = 1 - Math.pow(1 - q, futureDays - 1);
       futureTheta = pFutureMinus1 - pFuture;
     } else if (marketStructure === 'TOUCH_CUMULATIVE') {
       const h = impliedHazardRate;
@@ -147,19 +158,20 @@ export function projectDecayCurve(yesPrice, daysRemaining, marketStructure, proj
   if (yesPrice == null || daysRemaining == null || daysRemaining < 1) return [];
 
   if (!projectionDays) {
-    projectionDays = [7, 14, 21, 28].filter((d) => d < daysRemaining);
+    projectionDays = PROJECTION_DAYS.filter((d) => d < daysRemaining);
   }
 
   const points = [];
 
   if (marketStructure === 'CUMULATIVE') {
-    const q = 1 - Math.pow(yesPrice, 1 / daysRemaining);
+    // q = 1 - (1 - yesPrice)^(1/d): daily disruption rate
+    const q = 1 - Math.pow(1 - yesPrice, 1 / daysRemaining);
 
     for (const k of projectionDays) {
       const dFuture = daysRemaining - k;
       if (dFuture <= 0) continue;
 
-      const projectedYes = Math.pow(1 - q, dFuture);
+      const projectedYes = 1 - Math.pow(1 - q, dFuture);
       const bandWidth = 0.05 * Math.sqrt(k / 7);
       points.push({
         day: k,
@@ -250,13 +262,13 @@ export function detectThetaZones(yesPrice, daysRemaining, theta) {
 
   if (yesPrice == null || daysRemaining == null) return zones;
 
-  // THETA CRUSH ZONE: 25-75¢ and < 7 days
-  if (yesPrice >= 0.25 && yesPrice <= 0.75 && daysRemaining < 7) {
+  // THETA CRUSH ZONE
+  if (yesPrice >= THETA_CRUSH_ZONE.priceLow && yesPrice <= THETA_CRUSH_ZONE.priceHigh && daysRemaining < THETA_CRUSH_ZONE.maxDays) {
     zones.push('THETA_CRUSH_ZONE');
   }
 
-  // DEAD MONEY: 35-65¢ and > 120 days
-  if (yesPrice >= 0.35 && yesPrice <= 0.65 && daysRemaining > 120) {
+  // DEAD MONEY
+  if (yesPrice >= DEAD_MONEY_ZONE.priceLow && yesPrice <= DEAD_MONEY_ZONE.priceHigh && daysRemaining > DEAD_MONEY_ZONE.minDays) {
     zones.push('DEAD_MONEY');
   }
 
@@ -266,7 +278,7 @@ export function detectThetaZones(yesPrice, daysRemaining, theta) {
   }
 
   // THETA EXHAUSTED: near extreme with lots of time left
-  if ((yesPrice < 0.05 || yesPrice > 0.95) && daysRemaining > 14) {
+  if ((yesPrice < THETA_EXHAUSTED_ZONE.priceLow || yesPrice > THETA_EXHAUSTED_ZONE.priceHigh) && daysRemaining > THETA_EXHAUSTED_ZONE.minDays) {
     zones.push('THETA_EXHAUSTED');
   }
 
@@ -298,12 +310,14 @@ export function analyzeTheta(market) {
 
   const zones = detectThetaZones(yesPrice, daysLeft, theta);
 
-  // Best theta: the positive side
+  // Best theta: the positive side (time decay benefits this side)
   let bestTheta, bestSide;
-  if (structure.type === 'CUMULATIVE' || structure.type === 'TOUCH_CUMULATIVE') {
+  if (structure.type === 'TOUCH_CUMULATIVE') {
+    // Touch: more time = more chances to trigger, YES theta is positive
     bestTheta = theta.dailyYesTheta;
     bestSide = 'YES';
   } else {
+    // STANDARD & CUMULATIVE: fewer days = lower YES prob, NO theta is positive
     bestTheta = theta.dailyNoTheta;
     bestSide = 'NO';
   }

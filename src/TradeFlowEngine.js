@@ -9,14 +9,17 @@
 
 import { getCategoryPatterns } from './categoryPatterns';
 import { withTimeout, TIMEOUT_DATA_API } from './fetchUtils';
+import { CACHE_TTL_24H, CACHE_TTL_5M } from './engineConfig';
+import { throwIfRateLimited } from './clobErrorHandler';
+import { parseLeaderboard } from './schemas';
 
 const DATA_API = '/data-api';
 const LEADERBOARD_CACHE_KEY = 'pm_leaderboard_cache';
-const LEADERBOARD_TTL = 24 * 60 * 60 * 1000; // 24 hours
+const LEADERBOARD_TTL = CACHE_TTL_24H;
 const WALLET_HISTORY_PREFIX = 'pm_wallet_hist_';
-const WALLET_HISTORY_TTL = 24 * 60 * 60 * 1000; // 24 hours
+const WALLET_HISTORY_TTL = CACHE_TTL_24H;
 const TRADE_FLOW_CACHE_PREFIX = 'pm_tradeflow_';
-const TRADE_FLOW_TTL = 5 * 60 * 1000; // 5 minutes
+const TRADE_FLOW_TTL = CACHE_TTL_5M;
 
 // ─── Data Fetching ──────────────────────────────────────────────────
 
@@ -29,11 +32,7 @@ export async function fetchMarketTrades(conditionId) {
   for (const url of urls) {
     try {
       const res = await fetch(url, { signal: withTimeout(null, TIMEOUT_DATA_API) });
-      if (res.status === 429 || res.status === 403) {
-        const err = new Error(res.status === 403 ? 'Forbidden' : 'Rate limited');
-        err.status = res.status;
-        throw err;
-      }
+      throwIfRateLimited(res);
       if (!res.ok) continue;
       const data = await res.json();
       const list = Array.isArray(data) ? data : (data?.trades || data?.data || []);
@@ -56,11 +55,7 @@ export async function fetchMarketHolders(conditionId) {
   for (const url of urls) {
     try {
       const res = await fetch(url, { signal: withTimeout(null, TIMEOUT_DATA_API) });
-      if (res.status === 429 || res.status === 403) {
-        const err = new Error(res.status === 403 ? 'Forbidden' : 'Rate limited');
-        err.status = res.status;
-        throw err;
-      }
+      throwIfRateLimited(res);
       if (!res.ok) continue;
       const data = await res.json();
       if (data && (Array.isArray(data) ? data.length > 0 : Object.keys(data).length > 0)) {
@@ -99,7 +94,8 @@ export async function fetchLeaderboard() {
       return null;
     }
     const data = await res.json();
-    const list = Array.isArray(data) ? data : [];
+    const raw = Array.isArray(data) ? data : [];
+    const list = raw.length > 0 ? parseLeaderboard(raw) : raw;
     if (list.length > 0) {
       try {
         localStorage.setItem(LEADERBOARD_CACHE_KEY, JSON.stringify({ data: list, ts: Date.now() }));
@@ -406,16 +402,28 @@ export function analyzeTradeFlow(trades, holders, leaderboardIndex, market, wall
     const hasBuyYes = wTrades.some((t) => t.buyingYes);
     const hasBuyNo = wTrades.some((t) => t.buyingNo);
     if (hasBuyYes && hasBuyNo) {
-      // Check if within 2 hours
-      const yesTrades = wTrades.filter((t) => t.buyingYes);
-      const noTrades = wTrades.filter((t) => t.buyingNo);
-      for (const yt of yesTrades) {
-        for (const nt of noTrades) {
-          if (Math.abs(yt.ts - nt.ts) < 7200) {
-            washTradingFlag = true;
-            const name = yt.traderName || wallet.slice(0, 10) + '...';
-            washWarning = `Wallet ${name} is buying and selling rapidly — may be market making or wash trading, not directional conviction.`;
-            return;
+      // Check if any YES trade is within 2 hours of any NO trade.
+      // Bucket NO trade timestamps into 2h slots for O(n) lookup.
+      const noSlots = new Set();
+      const noTrades = [];
+      for (const t of wTrades) {
+        if (t.buyingNo) {
+          noSlots.add(Math.floor(t.ts / 7200));
+          noTrades.push(t);
+        }
+      }
+      for (const yt of wTrades) {
+        if (!yt.buyingYes) continue;
+        const slot = Math.floor(yt.ts / 7200);
+        // Check current and adjacent slots (covers the 2h window)
+        if (noSlots.has(slot) || noSlots.has(slot - 1) || noSlots.has(slot + 1)) {
+          for (const nt of noTrades) {
+            if (Math.abs(yt.ts - nt.ts) < 7200) {
+              washTradingFlag = true;
+              const name = yt.traderName || wallet.slice(0, 10) + '...';
+              washWarning = `Wallet ${name} is buying and selling rapidly — may be market making or wash trading, not directional conviction.`;
+              return;
+            }
           }
         }
       }
@@ -747,20 +755,8 @@ export function setCachedTradeFlow(marketId, data) {
 
 // ─── Utility ────────────────────────────────────────────────────────
 
-export function formatUsdcSize(v) {
-  if (v >= 1_000_000) return `$${(v / 1_000_000).toFixed(1)}M`;
-  if (v >= 1_000) return `$${(v / 1_000).toFixed(1)}K`;
-  return `$${v.toFixed(0)}`;
-}
-
-export function formatTimeAgo(timestamp) {
-  const now = Date.now() / 1000;
-  const diff = now - timestamp;
-  if (diff < 60) return 'just now';
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
-}
+// Re-export from centralized formatters for backward compatibility
+export { formatVolume as formatUsdcSize, formatTimeAgo } from './formatters';
 
 export function truncateWallet(addr) {
   if (!addr || addr.length < 12) return addr || 'Unknown';

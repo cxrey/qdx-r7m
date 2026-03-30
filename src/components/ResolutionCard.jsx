@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import AnalysisCard from './AnalysisCard';
 
 const COLORS = {
   exclusionary: '#ff4d6a',
@@ -324,10 +325,7 @@ export default function ResolutionCard({ resolution, yesPrice }) {
 
   if (!resolution) {
     return (
-      <div className="rounded-lg border border-[#1f2937] p-4" style={{ background: '#111827' }}>
-        <div className="text-xs font-semibold text-gray-400 uppercase">Resolution Analysis</div>
-        <div className="text-sm text-gray-600 mt-2">No resolution rules available.</div>
-      </div>
+      <AnalysisCard title="Resolution Analysis" emptyWhen emptyMessage="No resolution rules available." />
     );
   }
 
@@ -335,8 +333,8 @@ export default function ResolutionCard({ resolution, yesPrice }) {
   const hasHighConfidence = characteristics.some((c) => c.confidence === 'HIGH');
 
   return (
-    <div className="rounded-lg border border-[#1f2937]" style={{ background: '#111827' }}>
-      {/* Header */}
+    <AnalysisCard className="!p-0">
+      {/* Collapsible header */}
       <button
         onClick={() => setCollapsed(!collapsed)}
         className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-gray-800/30 transition-colors"
@@ -420,7 +418,7 @@ export default function ResolutionCard({ resolution, yesPrice }) {
           </div>
         </div>
       )}
-    </div>
+    </AnalysisCard>
   );
 }
 

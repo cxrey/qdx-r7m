@@ -1,3 +1,5 @@
+import AnalysisCard from './AnalysisCard';
+
 const CYAN = '#00d4aa';
 const PINK = '#ff4d6a';
 
@@ -88,10 +90,7 @@ function recColor(rec) {
 export default function FLBCard({ flb, yesPrice, noPrice }) {
   if (!flb || flb.adjustedYesProb == null) {
     return (
-      <div className="rounded-lg border border-[#1f2937] p-4" style={{ background: '#111827' }}>
-        <div className="text-xs font-semibold text-gray-400 uppercase mb-3">FLB Analysis</div>
-        <div className="text-sm text-gray-500">Insufficient data for FLB analysis.</div>
-      </div>
+      <AnalysisCard title="FLB Analysis" emptyWhen emptyMessage="Insufficient data for FLB analysis." />
     );
   }
 
@@ -117,9 +116,7 @@ export default function FLBCard({ flb, yesPrice, noPrice }) {
   }
 
   return (
-    <div className="rounded-lg border border-[#1f2937] p-4" style={{ background: '#111827' }}>
-      <div className="text-xs font-semibold text-gray-400 uppercase mb-3">FLB Analysis</div>
-
+    <AnalysisCard title="FLB Analysis">
       {/* Number line visualization */}
       <div className="mb-4">
         <div className="flex items-center gap-3 mb-1 text-xs text-gray-500">
@@ -176,6 +173,6 @@ export default function FLBCard({ flb, yesPrice, noPrice }) {
       <div className="mt-3 p-2 rounded text-xs text-gray-400 leading-relaxed" style={{ background: '#0d1117' }}>
         {message}
       </div>
-    </div>
+    </AnalysisCard>
   );
 }

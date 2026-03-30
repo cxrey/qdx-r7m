@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect, memo, lazy, Suspense } from 'react';
+import { usePortfolioContext } from '../contexts/PortfolioContext';
 const MarketDetailPanel = lazy(() => import('./MarketDetailPanel'));
 import { RulesCell } from './ResolutionCard';
 import { VolPriceCell } from './VolumeEfficiencyCard';
@@ -7,6 +8,7 @@ import { SpreadCell } from './SpreadFrictionCard';
 import { ConjunctionCell } from './ConjunctionCard';
 import { FlowCell } from './TradeFlowPanel';
 import { ROW_HEIGHT, CYAN, PINK, AMBER } from '../uiConfig';
+import { formatVolume, formatPrice } from '../formatters';
 
 // Pre-warm: download + parse chunk during idle time so first expand is instant
 if (typeof window !== 'undefined') {
@@ -18,28 +20,21 @@ if (typeof window !== 'undefined') {
   }
 }
 
-function EdgeBadge({ score }) {
+function EdgeBadge({ score, failures }) {
   let color = 'bg-red-900 text-red-300';
   if (score >= 70) color = 'bg-emerald-900 text-emerald-300';
   else if (score >= 40) color = 'bg-yellow-900 text-yellow-300';
 
+  const hasFailures = failures && failures.length > 0;
+  const title = hasFailures ? `Partial score — failed engines: ${failures.join(', ')}` : undefined;
+
   return (
-    <span className={`inline-block px-2 py-0.5 rounded text-xs font-bold ${color}`}>
-      {score}
+    <span className={`inline-block px-2 py-0.5 rounded text-xs font-bold ${color}`} title={title}>
+      {score}{hasFailures ? '*' : ''}
     </span>
   );
 }
 
-function formatVolume(v) {
-  if (v >= 1_000_000) return `$${(v / 1_000_000).toFixed(1)}M`;
-  if (v >= 1_000) return `$${(v / 1_000).toFixed(1)}K`;
-  return `$${v.toFixed(0)}`;
-}
-
-function formatPrice(p) {
-  if (p == null) return '\u2014';
-  return `${(p * 100).toFixed(1)}\u00A2`;
-}
 
 function FLBEdgeCell({ flb }) {
   if (!flb || flb.bestEdge == null) return <span className="text-gray-600 text-xs">--</span>;
@@ -224,7 +219,8 @@ function PortfolioDot({ marketId, hasPortfolio, isMarketHeld, getHeldPosition })
 }
 
 // ── MarketRow with React.memo ──
-const MarketRow = memo(function MarketRow({ market, expanded, onToggle, detailWidth, highlighted, cachedSpread, onBookData, cachedFlow, onFlowData, hasPortfolio, isMarketHeld, getHeldPosition, addManualPosition, portfolio, filters, gridColumns, priceFlash }) {
+const MarketRow = memo(function MarketRow({ market, expanded, onToggle, detailWidth, highlighted, cachedSpread, onBookData, cachedFlow, onFlowData, onLivePriceUpdate, filters, gridColumns, priceFlash }) {
+  const { hasPortfolio, isMarketHeld, getHeldPosition, addManualPosition, ...portfolio } = usePortfolioContext();
   const [showAddPopover, setShowAddPopover] = useState(false);
   const addBtnRef = useRef(null);
 
@@ -343,7 +339,7 @@ const MarketRow = memo(function MarketRow({ market, expanded, onToggle, detailWi
         <div className="text-gray-400">{formatVolume(market.volume24hr)}</div>
         <div className="text-gray-400">{market.daysLeft ?? '\u2014'}</div>
         <div className="truncate text-xs text-gray-500">{market.category || '\u2014'}</div>
-        <div><EdgeBadge score={market.edgeScore} /></div>
+        <div><EdgeBadge score={market.edgeScore} failures={market._engineFailures} /></div>
         <div>
           <FLBEdgeCell flb={market.flb} />
         </div>
@@ -376,7 +372,7 @@ const MarketRow = memo(function MarketRow({ market, expanded, onToggle, detailWi
       {expanded && (
         <div className="sticky left-0" style={{ width: detailWidth || '100%' }}>
           <Suspense fallback={<div className="h-20 animate-pulse bg-gray-800/50 rounded" />}>
-            <MarketDetailPanel market={market} onBookData={onBookData} onFlowData={onFlowData} portfolio={portfolio} />
+            <MarketDetailPanel market={market} onBookData={onBookData} onFlowData={onFlowData} onLivePriceUpdate={onLivePriceUpdate} portfolio={portfolio} />
           </Suspense>
         </div>
       )}
@@ -389,11 +385,7 @@ const MarketRow = memo(function MarketRow({ market, expanded, onToggle, detailWi
   if (prevProps.cachedSpread !== nextProps.cachedSpread) return false;
   if (prevProps.cachedFlow !== nextProps.cachedFlow) return false;
   if (prevProps.priceFlash !== nextProps.priceFlash) return false;
-  // Portfolio: compare stable primitives instead of the full object.
-  // hasPortfolio is a boolean, isMarketHeld is a useCallback ref —
-  // both only change when positions actually change.
-  if (prevProps.hasPortfolio !== nextProps.hasPortfolio) return false;
-  if (prevProps.isMarketHeld !== nextProps.isMarketHeld) return false;
+  // Portfolio comes from context now — useContext bypasses memo when context changes.
   if (prevProps.filters?.highlightHeld !== nextProps.filters?.highlightHeld) return false;
   const prev = prevProps.market;
   const next = nextProps.market;

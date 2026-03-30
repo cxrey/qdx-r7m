@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 import { calculateMispricingZone } from '../VolumeEfficiencyEngine';
+import AnalysisCard from './AnalysisCard';
 
 const PRIORITY_CONFIG = {
   SWEET_SPOT: { shortLabel: 'Sweet', label: 'Sweet Spot', bg: 'rgba(0,212,170,0.25)', text: '#00d4aa', border: 'rgba(0,212,170,0.4)' },
@@ -122,10 +123,7 @@ export default function VolumeEfficiencyCard({ market, bookData }) {
 
   if (!refined) {
     return (
-      <div className="rounded-lg border border-[#1f2937] p-4" style={{ background: '#111827' }}>
-        <div className="text-xs font-semibold text-gray-400 uppercase">Volume-Price Efficiency</div>
-        <div className="text-sm text-gray-600 mt-2">Insufficient data for efficiency analysis.</div>
-      </div>
+      <AnalysisCard title="Volume-Price Efficiency" emptyWhen emptyMessage="Insufficient data for efficiency analysis." />
     );
   }
 
@@ -133,29 +131,26 @@ export default function VolumeEfficiencyCard({ market, bookData }) {
   const velDot = VELOCITY_DOTS[refined.velocityLabel];
 
   return (
-    <div className="rounded-lg border border-[#1f2937] p-4" style={{ background: '#111827' }}>
-      {/* Header */}
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-semibold text-gray-400 uppercase">Volume-Price Efficiency</span>
+    <AnalysisCard
+      title="Volume-Price Efficiency"
+      badge={
+        <span
+          className="text-[10px] font-semibold px-2 py-0.5 rounded-full border"
+          style={{ background: config.bg, color: config.text, borderColor: config.border }}
+        >
+          {config.label}
+        </span>
+      }
+      headerExtra={velDot ? (
+        <span className="flex items-center gap-1 text-[10px] text-gray-500">
+          {refined.velocityLabel}
           <span
-            className="text-[10px] font-semibold px-2 py-0.5 rounded-full border"
-            style={{ background: config.bg, color: config.text, borderColor: config.border }}
-          >
-            {config.label}
-          </span>
-        </div>
-        {velDot && (
-          <span className="flex items-center gap-1 text-[10px] text-gray-500">
-            {refined.velocityLabel}
-            <span
-              className={`inline-block w-2 h-2 rounded-full ${velDot.pulse ? 'animate-pulse' : ''}`}
-              style={{ background: velDot.color }}
-            />
-          </span>
-        )}
-      </div>
-
+            className={`inline-block w-2 h-2 rounded-full ${velDot.pulse ? 'animate-pulse' : ''}`}
+            style={{ background: velDot.color }}
+          />
+        </span>
+      ) : undefined}
+    >
       {/* Zone visualization */}
       <ZoneBar ve={refined} yesPrice={market.yesPrice} noPrice={market.noPrice} />
 
@@ -224,7 +219,7 @@ export default function VolumeEfficiencyCard({ market, bookData }) {
 
       {/* Priority explanation */}
       <PriorityExplanation ve={refined} />
-    </div>
+    </AnalysisCard>
   );
 }
 

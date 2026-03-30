@@ -13,7 +13,7 @@ import { PriceUpdateBatcher } from './PriceUpdateBatcher';
 import { fetchAllMarkets } from './api';
 import { processMarket, enrichWithBaseRate } from './processMarket';
 import { processAllInWorker } from './workerManager';
-import { triggerClobRateLimit } from './clobRateLimit';
+import { handleRateLimit, getBackoffMultiplier, onBackoffChange } from './ApiHealthManager';
 
 const TIER2_INTERVAL = 60 * 1000;            // 60 sec (3 requests per cycle)
 const TIER2_COOLDOWN = 30 * 1000;            // min gap between Tier 2 runs (must be < TIER2_INTERVAL)
@@ -44,9 +44,8 @@ export class RefreshManager {
     // Build asset→market index for WS price mapping
     this._assetToMarket = new Map(); // assetId → { marketId, side: 'yes'|'no' }
 
-    // Rate limit tracking
-    this._rateLimitMultiplier = 1;
-    this._rateLimitRecoveryTimer = null;
+    // Backoff multiplier listener (managed by ApiHealthManager)
+    this._unsubBackoff = null;
 
     // Tier 3 abort controller
     this._tier3Controller = null;
@@ -90,6 +89,27 @@ export class RefreshManager {
     // Start Worker for Tier 2/3 timers
     this._startWorker();
 
+    // Subscribe to backoff multiplier changes from ApiHealthManager
+    this._unsubBackoff = onBackoffChange((multiplier) => {
+      if (this._worker) {
+        this._worker.postMessage({
+          type: 'updateIntervals',
+          tier2Interval: TIER2_INTERVAL * multiplier,
+          tier3Interval: TIER3_INTERVAL * multiplier,
+        });
+      } else if (this._tier2FallbackTimer || this._tier3FallbackTimer) {
+        // Recreate fallback timers with updated interval
+        if (this._tier2FallbackTimer) {
+          clearInterval(this._tier2FallbackTimer);
+          this._tier2FallbackTimer = setInterval(() => this._runTier2(), TIER2_INTERVAL * multiplier);
+        }
+        if (this._tier3FallbackTimer) {
+          clearInterval(this._tier3FallbackTimer);
+          this._tier3FallbackTimer = setInterval(() => this._runTier3(), TIER3_INTERVAL * multiplier);
+        }
+      }
+    });
+
     // Listen for tab visibility
     document.addEventListener('visibilitychange', this._handleVisibility);
 
@@ -131,10 +151,20 @@ export class RefreshManager {
     // Remove visibility listener
     document.removeEventListener('visibilitychange', this._handleVisibility);
 
-    // Clear rate limit recovery
-    if (this._rateLimitRecoveryTimer) {
-      clearTimeout(this._rateLimitRecoveryTimer);
-      this._rateLimitRecoveryTimer = null;
+    // Clear worker-fallback timers (set when Worker creation fails)
+    if (this._tier2FallbackTimer) {
+      clearInterval(this._tier2FallbackTimer);
+      this._tier2FallbackTimer = null;
+    }
+    if (this._tier3FallbackTimer) {
+      clearInterval(this._tier3FallbackTimer);
+      this._tier3FallbackTimer = null;
+    }
+
+    // Unsubscribe from backoff changes
+    if (this._unsubBackoff) {
+      this._unsubBackoff();
+      this._unsubBackoff = null;
     }
 
     this._wsStatus = 'disconnected';
@@ -313,14 +343,14 @@ export class RefreshManager {
 
       this._worker.postMessage({
         type: 'start',
-        tier2Interval: TIER2_INTERVAL * this._rateLimitMultiplier,
-        tier3Interval: TIER3_INTERVAL * this._rateLimitMultiplier,
+        tier2Interval: TIER2_INTERVAL * getBackoffMultiplier(),
+        tier3Interval: TIER3_INTERVAL * getBackoffMultiplier(),
       });
     } catch (err) {
       console.error('[RefreshManager] Worker creation failed, using setInterval fallback:', err);
       // Fallback: use main-thread timers
-      this._tier2FallbackTimer = setInterval(() => this._runTier2(), TIER2_INTERVAL * this._rateLimitMultiplier);
-      this._tier3FallbackTimer = setInterval(() => this._runTier3(), TIER3_INTERVAL * this._rateLimitMultiplier);
+      this._tier2FallbackTimer = setInterval(() => this._runTier2(), TIER2_INTERVAL * getBackoffMultiplier());
+      this._tier3FallbackTimer = setInterval(() => this._runTier3(), TIER3_INTERVAL * getBackoffMultiplier());
     }
   }
 
@@ -504,34 +534,10 @@ export class RefreshManager {
   // ── Rate Limit Management ─────────────────────────────────────
 
   _handleRateLimit(statusCode = 429) {
-    // Notify the shared circuit breaker so all CLOB fetches pause too
-    triggerClobRateLimit(statusCode);
-
-    this._rateLimitMultiplier = Math.min(this._rateLimitMultiplier * 2, 8);
-    console.warn(`[RefreshManager] Rate limited — multiplier now ${this._rateLimitMultiplier}x`);
-
-    // Update worker intervals
-    if (this._worker) {
-      this._worker.postMessage({
-        type: 'updateIntervals',
-        tier2Interval: TIER2_INTERVAL * this._rateLimitMultiplier,
-        tier3Interval: TIER3_INTERVAL * this._rateLimitMultiplier,
-      });
-    }
-
-    // Schedule recovery after 5 minutes
-    if (this._rateLimitRecoveryTimer) clearTimeout(this._rateLimitRecoveryTimer);
-    this._rateLimitRecoveryTimer = setTimeout(() => {
-      this._rateLimitMultiplier = Math.max(1, this._rateLimitMultiplier / 2);
-      console.log(`[RefreshManager] Rate limit recovery — multiplier now ${this._rateLimitMultiplier}x`);
-      if (this._worker) {
-        this._worker.postMessage({
-          type: 'updateIntervals',
-          tier2Interval: TIER2_INTERVAL * this._rateLimitMultiplier,
-          tier3Interval: TIER3_INTERVAL * this._rateLimitMultiplier,
-        });
-      }
-    }, 5 * 60 * 1000);
+    // Delegate to unified ApiHealthManager — triggers circuit breaker,
+    // concurrency reduction, and backoff escalation in one call.
+    // Worker interval updates happen via the onBackoffChange subscription.
+    handleRateLimit(statusCode);
   }
 
   // ── Tab Visibility ────────────────────────────────────────────

@@ -39,14 +39,16 @@ export function useAutoRefresh({ rawMarkets, setRawMarkets, baseRatesRef, refres
   // Index map: marketId → array index for O(1) flash direction lookups
   const indexMapRef = useRef(new Map());
 
-  // Toast management
+  // Toast management — track timeout IDs for cleanup on unmount
+  const toastTimersRef = useRef(new Set());
   const addToast = useCallback((toast) => {
     const id = Date.now() + Math.random();
     setToasts((prev) => [...prev.slice(-4), { ...toast, id, ts: Date.now() }]);
-    // Auto-remove after 5 seconds
-    setTimeout(() => {
+    const timer = setTimeout(() => {
+      toastTimersRef.current.delete(timer);
       setToasts((prev) => prev.filter((t) => t.id !== id));
     }, 5000);
+    toastTimersRef.current.add(timer);
   }, []);
 
   const removeToast = useCallback((id) => {
@@ -155,6 +157,9 @@ export function useAutoRefresh({ rawMarkets, setRawMarkets, baseRatesRef, refres
     return () => {
       manager.destroy();
       managerRef.current = null;
+      // Cancel pending toast auto-remove timers
+      for (const t of toastTimersRef.current) clearTimeout(t);
+      toastTimersRef.current.clear();
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 

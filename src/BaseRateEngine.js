@@ -5,13 +5,14 @@
 
 import { inferCategory } from './categoryPatterns';
 import { withTimeout, TIMEOUT_GAMMA_PAGE } from './fetchUtils';
+import { CACHE_TTL_24H, BASE_RATE_MAX_RESOLVED, BASE_RATE_MAX_PAGES, BASE_RATE_CONCURRENCY, BASE_RATE_MIN_DATA_POINTS } from './engineConfig';
 
 const GAMMA_API = '/gamma-api';
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ─── Cache helpers ───
 const CACHE_KEY = 'polymarket_base_rates';
-const CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
+const CACHE_TTL = CACHE_TTL_24H;
 
 function loadCache() {
   try {
@@ -35,10 +36,10 @@ function saveCache(data) {
 }
 
 // ─── Fetch resolved markets ───
-const MAX_RESOLVED = 5000;
-const MAX_RESOLVED_PAGES = 200;
+const MAX_RESOLVED = BASE_RATE_MAX_RESOLVED;
+const MAX_RESOLVED_PAGES = BASE_RATE_MAX_PAGES;
 const MAX_CONSECUTIVE_EMPTY_RESOLVED = 3;
-const RESOLVED_CONCURRENCY = 4; // Parallel page fetches (conservative vs api.js's 5)
+const RESOLVED_CONCURRENCY = BASE_RATE_CONCURRENCY;
 
 async function fetchResolvedPage(url, signal, maxRetries = 3) {
   let lastWas429 = false;

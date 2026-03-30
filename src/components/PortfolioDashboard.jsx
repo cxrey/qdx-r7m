@@ -6,6 +6,7 @@ import { useState, useCallback } from 'react';
 import CorrelationMatrix from './CorrelationMatrix';
 import ClusterCard from './ClusterCard';
 import CalibrationTracker from './CalibrationTracker';
+import { formatPrice } from '../formatters';
 
 const CYAN = '#00d4aa';
 const PINK = '#ff4d6a';
@@ -17,11 +18,6 @@ function formatValue(v) {
   if (Math.abs(v) >= 1_000_000) return `$${(v / 1_000_000).toFixed(1)}M`;
   if (Math.abs(v) >= 1_000) return `$${(v / 1_000).toFixed(1)}K`;
   return `$${v.toFixed(2)}`;
-}
-
-function formatPrice(p) {
-  if (p == null) return '\u2014';
-  return `${(p * 100).toFixed(1)}\u00A2`;
 }
 
 const SORT_OPTIONS = [

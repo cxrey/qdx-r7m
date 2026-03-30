@@ -1,5 +1,7 @@
 import { truncateSlugNumerics } from './utils/detectMarketLink';
 import { withTimeout, TIMEOUT_GAMMA_PAGE } from './fetchUtils';
+import { throwIfRateLimited } from './clobErrorHandler';
+import { parseGammaMarkets, parseOrderBook } from './schemas';
 
 const GAMMA_API = '/gamma-api';
 const CLOB_API = '/clob-api';
@@ -113,19 +115,15 @@ export async function fetchAllMarkets(onProgress, signal) {
 
   console.log(`[fetchAllMarkets] Fetch complete: ${allRaw.length} markets in ${Date.now() - startTime}ms (${pageOffset} pages)`);
 
-  return allRaw;
+  return parseGammaMarkets(allRaw);
 }
 
 export async function fetchOrderBook(tokenId, signal) {
   try {
     const res = await fetch(`${CLOB_API}/book?token_id=${tokenId}`, { signal: withTimeout(signal, TIMEOUT_ORDER_BOOK) });
-    if (res.status === 429 || res.status === 403) {
-      const err = new Error(res.status === 403 ? 'Forbidden' : 'Rate limited');
-      err.status = res.status;
-      throw err;
-    }
+    throwIfRateLimited(res);
     if (!res.ok) return null;
-    return await res.json();
+    return parseOrderBook(await res.json());
   } catch (e) {
     if (e?.status === 429 || e?.status === 403) throw e;
     if (e.name !== 'AbortError') console.warn('[fetchOrderBook] Failed:', e.message);
@@ -143,11 +141,7 @@ export async function fetchPriceHistory(tokenId, interval, fidelity, startTs, en
     }
     if (fidelity) url += `&fidelity=${fidelity}`;
     const res = await fetch(url, { signal: withTimeout(signal, TIMEOUT_PRICE_HISTORY) });
-    if (res.status === 429 || res.status === 403) {
-      const err = new Error(res.status === 403 ? 'Forbidden' : 'Rate limited');
-      err.status = res.status;
-      throw err;
-    }
+    throwIfRateLimited(res);
     if (!res.ok) return null;
     return await res.json();
   } catch (e) {

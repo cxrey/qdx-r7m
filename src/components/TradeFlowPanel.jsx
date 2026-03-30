@@ -12,7 +12,8 @@ import {
   getCachedTradeFlow, setCachedTradeFlow,
   formatUsdcSize, formatTimeAgo, truncateWallet,
 } from '../TradeFlowEngine';
-import { isClobRateLimited, triggerClobRateLimit } from '../clobRateLimit';
+import { isClobRateLimited } from '../clobRateLimit';
+import { handleClobError, rateLimitMessage } from '../clobErrorHandler';
 import { CYAN, PINK, PURPLE, AMBER, RED } from '../uiConfig';
 
 const RELIABILITY_CONFIG = {
@@ -148,9 +149,8 @@ export default function TradeFlowPanel({ market, bookData }) {
       setCachedTradeFlow(market.id, analysis);
       setFlowData(analysis);
     } catch (err) {
-      if (err?.status === 429 || err?.status === 403) {
-        triggerClobRateLimit(err.status);
-        if (mountedRef.current) setError('CLOB API rate limited — paused for 60s');
+      if (handleClobError(err)) {
+        if (mountedRef.current) setError(rateLimitMessage(err.status));
         return;
       }
       if (mountedRef.current) {

@@ -1,5 +1,6 @@
 import { useState, useMemo, useCallback } from 'react';
 import { calculateCompoundProbability } from '../ConjunctionEngine';
+import AnalysisCard from './AnalysisCard';
 
 const TYPE_COLORS = {
   ALL_OF: '#ff4d6a',
@@ -103,17 +104,12 @@ export default function ConjunctionCard({ market, conjunction, allMarkets }) {
     : `${type === 'ANY_OF' ? '' : conditionCount + ' '}${TYPE_DESCRIPTIONS[type]}`;
 
   return (
-    <div className="rounded-lg border border-[#1f2937] p-4" style={{ background: '#111827' }}>
-      {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="text-xs font-semibold text-gray-400 uppercase">
-          Conjunction Probability Calculator
-        </div>
-        {confidence === 'LOW' && (
-          <span className="text-[10px] text-gray-500">Low confidence detection</span>
-        )}
-      </div>
-
+    <AnalysisCard
+      title="Conjunction Probability Calculator"
+      headerExtra={confidence === 'LOW' ? (
+        <span className="text-[10px] text-gray-500">Low confidence detection</span>
+      ) : undefined}
+    >
       {/* Type badge */}
       <div
         className="inline-block px-3 py-1.5 rounded-md text-xs font-bold mb-4"
@@ -315,7 +311,7 @@ export default function ConjunctionCard({ market, conjunction, allMarkets }) {
           Conditions could not be auto-extracted — enter your estimates manually using the sliders above.
         </div>
       )}
-    </div>
+    </AnalysisCard>
   );
 }
 

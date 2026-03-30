@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo, lazy, Suspense } from 'react';
 import { fetchPriceHistory, fetchOrderBook } from '../api';
-import { isClobRateLimited, triggerClobRateLimit } from '../clobRateLimit';
+import { useFetchWithCache } from '../hooks/useFetchWithCache';
 import PriceChart from './PriceChart';
 import DepthChart from './DepthChart';
 import OrderBookTable from './OrderBookTable';
@@ -13,6 +13,7 @@ import SpreadFrictionCard from './SpreadFrictionCard';
 import ConjunctionCard from './ConjunctionCard';
 import PortfolioImpact from './PortfolioImpact';
 import TradeFlowPanel from './TradeFlowPanel';
+import { formatVolume } from '../formatters';
 
 // Code-split heavy components
 const KellyCalculator = lazy(() => import('./KellyCalculator'));
@@ -30,23 +31,7 @@ const TIMEFRAMES = [
   { label: 'Max', interval: 'max', fidelity: 4320 },
 ];
 
-// Simple cache with TTL
-const cache = new Map();
-function cacheGet(key) {
-  const entry = cache.get(key);
-  if (!entry) return null;
-  if (Date.now() - entry.ts > entry.ttl) { cache.delete(key); return null; }
-  return entry.data;
-}
-function cacheSet(key, data, ttl) {
-  cache.set(key, { data, ts: Date.now(), ttl });
-}
-
-function formatVolume(v) {
-  if (v >= 1_000_000) return `$${(v / 1_000_000).toFixed(1)}M`;
-  if (v >= 1_000) return `$${(v / 1_000).toFixed(1)}K`;
-  return `$${v.toFixed(0)}`;
-}
+// Cache helpers moved to useFetchWithCache hook
 
 function formatTimeRemaining(days) {
   if (days == null) return 'N/A';
@@ -67,16 +52,9 @@ function Skeleton({ className }) {
   return <div className={`animate-pulse bg-gray-800 rounded ${className}`} />;
 }
 
-export default function MarketDetailPanel({ market, onBookData, onFlowData, portfolio }) {
+export default function MarketDetailPanel({ market, onBookData, onFlowData, onLivePriceUpdate, portfolio }) {
   const [side, setSide] = useState('yes'); // 'yes' or 'no'
   const [timeframe, setTimeframe] = useState(TIMEFRAMES[2]); // default 30D
-  const [priceData, setPriceData] = useState(null);
-  const [priceLoading, setPriceLoading] = useState(false);
-  const [priceError, setPriceError] = useState(null);
-  const [bookData, setBookData] = useState(null);
-  const [bookLoading, setBookLoading] = useState(false);
-  const [bookError, setBookError] = useState(null);
-  const mountedRef = useRef(true);
 
   const yesTokenId = market.clobTokenIds?.[0];
   const noTokenId = market.clobTokenIds?.[1];
@@ -86,101 +64,80 @@ export default function MarketDetailPanel({ market, onBookData, onFlowData, port
     ? `https://polymarket.com/event/${market.slug}`
     : 'https://polymarket.com';
 
-  // Fetch price history
-  const loadPriceHistory = useCallback(async () => {
-    if (!tokenId) return;
-    if (isClobRateLimited()) {
-      setPriceError('CLOB API rate limited — try again later');
-      return;
+  // Fetch price history via shared hook
+  const priceFetcher = useCallback(async () => {
+    if (!tokenId) return null;
+    if (timeframe.useTs) {
+      const now = Math.floor(Date.now() / 1000);
+      const start = now - timeframe.days * 86400;
+      return fetchPriceHistory(tokenId, null, timeframe.fidelity, start, now);
     }
-    const cacheKey = `price-${tokenId}-${timeframe.label}`;
-    const cached = cacheGet(cacheKey);
-    if (cached) { setPriceData(cached); return; }
-
-    setPriceLoading(true);
-    setPriceError(null);
-    try {
-      let data;
-      if (timeframe.useTs) {
-        const now = Math.floor(Date.now() / 1000);
-        const start = now - timeframe.days * 86400;
-        data = await fetchPriceHistory(tokenId, null, timeframe.fidelity, start, now);
-      } else {
-        data = await fetchPriceHistory(tokenId, timeframe.interval, timeframe.fidelity);
-      }
-      if (mountedRef.current) {
-        setPriceData(data);
-        if (data) cacheSet(cacheKey, data, 60000);
-      }
-    } catch (err) {
-      if (err?.status === 429 || err?.status === 403) {
-        triggerClobRateLimit(err.status);
-        if (mountedRef.current) setPriceError('CLOB API rate limited — paused for 60s');
-        return;
-      }
-      if (mountedRef.current) setPriceError('Failed to load price history');
-    } finally {
-      if (mountedRef.current) setPriceLoading(false);
-    }
+    return fetchPriceHistory(tokenId, timeframe.interval, timeframe.fidelity);
   }, [tokenId, timeframe]);
 
-  // Fetch order book
-  const loadOrderBook = useCallback(async () => {
-    if (!tokenId) return;
-    if (isClobRateLimited()) {
-      setBookError('CLOB API rate limited — try again later');
-      return;
-    }
-    const cacheKey = `book-${tokenId}`;
-    const cached = cacheGet(cacheKey);
-    if (cached) {
-      setBookData(cached);
-      if (onBookData) onBookData(market.id, cached);
-      return;
-    }
+  const {
+    data: priceData, loading: priceLoading, error: priceError, refetch: loadPriceHistory,
+  } = useFetchWithCache({
+    cacheKey: tokenId ? `price-${tokenId}-${timeframe.label}` : null,
+    cacheTtl: 60000,
+    fetcher: priceFetcher,
+  });
 
-    setBookLoading(true);
-    setBookError(null);
-    try {
-      const data = await fetchOrderBook(tokenId);
-      if (mountedRef.current) {
-        setBookData(data);
-        if (data) {
-          cacheSet(cacheKey, data, 30000);
-          if (onBookData) onBookData(market.id, data);
-        }
-      }
-    } catch (err) {
-      if (err?.status === 429 || err?.status === 403) {
-        triggerClobRateLimit(err.status);
-        if (mountedRef.current) setBookError('CLOB API rate limited — paused for 60s');
-        return;
-      }
-      if (mountedRef.current) setBookError('Failed to load order book');
-    } finally {
-      if (mountedRef.current) setBookLoading(false);
-    }
+  // Fetch order book via shared hook
+  const bookOnSuccess = useCallback((data) => {
+    if (data && onBookData) onBookData(market.id, data);
+  }, [market.id, onBookData]);
+
+  const bookFetcher = useCallback(async () => {
+    if (!tokenId) return null;
+    return fetchOrderBook(tokenId);
   }, [tokenId]);
 
+  const {
+    data: bookData, loading: bookLoading, error: bookError, refetch: loadOrderBook,
+  } = useFetchWithCache({
+    cacheKey: tokenId ? `book-${tokenId}` : null,
+    cacheTtl: 30000,
+    fetcher: bookFetcher,
+    onSuccess: bookOnSuccess,
+  });
+
   useEffect(() => {
-    mountedRef.current = true;
     loadPriceHistory();
     loadOrderBook();
-    return () => { mountedRef.current = false; };
   }, [loadPriceHistory, loadOrderBook]);
 
-  const refreshBook = () => {
-    if (tokenId) {
-      cache.delete(`book-${tokenId}`);
-      loadOrderBook();
-    }
-  };
+  // Push live prices from CLOB price history up to parent (updates table row)
+  useEffect(() => {
+    if (!onLivePriceUpdate || !priceData?.history?.length) return;
+    const lastPrice = priceData.history[priceData.history.length - 1].p;
+    if (lastPrice == null) return;
+    const yesPrice = side === 'yes' ? lastPrice : 1 - lastPrice;
+    const noPrice = 1 - yesPrice;
+    onLivePriceUpdate(market.id, yesPrice, noPrice);
+  }, [priceData, side, market.id, onLivePriceUpdate]);
+
+  const refreshBook = loadOrderBook;
 
   // Price delta
   const history = priceData?.history || [];
   const currentPrice = history.length > 0 ? history[history.length - 1].p * 100 : null;
   const firstPrice = history.length > 0 ? history[0].p * 100 : null;
   const delta = currentPrice != null && firstPrice != null ? currentPrice - firstPrice : null;
+
+  // Live prices from CLOB price history — overrides stale Gamma outcomePrices.
+  // NOTE: Order book midpoint is NOT a reliable price source on Polymarket — books
+  // can have huge spreads (e.g. bid 0.1¢, ask 99.9¢ → midpoint 50¢) on illiquid markets.
+  // Price history's last data point is the most recent trade/quote and is authoritative.
+  const liveCurrentSide = currentPrice != null ? currentPrice / 100 : null;
+  const liveYesPrice = liveCurrentSide != null
+    ? (side === 'yes' ? liveCurrentSide : 1 - liveCurrentSide)
+    : null;
+  const liveNoPrice = liveYesPrice != null ? 1 - liveYesPrice : null;
+
+  // Display prices: prefer live CLOB prices over stale Gamma prices
+  const displayYesPrice = liveYesPrice ?? market.yesPrice;
+  const displayNoPrice = liveNoPrice ?? market.noPrice;
 
   const sideColor = side === 'yes' ? CYAN : PINK;
 
@@ -202,8 +159,8 @@ export default function MarketDetailPanel({ market, onBookData, onFlowData, port
             </div>
             <div className="flex items-center gap-4 text-xs text-[#9ca3af] flex-wrap">
               <span>Closes: <span className="text-gray-300">{market.endDate}</span></span>
-              <span>Yes: <span style={{ color: CYAN }}>{market.yesPrice != null ? `${(market.yesPrice * 100).toFixed(1)}¢` : '—'}</span></span>
-              <span>No: <span style={{ color: PINK }}>{market.noPrice != null ? `${(market.noPrice * 100).toFixed(1)}¢` : '—'}</span></span>
+              <span>Yes: <span style={{ color: CYAN }}>{displayYesPrice != null ? `${(displayYesPrice * 100).toFixed(1)}¢` : '—'}</span></span>
+              <span>No: <span style={{ color: PINK }}>{displayNoPrice != null ? `${(displayNoPrice * 100).toFixed(1)}¢` : '—'}</span></span>
               <span>Volume: <span className="text-gray-300">{formatVolume(market.volume)}</span></span>
               <span>Time left: <span className="text-gray-300">{formatTimeRemaining(market.daysLeft)}</span></span>
             </div>
@@ -352,13 +309,13 @@ export default function MarketDetailPanel({ market, onBookData, onFlowData, port
               <div>
                 <div className="text-xs text-gray-500 mb-1">Yes</div>
                 <div className="text-xl font-bold" style={{ color: CYAN }}>
-                  {market.yesPrice != null ? `${(market.yesPrice * 100).toFixed(1)}¢` : '—'}
+                  {displayYesPrice != null ? `${(displayYesPrice * 100).toFixed(1)}¢` : '—'}
                 </div>
               </div>
               <div>
                 <div className="text-xs text-gray-500 mb-1">No</div>
                 <div className="text-xl font-bold" style={{ color: PINK }}>
-                  {market.noPrice != null ? `${(market.noPrice * 100).toFixed(1)}¢` : '—'}
+                  {displayNoPrice != null ? `${(displayNoPrice * 100).toFixed(1)}¢` : '—'}
                 </div>
               </div>
             </div>
@@ -371,8 +328,8 @@ export default function MarketDetailPanel({ market, onBookData, onFlowData, port
               <Row label="Resolution" value={market.endDate} />
               <Row label="Spread" value={
                 market.spread != null
-                  ? `${(market.spread * 100).toFixed(2)}¢ (${market.yesPrice != null && market.noPrice != null
-                    ? `${((market.spread / ((market.yesPrice + market.noPrice) / 2)) * 100).toFixed(1)}%`
+                  ? `${(market.spread * 100).toFixed(2)}¢ (${displayYesPrice != null && displayNoPrice != null
+                    ? `${((market.spread / ((displayYesPrice + displayNoPrice) / 2)) * 100).toFixed(1)}%`
                     : 'N/A'})`
                   : 'N/A'
               } />
