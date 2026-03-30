@@ -71,24 +71,21 @@ describe('fetchMarketTrades', () => {
 // ── fetchMarketHolders ─────────────────────────────────────────────
 
 describe('fetchMarketHolders', () => {
-  it('tries 3 endpoint variants in sequential order', async () => {
+  it('calls single holders?market= URL', async () => {
     mockFetch.mockResolvedValue(new Response('Not Found', { status: 404 }));
     await fetchMarketHolders('cond-abc');
-    expect(mockFetch).toHaveBeenCalledTimes(3);
-    // Verify sequential ordering: holders?market → holders?conditionId → positions?market
-    const urls = mockFetch.mock.calls.map((c) => c[0]);
-    expect(urls[0]).toContain('/holders?market=cond-abc');
-    expect(urls[1]).toContain('/holders?conditionId=cond-abc');
-    expect(urls[2]).toContain('/positions?market=cond-abc');
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockFetch.mock.calls[0][0]).toContain('/holders?market=cond-abc');
   });
 
-  it('returns null when all variants fail', async () => {
+  it('returns null on non-200 response', async () => {
     mockFetch.mockResolvedValue(new Response('Not Found', { status: 404 }));
     const result = await fetchMarketHolders('cond-abc');
+    expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(result).toBeNull();
   });
 
-  it('returns parsed data on first success and short-circuits', async () => {
+  it('returns parsed data on success', async () => {
     const holders = [{ wallet: '0xabc', amount: 1000 }];
     mockFetch.mockResolvedValueOnce(new Response(JSON.stringify(holders), { status: 200 }));
     const result = await fetchMarketHolders('cond-abc');

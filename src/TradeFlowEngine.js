@@ -46,28 +46,21 @@ export async function fetchMarketTrades(conditionId) {
 }
 
 export async function fetchMarketHolders(conditionId) {
-  // Try multiple param names and endpoints
-  const urls = [
-    `${DATA_API}/holders?market=${conditionId}&limit=20`,
-    `${DATA_API}/holders?conditionId=${conditionId}&limit=20`,
-    `${DATA_API}/positions?market=${conditionId}&limit=20`,
-  ];
-  for (const url of urls) {
-    try {
-      const res = await fetch(url, { signal: withTimeout(null, TIMEOUT_DATA_API) });
-      throwIfRateLimited(res);
-      if (!res.ok) continue;
-      const data = await res.json();
-      if (data && (Array.isArray(data) ? data.length > 0 : Object.keys(data).length > 0)) {
-        return data;
-      }
-    } catch (e) {
-      if (e?.status === 429 || e?.status === 403) throw e;
-      /* try next */
+  const url = `${DATA_API}/holders?market=${conditionId}&limit=20`;
+  try {
+    const res = await fetch(url, { signal: withTimeout(null, TIMEOUT_DATA_API) });
+    throwIfRateLimited(res);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (data && (Array.isArray(data) ? data.length > 0 : Object.keys(data).length > 0)) {
+      return data;
     }
+    return null;
+  } catch (e) {
+    if (e?.status === 429 || e?.status === 403) throw e;
+    // Holders data not available — feature works without it
+    return null;
   }
-  // Holders data not available — feature works without it
-  return null;
 }
 
 export async function fetchLeaderboard() {
