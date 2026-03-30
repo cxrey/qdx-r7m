@@ -62,9 +62,14 @@ export function processAllInWorker(rawMarkets) {
       });
     };
 
-    // Timeout: if Worker hangs for 30s, fall back to main thread
+    // Timeout: if Worker hangs for 30s, terminate it and fall back to main thread.
+    // Without terminate(), getAnalysisWorker() returns the same hung instance and
+    // every subsequent call times out too — only a page reload would recover.
     const timeout = setTimeout(() => {
-      if (!settled) fallbackToMainThread('Timed out after 30s');
+      if (!settled) {
+        terminateAnalysisWorker();
+        fallbackToMainThread('Timed out after 30s');
+      }
     }, WORKER_TIMEOUT);
 
     try {
