@@ -290,7 +290,7 @@ function App() {
         </div>
 
         {/* Search Bar */}
-        <div className="flex-1 max-w-md mx-4 relative">
+        <div className="flex-1 max-w-2xl mx-4 relative">
           <input
             type="text"
             placeholder="Search markets or paste a Polymarket link..."
