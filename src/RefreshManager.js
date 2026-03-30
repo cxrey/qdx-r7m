@@ -13,7 +13,7 @@ import { PriceUpdateBatcher } from './PriceUpdateBatcher';
 import { fetchAllMarkets } from './api';
 import { processMarket, enrichWithBaseRate } from './processMarket';
 import { processAllInWorker } from './workerManager';
-import { handleRateLimit, getBackoffMultiplier, onBackoffChange } from './ApiHealthManager';
+import { handleRateLimit, getBackoffMultiplier, onBackoffChange, isClobRateLimited } from './ApiHealthManager';
 
 const TIER2_INTERVAL = 60 * 1000;            // 60 sec (3 requests per cycle)
 const TIER2_COOLDOWN = 30 * 1000;            // min gap between Tier 2 runs (must be < TIER2_INTERVAL)
@@ -283,6 +283,9 @@ export class RefreshManager {
 
   async _pollPrices() {
     if (!this._enabled) return;
+    // Don't hammer Gamma API while the circuit breaker is tripped — the 30s
+    // polling interval ignores backoff and would extend the rate limit window.
+    if (isClobRateLimited()) return;
     try {
       // Fetch first 3 pages of markets sorted by volume (most active)
       const updates = new Map();
