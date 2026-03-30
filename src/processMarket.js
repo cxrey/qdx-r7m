@@ -43,6 +43,21 @@ function inferCategory(question, slug) {
 
 export const ALL_CATEGORIES = CATEGORY_RULES.map((r) => r.category).concat('Other');
 
+// Map Gamma API category slugs to our display categories.
+// Unmapped slugs fall through to regex inferCategory.
+const GAMMA_CATEGORY_MAP = {
+  'us-current-affairs': 'Politics',
+  'us-politics': 'Politics',
+  'world-politics': 'Geopolitics',
+  'crypto': 'Crypto',
+  'sports': 'Sports',
+  'science': 'Science',
+  'pop-culture': 'Pop Culture',
+  'business': 'Finance',
+  'technology': 'Tech',
+  'legal': 'Legal',
+};
+
 export function processMarket(market) {
   const _engineFailures = [];
 
@@ -84,7 +99,10 @@ export function processMarket(market) {
 
   const question = market.question || market.title || 'Untitled';
   const slug = market.events?.[0]?.slug || market.slug || '';
-  const category = inferCategory(question, slug);
+  // Prefer Gamma's own categorization when mapped, fall back to regex
+  const rawCategory = market.category || null;
+  const mappedCategory = rawCategory ? GAMMA_CATEGORY_MAP[rawCategory.toLowerCase()] : null;
+  const category = mappedCategory || inferCategory(question, slug);
 
   let resolutionAnalysis = null;
   try {

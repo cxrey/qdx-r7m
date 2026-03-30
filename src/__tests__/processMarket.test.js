@@ -97,6 +97,30 @@ describe('inferCategory (via processMarket)', () => {
     }));
     expect(result.category).toBe('Crypto');
   });
+
+  it('uses Gamma category when mapped', () => {
+    const m = processMarket(makeRawMarket({
+      question: 'Will my coffee be cold?',
+      category: 'crypto',
+    }));
+    expect(m.category).toBe('Crypto');
+  });
+
+  it('falls back to regex when Gamma category is unmapped', () => {
+    const m = processMarket(makeRawMarket({
+      question: 'Will Bitcoin reach $100K?',
+      category: 'something-unknown',
+    }));
+    expect(m.category).toBe('Crypto'); // regex catches "Bitcoin"
+  });
+
+  it('falls back to regex when Gamma category is empty', () => {
+    const m = processMarket(makeRawMarket({
+      question: 'Will Bitcoin reach $100K?',
+      category: '',
+    }));
+    expect(m.category).toBe('Crypto');
+  });
 });
 
 // =====================================================================
