@@ -174,7 +174,10 @@ describe('processMarket', () => {
       'spread', 'flb', 'theta', 'resolutionAnalysis', 'volumeEfficiency',
       'baseRate', 'conjunction', 'conditionId', 'clobTokenIds', 'active',
       'closed', 'gammaBestBid', 'gammaBestAsk', 'gammaSpread',
-      'oneDayPriceChange', 'lastTradePrice', '_engineFailures',
+      'oneDayPriceChange', 'lastTradePrice',
+      'liquidityClob', 'liquidityAmm', 'competitive', 'negRisk',
+      'commentCount', 'volume1wk', 'volume1mo', 'acceptingOrders',
+      'feesEnabled', 'gammaCategory', '_engineFailures',
     ];
     for (const key of expectedKeys) {
       expect(m).toHaveProperty(key);
@@ -224,6 +227,44 @@ describe('processMarket', () => {
     expect(m.gammaBestBid).toBeNull();
     expect(m.gammaBestAsk).toBeNull();
     expect(m.gammaSpread).toBeNull();
+  });
+
+  it('extracts market metadata fields when present', () => {
+    const m = processMarket(makeRawMarket({
+      liquidityClob: 5000,
+      competitive: 0.85,
+      negRisk: true,
+      volume1wk: 100000,
+      volume1mo: 500000,
+      acceptingOrders: true,
+      feesEnabled: true,
+      category: 'crypto',
+      events: [{ slug: 'test', liquidityAmm: 300, commentCount: 42 }],
+    }));
+    expect(m.liquidityClob).toBe(5000);
+    expect(m.liquidityAmm).toBe(300);
+    expect(m.competitive).toBe(0.85);
+    expect(m.negRisk).toBe(true);
+    expect(m.commentCount).toBe(42);
+    expect(m.volume1wk).toBe(100000);
+    expect(m.volume1mo).toBe(500000);
+    expect(m.acceptingOrders).toBe(true);
+    expect(m.feesEnabled).toBe(true);
+    expect(m.gammaCategory).toBe('crypto');
+  });
+
+  it('defaults metadata fields to null/false when absent', () => {
+    const m = processMarket(makeRawMarket());
+    expect(m.liquidityClob).toBeNull();
+    expect(m.liquidityAmm).toBeNull();
+    expect(m.competitive).toBeNull();
+    expect(m.negRisk).toBeNull();
+    expect(m.commentCount).toBeNull();
+    expect(m.volume1wk).toBeNull();
+    expect(m.volume1mo).toBeNull();
+    expect(m.acceptingOrders).toBeNull();
+    expect(m.feesEnabled).toBe(false);
+    expect(m.gammaCategory).toBeNull();
   });
 });
 

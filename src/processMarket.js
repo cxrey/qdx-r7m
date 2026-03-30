@@ -144,9 +144,19 @@ export function processMarket(market) {
     _engineFailures.push('edgeScore');
   }
 
-  // ── Gamma API field extraction (no new API calls) ──────────────
+  // ── Gamma API field extraction (no new API calls) ─────────────���───────────
   const oneDayPriceChange = market.oneDayPriceChange != null ? Number(market.oneDayPriceChange) : null;
   const lastTradePrice = market.lastTradePrice != null ? Number(market.lastTradePrice) : null;
+  const liquidityClob = market.liquidityClob != null ? Number(market.liquidityClob) : null;
+  const liquidityAmm = market.events?.[0]?.liquidityAmm != null ? Number(market.events[0].liquidityAmm) : null;
+  const competitive = market.competitive != null ? Number(market.competitive) : null;
+  const negRisk = typeof market.negRisk === 'boolean' ? market.negRisk : null;
+  const commentCount = market.events?.[0]?.commentCount != null ? Number(market.events[0].commentCount) : null;
+  const volume1wk = market.volume1wk != null ? Number(market.volume1wk) : null;
+  const volume1mo = market.volume1mo != null ? Number(market.volume1mo) : null;
+  const acceptingOrders = typeof market.acceptingOrders === 'boolean' ? market.acceptingOrders : null;
+  const feesEnabled = market.feesEnabled ?? false;
+  const gammaCategory = market.category || null;
 
   return {
     id: market.id,
@@ -177,6 +187,16 @@ export function processMarket(market) {
     gammaSpread,
     oneDayPriceChange,
     lastTradePrice,
+    liquidityClob,
+    liquidityAmm,
+    competitive,
+    negRisk,
+    commentCount,
+    volume1wk,
+    volume1mo,
+    acceptingOrders,
+    feesEnabled,
+    gammaCategory,
     _engineFailures,
   };
 }
