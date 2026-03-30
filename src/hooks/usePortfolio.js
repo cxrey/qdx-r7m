@@ -243,7 +243,10 @@ export function usePortfolio(loadedMarkets) {
     };
   }, [allPositions]);
 
-  return {
+  // Memoize the return object so PortfolioContext consumers don't re-render
+  // when the parent re-renders but no portfolio data actually changed.
+  // Every field below is already reference-stable (useState, useCallback, useMemo).
+  return useMemo(() => ({
     walletAddress,
     connectWallet,
     disconnectWallet,
@@ -265,5 +268,11 @@ export function usePortfolio(loadedMarkets) {
     isMarketHeld,
     heldMarketIds,
     hasPortfolio: allPositions.length > 0,
-  };
+  }), [
+    walletAddress, connectWallet, disconnectWallet, loading, error,
+    lastRefresh, refreshPositions, allPositions, walletPositions,
+    manualPositions, addManualPosition, removeManualPosition, analysis,
+    activeAlerts, handleDismissAlert, summary, screenTrade,
+    getHeldPosition, isMarketHeld, heldMarketIds,
+  ]);
 }
