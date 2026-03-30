@@ -173,11 +173,29 @@ describe('processMarket', () => {
       'volume', 'volume24hr', 'daysLeft', 'endDate', 'category', 'edgeScore',
       'spread', 'flb', 'theta', 'resolutionAnalysis', 'volumeEfficiency',
       'baseRate', 'conjunction', 'conditionId', 'clobTokenIds', 'active',
-      'closed', '_engineFailures',
+      'closed', 'oneDayPriceChange', 'lastTradePrice', '_engineFailures',
     ];
     for (const key of expectedKeys) {
       expect(m).toHaveProperty(key);
     }
+  });
+
+  // ── Gamma field extraction ──
+
+  it('extracts oneDayPriceChange from API data', () => {
+    const m = processMarket(makeRawMarket({ oneDayPriceChange: -0.005 }));
+    expect(m.oneDayPriceChange).toBe(-0.005);
+  });
+
+  it('extracts lastTradePrice from API data', () => {
+    const m = processMarket(makeRawMarket({ lastTradePrice: 0.36 }));
+    expect(m.lastTradePrice).toBe(0.36);
+  });
+
+  it('defaults oneDayPriceChange and lastTradePrice to null when absent', () => {
+    const m = processMarket(makeRawMarket());
+    expect(m.oneDayPriceChange).toBeNull();
+    expect(m.lastTradePrice).toBeNull();
   });
 });
 

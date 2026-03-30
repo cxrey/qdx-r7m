@@ -134,6 +134,10 @@ export function processMarket(market) {
     _engineFailures.push('edgeScore');
   }
 
+  // ── Gamma API field extraction (no new API calls) ──────────────
+  const oneDayPriceChange = market.oneDayPriceChange != null ? Number(market.oneDayPriceChange) : null;
+  const lastTradePrice = market.lastTradePrice != null ? Number(market.lastTradePrice) : null;
+
   return {
     id: market.id,
     question,
@@ -158,6 +162,8 @@ export function processMarket(market) {
     clobTokenIds,
     active: market.active,
     closed: market.closed,
+    oneDayPriceChange,
+    lastTradePrice,
     _engineFailures,
   };
 }
