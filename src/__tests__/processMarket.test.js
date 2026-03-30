@@ -173,7 +173,8 @@ describe('processMarket', () => {
       'volume', 'volume24hr', 'daysLeft', 'endDate', 'category', 'edgeScore',
       'spread', 'flb', 'theta', 'resolutionAnalysis', 'volumeEfficiency',
       'baseRate', 'conjunction', 'conditionId', 'clobTokenIds', 'active',
-      'closed', 'oneDayPriceChange', 'lastTradePrice', '_engineFailures',
+      'closed', 'gammaBestBid', 'gammaBestAsk', 'gammaSpread',
+      'oneDayPriceChange', 'lastTradePrice', '_engineFailures',
     ];
     for (const key of expectedKeys) {
       expect(m).toHaveProperty(key);
@@ -196,6 +197,33 @@ describe('processMarket', () => {
     const m = processMarket(makeRawMarket());
     expect(m.oneDayPriceChange).toBeNull();
     expect(m.lastTradePrice).toBeNull();
+  });
+
+  it('uses bid-ask spread when gammaBestBid and gammaBestAsk are present', () => {
+    const m = processMarket(makeRawMarket({ bestBid: 0.50, bestAsk: 0.56 }));
+    expect(m.spread).toBeCloseTo(0.06);
+    expect(m.gammaBestBid).toBe(0.50);
+    expect(m.gammaBestAsk).toBe(0.56);
+  });
+
+  it('falls back to overround spread when bid/ask absent', () => {
+    // yesPrice=0.55, noPrice=0.45 → overround = |1 - 0.55 - 0.45| = 0
+    const m = processMarket(makeRawMarket());
+    expect(m.spread).toBeCloseTo(0);
+    expect(m.gammaBestBid).toBeNull();
+    expect(m.gammaBestAsk).toBeNull();
+  });
+
+  it('extracts gammaSpread from API data', () => {
+    const m = processMarket(makeRawMarket({ spread: 0.14 }));
+    expect(m.gammaSpread).toBe(0.14);
+  });
+
+  it('defaults gammaBestBid, gammaBestAsk, gammaSpread to null when absent', () => {
+    const m = processMarket(makeRawMarket());
+    expect(m.gammaBestBid).toBeNull();
+    expect(m.gammaBestAsk).toBeNull();
+    expect(m.gammaSpread).toBeNull();
   });
 });
 

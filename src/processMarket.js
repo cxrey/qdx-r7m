@@ -68,9 +68,19 @@ export function processMarket(market) {
   const volume = parseFloat(market.volume || 0);
   const volume24hr = parseFloat(market.volume24hr || 0);
 
-  const spread = (yesPrice != null && noPrice != null)
-    ? Math.abs(1 - yesPrice - noPrice)
-    : null;
+  const gammaBestBid = market.bestBid != null ? Number(market.bestBid) : null;
+  const gammaBestAsk = market.bestAsk != null ? Number(market.bestAsk) : null;
+  const gammaSpread = market.spread != null ? Number(market.spread) : null;
+
+  // Prefer real bid-ask spread when available, fall back to overround estimate
+  let spread;
+  if (gammaBestBid != null && gammaBestAsk != null && gammaBestAsk > gammaBestBid) {
+    spread = gammaBestAsk - gammaBestBid;
+  } else if (yesPrice != null && noPrice != null) {
+    spread = Math.abs(1 - yesPrice - noPrice);
+  } else {
+    spread = null;
+  }
 
   const question = market.question || market.title || 'Untitled';
   const slug = market.events?.[0]?.slug || market.slug || '';
@@ -162,6 +172,9 @@ export function processMarket(market) {
     clobTokenIds,
     active: market.active,
     closed: market.closed,
+    gammaBestBid,
+    gammaBestAsk,
+    gammaSpread,
     oneDayPriceChange,
     lastTradePrice,
     _engineFailures,
