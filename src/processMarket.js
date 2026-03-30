@@ -66,7 +66,7 @@ const GAMMA_CATEGORY_MAP = {
 // Map event tag slugs → FEE_PARAMS keys for tags that don't match directly.
 // Direct matches (crypto, sports, business, pop-culture, science, weather,
 // mentions, other) don't need entries — they match FEE_PARAMS keys already.
-const TAG_SLUG_TO_FEE_SLUG = {
+export const TAG_SLUG_TO_FEE_SLUG = {
   'politics':    'us-politics',
   'geopolitics': 'world-politics',
   'tech':        'technology',
@@ -78,7 +78,7 @@ const TAG_SLUG_TO_FEE_SLUG = {
 // Last-resort fallback: map display category → fee slug for markets with no tags.
 // Must stay in sync with CATEGORY_RULES categories — if a new category is added there,
 // add a corresponding entry here or it will silently fall through to _default fee params.
-const DISPLAY_TO_FEE_SLUG = {
+export const DISPLAY_TO_FEE_SLUG = {
   'Politics':    'us-politics',
   'Crypto':      'crypto',
   'Sports':      'sports',
@@ -110,6 +110,7 @@ function extractFeeCategoryFromTags(tags) {
 }
 
 const _loggedSlugs = new Set();
+let _feeEnabledSeen = false;
 
 /** Safely coerce to finite number or null. Rejects NaN/Infinity/empty strings from bad API data. */
 function safeNum(val) {
@@ -170,7 +171,15 @@ export function processMarket(market) {
     console.debug('[processMarket] Unmapped Gamma category slug:', rawCategory);
   }
   const category = mappedCategory || inferCategory(question, slug);
-  // Fee slug: prefer API category field, then event tags, then inferred display category
+
+  // ── gammaCategory (fee slug) derivation ──────────────────────
+  // Three category concepts exist in the codebase:
+  //   1. Display category (UI): 'Crypto', 'Sports', 'Politics', etc.
+  //      Inferred from question text via regex (inferCategory). Used for UI pills and filters.
+  //   2. Gamma API category (raw): 'crypto', 'sports', 'us-politics', etc.
+  //      From market.category field — currently always null (API doesn't populate it).
+  //   3. Fee slug (gammaCategory): key into FEE_PARAMS for fee calculation.
+  //      Derived below with priority: rawCategory > event tags > display-category fallback.
   const tagCategory = extractFeeCategoryFromTags(market.events?.[0]?.tags);
   const gammaCategory = rawCategory || tagCategory || DISPLAY_TO_FEE_SLUG[category] || null;
 
@@ -233,6 +242,10 @@ export function processMarket(market) {
   const volume1mo = safeNum(market.volume1mo);
   const acceptingOrders = typeof market.acceptingOrders === 'boolean' ? market.acceptingOrders : null;
   const feesEnabled = market.feesEnabled ?? false;
+  if (feesEnabled && !_feeEnabledSeen) {
+    _feeEnabledSeen = true;
+    console.info('[processMarket] feesEnabled=true detected on', market.id, '— verify FEE_PARAMS against live API');
+  }
   // gammaCategory already extracted above (before engine calls)
   const openInterest = safeNum(market.events?.[0]?.openInterest);
 

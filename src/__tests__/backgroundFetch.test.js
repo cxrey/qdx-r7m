@@ -108,7 +108,8 @@ describe('spread batch', () => {
     const promise = runSpreadBatch(markets, { cache: makePlainObjectCache({}), signal: controller.signal });
     await vi.runAllTimersAsync();
     await promise;
-    // Aborted after call 3 — should not proceed much further
+    // Abort fires inside call 3's fetchOne, but processOne for call 3 may
+    // still run before the loop re-checks signal.aborted → bound is 4, not 3.
     expect(callCount).toBeLessThanOrEqual(4);
   });
 });

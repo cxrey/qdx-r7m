@@ -61,7 +61,7 @@ export async function runBatchSequential(items, config) {
       if (cancelled() || signal?.aborted) break;
       if (data) {
         const ok = processOne(item, data);
-        if (ok !== false) fetched++;
+        if (ok !== false) fetched++; // undefined/true → count; explicit false → skip
       }
     } catch (err) {
       if (err.name === 'AbortError') break;

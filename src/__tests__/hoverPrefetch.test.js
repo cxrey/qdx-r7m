@@ -1,21 +1,14 @@
 /**
- * IMPORTANT: createHoverPrefetcher() replicates the handleRowHover algorithm
- * from ResultsTable.jsx lines 453-497 (verified 2026-03-29).
- *
- * TODO(TD-1): Extract hover prefetch logic from ResultsTable.jsx into its
- * own module, then replace this replication with a direct import.
- * Tracked in deferred plan: .claude/plans/snappy-marinating-walrus.md
- *
- * If that logic changes, update this copy to match until extraction happens.
- *
- * Intentionally excluded from replica: hasClobSlotAvailable() and acquireClobSlot()
- * concurrency gating. Those are tested independently in clobConcurrency.test.js.
+ * Tests for the hover prefetch utility (hoverPrefetchUtils.js).
+ * Uses the real createHoverPrefetcher factory — no replica needed.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { fetchOrderBook, fetchPriceHistory } from '../api';
 import { isClobRateLimited, triggerClobRateLimit } from '../clobRateLimit';
 import { HOVER_DEBOUNCE_DELAY, PREFETCH_CACHE_TTL, PREFETCH_LRU_CAP } from '../uiConfig';
+import { createHoverPrefetcher } from '../hoverPrefetchUtils';
+import { makePlainObjectCache } from '../batchFetchUtils';
 
 vi.mock('../api', () => ({
   fetchOrderBook: vi.fn(),
@@ -27,71 +20,18 @@ vi.mock('../clobRateLimit', () => ({
   triggerClobRateLimit: vi.fn(),
 }));
 
-/**
- * Standalone replication of ResultsTable handleRowHover algorithm.
- * Tests the pattern without React rendering.
- *
- * Source: ResultsTable.jsx lines 453-497
- */
-function createHoverPrefetcher(spreadCache = {}) {
-  const cache = new Map(); // prefetchCache
-  let controller = null;   // prefetchController
-
-  function hover(marketId, market) {
-    const cached = cache.get(marketId);
-    if (cached && Date.now() - cached.timestamp < PREFETCH_CACHE_TTL) return;
-
-    if (controller) controller.abort();
-
-    // LRU eviction
-    if (cache.size >= PREFETCH_LRU_CAP) {
-      let oldestKey = null, oldestTime = Infinity;
-      for (const [key, val] of cache) {
-        if (val.timestamp < oldestTime) { oldestTime = val.timestamp; oldestKey = key; }
+vi.mock('../clobErrorHandler', async () => {
+  const { triggerClobRateLimit: trigger } = await import('../clobRateLimit');
+  return {
+    handleClobError: vi.fn((err) => {
+      if (err?.status === 429 || err?.status === 403) {
+        trigger(err.status);
+        return true;
       }
-      if (oldestKey) cache.delete(oldestKey);
-    }
-
-    controller = new AbortController();
-    const signal = controller.signal;
-
-    const timer = setTimeout(async () => {
-      if (signal.aborted) return;
-      if (isClobRateLimited()) return;
-      const yesTokenId = market.clobTokenIds?.[0];
-      if (!yesTokenId) return;
-
-      // Skip order book fetch if spread effect already cached it
-      const hasSpread = spreadCache[marketId] != null;
-
-      try {
-        const [bookData, priceHistory] = await Promise.all([
-          hasSpread
-            ? Promise.resolve(null)
-            : fetchOrderBook(yesTokenId).catch((err) => {
-                if (err?.status === 429 || err?.status === 403) triggerClobRateLimit(err.status);
-                return null;
-              }),
-          fetchPriceHistory(yesTokenId, '1d', null, null, null, signal).catch((err) => {
-            if (err?.status === 429 || err?.status === 403) triggerClobRateLimit(err.status);
-            return null;
-          }),
-        ]);
-        if (!signal.aborted) {
-          cache.set(marketId, { bookData, priceHistory, timestamp: Date.now() });
-        }
-      } catch (e) { /* ignore */ }
-    }, HOVER_DEBOUNCE_DELAY);
-
-    signal.addEventListener('abort', () => clearTimeout(timer));
-  }
-
-  function hoverEnd() {
-    if (controller) { controller.abort(); controller = null; }
-  }
-
-  return { hover, hoverEnd, cache };
-}
+      return false;
+    }),
+  };
+});
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -192,7 +132,7 @@ describe('hover prefetch', () => {
 
   it('skips order book fetch when spread cache already has data', async () => {
     // Spread effect already cached market m1's spread
-    const { hover } = createHoverPrefetcher({ m1: 0.02 });
+    const { hover } = createHoverPrefetcher({ spreadCache: makePlainObjectCache({ m1: 0.02 }) });
     hover('m1', { clobTokenIds: ['tok1'] });
     await vi.advanceTimersByTimeAsync(HOVER_DEBOUNCE_DELAY);
     // Order book skipped, only price history fetched
@@ -201,7 +141,7 @@ describe('hover prefetch', () => {
   });
 
   it('fetches order book when spread cache has no entry', async () => {
-    const { hover } = createHoverPrefetcher({}); // empty spread cache
+    const { hover } = createHoverPrefetcher({ spreadCache: makePlainObjectCache({}) });
     hover('m1', { clobTokenIds: ['tok1'] });
     await vi.advanceTimersByTimeAsync(HOVER_DEBOUNCE_DELAY);
     expect(fetchOrderBook).toHaveBeenCalledTimes(1);

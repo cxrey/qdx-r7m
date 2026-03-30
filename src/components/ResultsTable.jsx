@@ -1,17 +1,16 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { List, useDynamicRowHeight } from 'react-window';
 import MarketRow from './MarketRow';
-import { fetchOrderBook, fetchPriceHistory } from '../api';
 import { calculateSpread } from '../SpreadFrictionEngine';
+import { createHoverPrefetcher } from '../hoverPrefetchUtils';
 import { fetchMarketTrades, getLeaderboardIndex, analyzeTradeFlow, peekCachedTradeFlow, setCachedTradeFlow } from '../TradeFlowEngine';
 import { runSpreadBatch, runFlowBatch, runGapFill } from '../batchFetchUtils';
 import {
   ROW_HEIGHT, HEADER_HEIGHT, FOOTER_HEIGHT, BANNER_HEIGHT, CYAN,
   SPREAD_BATCH_START, FLOW_BATCH_START,
-  HOVER_DEBOUNCE_DELAY, PREFETCH_CACHE_TTL, PREFETCH_LRU_CAP, SPREAD_CACHE_CAP,
+  SPREAD_CACHE_CAP,
 } from '../uiConfig';
 import { isClobRateLimited, clearClobRateLimit, onClobRateLimitChange, getClobRecoverySeconds } from '../clobRateLimit';
-import { handleClobError } from '../clobErrorHandler';
 import { acquireClobSlot, hasClobSlotAvailable } from '../clobConcurrency';
 
 // LRU insert into spread cache Map (ref-based, no state)
@@ -121,9 +120,13 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, filt
   const priceFlashesRef = useRef(priceFlashes);
   priceFlashesRef.current = priceFlashes;
 
-  // Hover-to-prefetch
-  const prefetchCache = useRef(new Map());
-  const prefetchController = useRef(null);
+  // Hover-to-prefetch (logic extracted to hoverPrefetchUtils.js)
+  const prefetcher = useMemo(() => createHoverPrefetcher({
+    spreadCache: { has: (id) => spreadCacheRef.current.has(id) },
+    acquireSlot: acquireClobSlot,
+    hasSlotAvailable: hasClobSlotAvailable,
+  }), []);
+  const prefetchCache = useRef(prefetcher.cache);
 
   // CLOB rate limit circuit breaker (shared module)
   const [clobRateLimited, setClobRateLimited] = useState(isClobRateLimited);
@@ -206,77 +209,27 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, filt
   const visibleRangeRef = useRef(visibleRange);
   visibleRangeRef.current = visibleRange;
 
-  // Background batch fetch order books for visible rows
-  useEffect(() => {
-    if (batchAbortRef.current) batchAbortRef.current.abort();
-    if (batchQueueRef.current) clearTimeout(batchQueueRef.current);
+  // Shared batch effect setup — spread and flow effects differ only in
+  // filter predicate, batch function, cache adapter, max items, and start delay.
+  // Returns a cleanup function for the useEffect return.
+  function setupBatchEffect({ abortRef, queueRef, filterFn, batchFn, cacheAdapter, maxDefault, startDelay }) {
+    if (abortRef.current) abortRef.current.abort();
+    if (queueRef.current) clearTimeout(queueRef.current);
 
     const controller = new AbortController();
-    batchAbortRef.current = controller;
+    abortRef.current = controller;
 
-    // Read from state (not ref) — this effect re-runs when visibleRange changes
     const { start, stop } = visibleRange;
     const visibleMarkets = marketsRef.current.slice(start, Math.min(stop + 1, marketsRef.current.length));
-
-    // Cap batch to actual visible row count — gap filler catches the rest
     const visibleCount = Math.max(1, stop - start + 1);
-    const toFetch = visibleMarkets
-      .filter((m) => m.clobTokenIds?.[0] && !spreadCacheRef.current.has(m.id))
-      .slice(0, Math.min(visibleCount, 25));
+    const toFetch = visibleMarkets.filter(filterFn).slice(0, Math.min(visibleCount, maxDefault));
 
-    if (toFetch.length === 0) return;
-
-    if (isClobRateLimited()) return;
+    if (toFetch.length === 0 || isClobRateLimited()) return () => {};
 
     let cancelled = false;
-    const fetchSequential = async () => {
-      const result = await runSpreadBatch(toFetch, {
-        cache: { has: (id) => spreadCacheRef.current.has(id), set: (id, v) => updateSpreadCache(spreadCacheRef, id, v) },
-        signal: controller.signal,
-        cancelled: () => cancelled,
-        acquireSlot: acquireClobSlot,
-        maxItems: toFetch.length, // already sliced above
-      });
-      if (result.fetched > 0 && !cancelled) setCacheUpdateTick(t => t + 1);
-    };
-
-    batchQueueRef.current = setTimeout(() => {
-      if (!controller.signal.aborted) fetchSequential();
-    }, SPREAD_BATCH_START);
-
-    return () => {
-      cancelled = true;
-      controller.abort();
-      if (batchQueueRef.current) clearTimeout(batchQueueRef.current);
-    };
-  }, [visibleRange.start, visibleRange.stop, listKey]);
-
-  // Background batch fetch trade flow
-  useEffect(() => {
-    if (flowBatchAbortRef.current) flowBatchAbortRef.current.abort();
-    if (flowBatchQueueRef.current) clearTimeout(flowBatchQueueRef.current);
-
-    const controller = new AbortController();
-    flowBatchAbortRef.current = controller;
-
-    // Read from state (not ref) — this effect re-runs when visibleRange changes
-    const { start, stop } = visibleRange;
-    const visibleMarkets = marketsRef.current.slice(start, Math.min(stop + 1, marketsRef.current.length));
-
-    // Cap batch to actual visible row count — gap filler catches the rest
-    const visibleCount = Math.max(1, stop - start + 1);
-    const toFetch = visibleMarkets
-      .filter((m) => m.conditionId && !peekCachedTradeFlow(m.id))
-      .slice(0, Math.min(visibleCount, 10));
-
-    if (toFetch.length === 0) return;
-
-    if (isClobRateLimited()) return;
-
-    let cancelled = false;
-    const fetchSeq = async () => {
-      const result = await runFlowBatch(toFetch, {
-        cache: { has: (id) => !!peekCachedTradeFlow(id), set: () => {} }, // setCachedTradeFlow called inside wrapper
+    const run = async () => {
+      const result = await batchFn(toFetch, {
+        cache: cacheAdapter,
         signal: controller.signal,
         cancelled: () => cancelled,
         acquireSlot: acquireClobSlot,
@@ -285,16 +238,38 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, filt
       if (result.fetched > 0 && !cancelled) setCacheUpdateTick(t => t + 1);
     };
 
-    flowBatchQueueRef.current = setTimeout(() => {
-      if (!controller.signal.aborted) fetchSeq();
-    }, FLOW_BATCH_START);
+    queueRef.current = setTimeout(() => {
+      if (!controller.signal.aborted) run();
+    }, startDelay);
 
     return () => {
       cancelled = true;
       controller.abort();
-      if (flowBatchQueueRef.current) clearTimeout(flowBatchQueueRef.current);
+      if (queueRef.current) clearTimeout(queueRef.current);
     };
-  }, [visibleRange.start, visibleRange.stop, listKey, leaderboardReady]);
+  }
+
+  // Background batch fetch order books for visible rows
+  useEffect(() => setupBatchEffect({
+    abortRef: batchAbortRef,
+    queueRef: batchQueueRef,
+    filterFn: (m) => m.clobTokenIds?.[0] && !spreadCacheRef.current.has(m.id),
+    batchFn: runSpreadBatch,
+    cacheAdapter: { has: (id) => spreadCacheRef.current.has(id), set: (id, v) => updateSpreadCache(spreadCacheRef, id, v) },
+    maxDefault: 25,
+    startDelay: SPREAD_BATCH_START,
+  }), [visibleRange.start, visibleRange.stop, listKey]);
+
+  // Background batch fetch trade flow
+  useEffect(() => setupBatchEffect({
+    abortRef: flowBatchAbortRef,
+    queueRef: flowBatchQueueRef,
+    filterFn: (m) => m.conditionId && !peekCachedTradeFlow(m.id),
+    batchFn: runFlowBatch,
+    cacheAdapter: { has: (id) => !!peekCachedTradeFlow(id), set: () => {} }, // setCachedTradeFlow called inside wrapper
+    maxDefault: 10,
+    startDelay: FLOW_BATCH_START,
+  }), [visibleRange.start, visibleRange.stop, listKey, leaderboardReady]);
 
   // Gap filler: catch visible rows missing spread/flow data that appeared
   // without triggering the main fetch effects (e.g., price tick caused a
@@ -368,75 +343,15 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, filt
     }
   }, [isApiFetched, foundInLoadedId, lookupState?.fetchedMarkets]);
 
-  // ── Hover-to-prefetch ────────────────────────────────────────
+  // ── Hover-to-prefetch (delegates to hoverPrefetchUtils) ─────
 
   const handleRowHover = useCallback((marketId, market) => {
-    const cached = prefetchCache.current.get(marketId);
-    if (cached && Date.now() - cached.timestamp < PREFETCH_CACHE_TTL) return;
-
-    if (prefetchController.current) prefetchController.current.abort();
-
-    // LRU eviction
-    if (prefetchCache.current.size >= PREFETCH_LRU_CAP) {
-      let oldestKey = null, oldestTime = Infinity;
-      for (const [key, val] of prefetchCache.current) {
-        if (val.timestamp < oldestTime) { oldestTime = val.timestamp; oldestKey = key; }
-      }
-      if (oldestKey) prefetchCache.current.delete(oldestKey);
-    }
-
-    const controller = new AbortController();
-    prefetchController.current = controller;
-    const signal = controller.signal;
-
-    const timer = setTimeout(async () => {
-      if (signal.aborted) return;
-      if (isClobRateLimited()) return;
-      // Non-blocking check: skip prefetch entirely if all slots are busy.
-      // acquireClobSlot below would block-wait; prefetch shouldn't queue up.
-      if (!hasClobSlotAvailable()) return;
-      const yesTokenId = market.clobTokenIds?.[0];
-      if (!yesTokenId) return;
-
-      // Skip order book fetch if spread effect already cached it
-      const hasSpread = spreadCacheRef.current.has(marketId);
-
-      let release;
-      try {
-        release = await acquireClobSlot(signal);
-        if (signal.aborted) return;
-
-        const [bookData, priceHistory] = await Promise.all([
-          hasSpread
-            ? Promise.resolve(null)  // skip — already cached by spread effect
-            : fetchOrderBook(yesTokenId).catch((err) => {
-                handleClobError(err);
-                return null;
-              }),
-          fetchPriceHistory(yesTokenId, '1d', null, null, null, signal).catch((err) => {
-            handleClobError(err);
-            return null;
-          }),
-        ]);
-        if (!signal.aborted) {
-          prefetchCache.current.set(marketId, { bookData, priceHistory, timestamp: Date.now() });
-        }
-      } catch (e) {
-        if (e.name !== 'AbortError') console.warn('[Prefetch] Failed:', e);
-      } finally {
-        if (release) release();
-      }
-    }, HOVER_DEBOUNCE_DELAY);
-
-    signal.addEventListener('abort', () => clearTimeout(timer));
-  }, []);
+    prefetcher.hover(marketId, market);
+  }, [prefetcher]);
 
   const handleRowHoverEnd = useCallback(() => {
-    if (prefetchController.current) {
-      prefetchController.current.abort();
-      prefetchController.current = null;
-    }
-  }, []);
+    prefetcher.hoverEnd();
+  }, [prefetcher]);
 
   // ── Row data (stable object to avoid re-creating on every render) ──
   // spreadCache and priceFlashes are read from refs

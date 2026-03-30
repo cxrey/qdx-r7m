@@ -6,7 +6,9 @@ import {
   computeRoundTripCostPP,
   getFeeParams,
   isFeeFree,
+  FEE_PARAM_SLUGS,
 } from '../feeCalculator';
+import { TAG_SLUG_TO_FEE_SLUG, DISPLAY_TO_FEE_SLUG } from '../processMarket';
 
 describe('getFeeParams', () => {
   it('returns params for known slug', () => {
@@ -232,5 +234,19 @@ describe('computeRoundTripCostPP', () => {
   it('returns all zeros for fee-free with null spread', () => {
     const rt = computeRoundTripCostPP(0.50, null, 'world-politics', true);
     expect(rt.totalCostPP).toBe(0);
+  });
+});
+
+describe('fee slug mapping sync', () => {
+  it('every TAG_SLUG_TO_FEE_SLUG value exists in FEE_PARAM_SLUGS', () => {
+    for (const [tag, feeSlug] of Object.entries(TAG_SLUG_TO_FEE_SLUG)) {
+      expect(FEE_PARAM_SLUGS.has(feeSlug), `TAG_SLUG_TO_FEE_SLUG["${tag}"] maps to "${feeSlug}" which is not in FEE_PARAM_SLUGS`).toBe(true);
+    }
+  });
+
+  it('every DISPLAY_TO_FEE_SLUG value exists in FEE_PARAM_SLUGS', () => {
+    for (const [display, feeSlug] of Object.entries(DISPLAY_TO_FEE_SLUG)) {
+      expect(FEE_PARAM_SLUGS.has(feeSlug), `DISPLAY_TO_FEE_SLUG["${display}"] maps to "${feeSlug}" which is not in FEE_PARAM_SLUGS`).toBe(true);
+    }
   });
 });
