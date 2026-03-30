@@ -173,17 +173,6 @@ export function processMarket(market) {
     _engineFailures.push('conjunction');
   }
 
-  let edgeScore = 0;
-  try {
-    edgeScore = calculateEdgeScore({
-      volume, yesPrice, noPrice, daysLeft, spread, flb, theta,
-      resolutionAnalysis, volumeEfficiency, baseRate, conjunction,
-    });
-  } catch (e) {
-    console.warn('[processMarket] Edge score calculation failed for', market.id, e.message);
-    _engineFailures.push('edgeScore');
-  }
-
   // ── Gamma API field extraction (no new API calls) ────────────────────────
   const oneDayPriceChange = safeNum(market.oneDayPriceChange);
   const lastTradePrice = safeNum(market.lastTradePrice);
@@ -199,10 +188,22 @@ export function processMarket(market) {
   // gammaCategory already extracted above (before engine calls)
   const openInterest = safeNum(market.events?.[0]?.openInterest);
 
-  // Fee calculations
+  // Fee calculations — computed before edgeScore so the fee penalty/bonus applies on first pass
   const effectiveTakerFee = computeEffectiveFeeRate(yesPrice, gammaCategory, feesEnabled);
   const takerFeePP = computeFeePP(yesPrice, gammaCategory, feesEnabled);
   const feeFree = isFeeFree(gammaCategory);
+
+  let edgeScore = 0;
+  try {
+    edgeScore = calculateEdgeScore({
+      volume, yesPrice, noPrice, daysLeft, spread, flb, theta,
+      resolutionAnalysis, volumeEfficiency, baseRate, conjunction,
+      takerFeePP, feeFree,
+    });
+  } catch (e) {
+    console.warn('[processMarket] Edge score calculation failed for', market.id, e.message);
+    _engineFailures.push('edgeScore');
+  }
 
   // Theta break-even: how many days of theta needed to overcome round-trip costs
   let thetaBreakEvenDays = null;

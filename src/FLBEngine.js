@@ -118,7 +118,7 @@ export function analyzeFLB(market) {
   }
 
   // Fee-adjusted net edges (convert pp to decimal for consistency with edge units)
-  const bestPrice = bestSide === 'YES' ? yesPrice : (bestSide === 'NO' ? noPrice : yesPrice);
+  const bestPrice = bestSide === 'YES' ? yesPrice : bestSide === 'NO' ? noPrice : null;
   const takerFeePP = computeFeePP(bestPrice, gammaCategory, feesEnabled);
   const makerRebatePP = computeMakerRebatePP(bestPrice, gammaCategory, feesEnabled);
   const takerFeeDecimal = takerFeePP / 100;
