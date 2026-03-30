@@ -100,6 +100,7 @@ export default function FLBCard({ flb, yesPrice, noPrice }) {
   const rawEdge = flb.bestEdge;
   const spreadCost = rawEdge - flb.bestEdgeAfterSpread;
   const netEdge = flb.bestEdgeAfterSpread;
+  const hasFees = flb.takerFeePP > 0;
 
   // Contextual message
   let message = '';
@@ -156,11 +157,43 @@ export default function FLBCard({ flb, yesPrice, noPrice }) {
           <span className="text-yellow-400">{spreadCost != null ? `-${(spreadCost * 100).toFixed(2)}pp` : '—'}</span>
         </div>
         <div className="flex justify-between font-semibold">
-          <span className="text-gray-400">Net Edge</span>
+          <span className="text-gray-400">Net Edge (pre-fee)</span>
           <span style={{ color: netEdge > 0.03 ? CYAN : netEdge > 0.015 ? '#f59e0b' : '#6b7280' }}>
             {netEdge != null ? `${(netEdge * 100).toFixed(2)}pp` : '—'}
           </span>
         </div>
+        {hasFees && (
+          <>
+            <div className="flex justify-between">
+              <span className="text-gray-500">Fee</span>
+              <span className={
+                flb.takerFeePP > rawEdge * 100 * 0.50 ? 'text-red-400' :
+                flb.takerFeePP > rawEdge * 100 * 0.25 ? 'text-yellow-400' : 'text-gray-500'
+              }>
+                -{flb.takerFeePP.toFixed(2)}pp
+                {flb.takerFeePP > rawEdge * 100 * 0.50 && ' \u26A0 >50% of edge'}
+              </span>
+            </div>
+            <div className="flex justify-between font-semibold">
+              <span className="text-gray-400">Net Edge (Taker)</span>
+              <span style={{ color: flb.netEdgeTaker > 0.03 ? CYAN : flb.netEdgeTaker > 0.015 ? '#f59e0b' : flb.netEdgeTaker > 0 ? '#6b7280' : '#ef4444' }}>
+                {(flb.netEdgeTaker * 100).toFixed(2)}pp
+              </span>
+            </div>
+            <div className="flex justify-between font-semibold">
+              <span className="text-gray-400">Net Edge (Maker)</span>
+              <span style={{ color: flb.netEdgeMaker > 0.03 ? CYAN : flb.netEdgeMaker > 0.015 ? '#f59e0b' : '#6b7280' }}>
+                {(flb.netEdgeMaker * 100).toFixed(2)}pp
+              </span>
+            </div>
+          </>
+        )}
+        {flb.feeFree && (
+          <div className="flex justify-between">
+            <span className="text-gray-500">Fee</span>
+            <span className="text-emerald-400 text-xs font-bold">FEE-FREE</span>
+          </div>
+        )}
         <div className="flex justify-between pt-1 border-t border-gray-800">
           <span className="text-gray-500">Recommendation</span>
           <span className="font-semibold" style={{ color: recColor(flb.recommendation) }}>

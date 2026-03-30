@@ -14,6 +14,7 @@ import ConjunctionCard from './ConjunctionCard';
 import PortfolioImpact from './PortfolioImpact';
 import TradeFlowPanel from './TradeFlowPanel';
 import { formatVolume } from '../formatters';
+import { computeRoundTripCostPP } from '../feeCalculator';
 
 // Code-split heavy components
 const KellyCalculator = lazy(() => import('./KellyCalculator'));
@@ -359,6 +360,9 @@ export default function MarketDetailPanel({ market, onBookData, onFlowData, onLi
           {/* Spread & Friction */}
           <SpreadFrictionCard market={market} bookData={bookData} />
 
+          {/* Trading Costs */}
+          <TradingCostsCard market={market} />
+
           {/* Base Rate Analysis */}
           <BaseRateCard baseRate={market.baseRate} flb={market.flb} />
 
@@ -395,6 +399,64 @@ export default function MarketDetailPanel({ market, onBookData, onFlowData, onLi
             View on Polymarket →
           </a>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function TradingCostsCard({ market }) {
+  if (market.feeFree) {
+    return (
+      <div className="rounded-lg border border-[#1f2937] p-4" style={{ background: '#111827' }}>
+        <div className="text-xs font-semibold text-gray-400 uppercase mb-2">Trading Costs</div>
+        <div className="text-sm text-emerald-400 font-semibold">Fee-Free Market &#x2713;</div>
+        {market.spread != null && (
+          <div className="mt-2 text-xs text-gray-500">
+            Spread cost only: {(market.spread * 100).toFixed(2)}pp round-trip
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const rt = computeRoundTripCostPP(market.yesPrice, market.spread, market.gammaCategory, market.feesEnabled);
+  const rawEdgePP = market.flb?.bestEdge != null ? market.flb.bestEdge * 100 : null;
+  const netAfterCosts = rawEdgePP != null ? rawEdgePP - rt.totalCostPP : null;
+
+  return (
+    <div className="rounded-lg border border-[#1f2937] p-4" style={{ background: '#111827' }}>
+      <div className="text-xs font-semibold text-gray-400 uppercase mb-2">Trading Costs</div>
+      <div className="space-y-1 text-sm font-mono">
+        <div className="flex justify-between">
+          <span className="text-gray-500">Entry Fee</span>
+          <span className="text-gray-300">{rt.entryFeePP.toFixed(2)}pp <span className="text-gray-600">({(market.effectiveTakerFee * 100).toFixed(2)}%)</span></span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-gray-500">Exit Fee</span>
+          <span className="text-gray-300">{rt.exitFeePP.toFixed(2)}pp</span>
+        </div>
+        <div className="flex justify-between">
+          <span className="text-gray-500">Spread Cost</span>
+          <span className="text-gray-300">{rt.spreadCostPP.toFixed(2)}pp</span>
+        </div>
+        <div className="flex justify-between pt-1 border-t border-gray-700">
+          <span className="text-gray-400 font-semibold">Total Cost</span>
+          <span className="text-gray-200 font-semibold">{rt.totalCostPP.toFixed(2)}pp</span>
+        </div>
+        {rawEdgePP != null && (
+          <>
+            <div className="flex justify-between">
+              <span className="text-gray-500">Edge</span>
+              <span className="text-gray-300">{rawEdgePP.toFixed(2)}pp</span>
+            </div>
+            <div className="flex justify-between font-semibold">
+              <span className="text-gray-400">Net After Costs</span>
+              <span style={{ color: netAfterCosts > 0 ? '#00d4aa' : '#ef4444' }}>
+                {netAfterCosts.toFixed(2)}pp
+              </span>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

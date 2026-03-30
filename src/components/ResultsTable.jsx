@@ -24,7 +24,7 @@ function updateSpreadCache(ref, marketId, value) {
 }
 
 // Single source of truth for grid column layout
-const GRID_COLS = '1fr 55px 55px 80px 75px 45px 80px 45px 60px 70px 75px 60px 58px 58px 50px 65px 75px';
+const GRID_COLS = '1fr 55px 55px 80px 75px 45px 80px 45px 60px 70px 75px 60px 58px 58px 45px 50px 65px 75px';
 
 // Row component for react-window v2
 // In v2, rowProps are spread directly as component props (not wrapped in `data`)
@@ -570,6 +570,7 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, filt
         <div>V-P</div>
         <div>Base</div>
         <div>Spread</div>
+        <div>Fee</div>
         <div>Conj</div>
         <div className="hidden md:block">FLB Side</div>
         <div className="hidden md:block">Flow</div>

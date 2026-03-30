@@ -142,6 +142,8 @@ export function filterAndSort({ markets, filters, searchLower, lookupState, port
         av = Math.abs(a.conjunction?.gapPp ?? 0); bv = Math.abs(b.conjunction?.gapPp ?? 0); break;
       case 'walletImbalance':
         av = Math.abs(a._flowImbalance ?? 0); bv = Math.abs(b._flowImbalance ?? 0); break;
+      case 'fee':
+        av = a.effectiveTakerFee ?? 0; bv = b.effectiveTakerFee ?? 0; break;
       default:
         av = a[filters.sortBy] ?? 0; bv = b[filters.sortBy] ?? 0;
     }

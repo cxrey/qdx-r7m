@@ -36,6 +36,20 @@ function EdgeBadge({ score, failures }) {
 }
 
 
+function FeeCell({ market }) {
+  if (market.feeFree) {
+    return <span className="text-emerald-400 text-[9px] font-bold uppercase">Fee-Free</span>;
+  }
+  if (market.effectiveTakerFee == null || market.effectiveTakerFee === 0) {
+    return <span className="text-gray-600 text-xs">&mdash;</span>;
+  }
+  const pct = market.effectiveTakerFee * 100;
+  let colorClass = 'text-emerald-400';
+  if (pct > 1.0) colorClass = 'text-red-400';
+  else if (pct >= 0.5) colorClass = 'text-yellow-400';
+  return <span className={`text-xs ${colorClass}`}>{pct.toFixed(2)}%</span>;
+}
+
 function FLBEdgeCell({ flb }) {
   if (!flb || flb.bestEdge == null) return <span className="text-gray-600 text-xs">--</span>;
   const edgePp = flb.bestEdgeAfterSpread * 100;
@@ -357,6 +371,9 @@ const MarketRow = memo(function MarketRow({ market, expanded, onToggle, detailWi
         </div>
         <div>
           <SpreadCell market={market} cachedSpread={cachedSpread} />
+        </div>
+        <div>
+          <FeeCell market={market} />
         </div>
         <div>
           <ConjunctionCell conjunction={market.conjunction} />

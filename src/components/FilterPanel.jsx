@@ -19,6 +19,7 @@ const SORT_OPTIONS = [
   { value: 'yesPrice', label: 'Yes Price' },
   { value: 'noPrice', label: 'No Price' },
   { value: 'walletImbalance', label: 'Wallet Flow Imbalance' },
+  { value: 'fee', label: 'Fee Rate' },
 ];
 
 const PRIORITY_TYPES = [
