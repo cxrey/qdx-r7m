@@ -4,9 +4,10 @@ import MarketRow from './MarketRow';
 import { fetchOrderBook, fetchPriceHistory } from '../api';
 import { calculateSpread } from '../SpreadFrictionEngine';
 import { fetchMarketTrades, getLeaderboardIndex, analyzeTradeFlow, peekCachedTradeFlow, setCachedTradeFlow } from '../TradeFlowEngine';
+import { runSpreadBatch, runFlowBatch, runGapFill } from '../batchFetchUtils';
 import {
   ROW_HEIGHT, HEADER_HEIGHT, FOOTER_HEIGHT, BANNER_HEIGHT, CYAN,
-  SPREAD_FETCH_DELAY, SPREAD_BATCH_START, FLOW_FETCH_DELAY, FLOW_BATCH_START,
+  SPREAD_BATCH_START, FLOW_BATCH_START,
   HOVER_DEBOUNCE_DELAY, PREFETCH_CACHE_TTL, PREFETCH_LRU_CAP, SPREAD_CACHE_CAP,
 } from '../uiConfig';
 import { isClobRateLimited, clearClobRateLimit, onClobRateLimitChange, getClobRecoverySeconds } from '../clobRateLimit';
@@ -229,38 +230,14 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, filt
 
     let cancelled = false;
     const fetchSequential = async () => {
-      let fetched = 0;
-      for (const market of toFetch) {
-        if (cancelled || controller.signal.aborted || isClobRateLimited()) break;
-        let release;
-        try {
-          release = await acquireClobSlot(controller.signal);
-          if (cancelled || controller.signal.aborted) break;
-          const data = await fetchOrderBook(market.clobTokenIds[0]);
-          if (cancelled || controller.signal.aborted) break;
-          if (data) {
-            const spread = calculateSpread(data);
-            if (spread) {
-              updateSpreadCache(spreadCacheRef, market.id, spread.absoluteSpread);
-              fetched++;
-            }
-          }
-        } catch (err) {
-          if (err.name === 'AbortError') break;
-          if (handleClobError(err)) {
-            break;
-          }
-          console.warn('[ResultsTable] Order book fetch failed:', err);
-        } finally {
-          if (release) release();
-        }
-        // Keep inter-request delay — paces this system independently
-        if (!cancelled && !controller.signal.aborted) {
-          await new Promise((r) => setTimeout(r, SPREAD_FETCH_DELAY));
-        }
-      }
-      // Single re-render after entire batch (not per-market)
-      if (fetched > 0 && !cancelled) setCacheUpdateTick(t => t + 1);
+      const result = await runSpreadBatch(toFetch, {
+        cache: { has: (id) => spreadCacheRef.current.has(id), set: (id, v) => updateSpreadCache(spreadCacheRef, id, v) },
+        signal: controller.signal,
+        cancelled: () => cancelled,
+        acquireSlot: acquireClobSlot,
+        maxItems: toFetch.length, // already sliced above
+      });
+      if (result.fetched > 0 && !cancelled) setCacheUpdateTick(t => t + 1);
     };
 
     batchQueueRef.current = setTimeout(() => {
@@ -298,36 +275,14 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, filt
 
     let cancelled = false;
     const fetchSeq = async () => {
-      const lbIndex = getLeaderboardIndex();
-      let fetched = 0;
-      for (const market of toFetch) {
-        if (cancelled || controller.signal.aborted || isClobRateLimited()) break;
-        let release;
-        try {
-          release = await acquireClobSlot(controller.signal);
-          if (cancelled || controller.signal.aborted) break;
-          const trades = await fetchMarketTrades(market.conditionId);
-          if (cancelled || controller.signal.aborted) break;
-          if (trades && trades.length > 0) {
-            const analysis = analyzeTradeFlow(trades, null, lbIndex, market, null);
-            setCachedTradeFlow(market.id, analysis);
-            fetched++;
-          }
-        } catch (err) {
-          if (err.name === 'AbortError') break;
-          if (handleClobError(err)) {
-            break;
-          }
-          console.warn('[ResultsTable] Trade flow fetch failed:', err);
-        } finally {
-          if (release) release();
-        }
-        if (!cancelled && !controller.signal.aborted) {
-          await new Promise((r) => setTimeout(r, FLOW_FETCH_DELAY));
-        }
-      }
-      // Single re-render after entire batch (not per-market)
-      if (fetched > 0 && !cancelled) setCacheUpdateTick(t => t + 1);
+      const result = await runFlowBatch(toFetch, {
+        cache: { has: (id) => !!peekCachedTradeFlow(id), set: () => {} }, // setCachedTradeFlow called inside wrapper
+        signal: controller.signal,
+        cancelled: () => cancelled,
+        acquireSlot: acquireClobSlot,
+        maxItems: toFetch.length,
+      });
+      if (result.fetched > 0 && !cancelled) setCacheUpdateTick(t => t + 1);
     };
 
     flowBatchQueueRef.current = setTimeout(() => {
@@ -350,7 +305,7 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, filt
     let emptyRuns = 0;
     let timerId = null;
 
-    const runGapFill = async () => {
+    const doGapFill = async () => {
       if (cancelled || running || isClobRateLimited() || !hasClobSlotAvailable()) {
         scheduleNext();
         return;
@@ -359,14 +314,11 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, filt
       const { start, stop } = visibleRangeRef.current;
       const visible = marketsRef.current.slice(start, Math.min(stop + 1, marketsRef.current.length));
 
-      const spreadMissing = visible
-        .filter(m => m.clobTokenIds?.[0] && !spreadCacheRef.current.has(m.id))
-        .slice(0, 3);
-      const flowMissing = visible
-        .filter(m => m.conditionId && !peekCachedTradeFlow(m.id))
-        .slice(0, 2);
+      // Pre-check for empty to track emptyRuns (runGapFill filters internally too)
+      const hasSpreadMissing = visible.some(m => m.clobTokenIds?.[0] && !spreadCacheRef.current.has(m.id));
+      const hasFlowMissing = visible.some(m => m.conditionId && !peekCachedTradeFlow(m.id));
 
-      if (spreadMissing.length === 0 && flowMissing.length === 0) {
+      if (!hasSpreadMissing && !hasFlowMissing) {
         emptyRuns++;
         scheduleNext();
         return;
@@ -376,57 +328,14 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, filt
       running = true;
 
       try {
-        let anySpread = false;
-        let anyFlow = false;
+        const result = await runGapFill(visible, {
+          spreadCache: { has: (id) => spreadCacheRef.current.has(id), set: (id, v) => updateSpreadCache(spreadCacheRef, id, v) },
+          flowCache: { has: (id) => !!peekCachedTradeFlow(id), set: () => {} },
+          acquireSlot: acquireClobSlot,
+          cancelled: () => cancelled,
+        });
 
-        for (const market of spreadMissing) {
-          if (cancelled || isClobRateLimited()) break;
-          let release;
-          try {
-            release = await acquireClobSlot();
-            const data = await fetchOrderBook(market.clobTokenIds[0]);
-            if (cancelled) break;
-            if (data) {
-              const spread = calculateSpread(data);
-              if (spread) {
-                updateSpreadCache(spreadCacheRef, market.id, spread.absoluteSpread);
-                anySpread = true;
-              }
-            }
-          } catch (err) {
-            if (handleClobError(err)) {
-              break;
-            }
-          } finally {
-            if (release) release();
-          }
-        }
-
-        if (!cancelled) {
-          const lbIndex = getLeaderboardIndex();
-          for (const market of flowMissing) {
-            if (cancelled || isClobRateLimited()) break;
-            let release;
-            try {
-              release = await acquireClobSlot();
-              const trades = await fetchMarketTrades(market.conditionId);
-              if (cancelled) break;
-              if (trades && trades.length > 0) {
-                const analysis = analyzeTradeFlow(trades, null, lbIndex, market, null);
-                setCachedTradeFlow(market.id, analysis);
-                anyFlow = true;
-              }
-            } catch (err) {
-              if (handleClobError(err)) {
-                break;
-              }
-            } finally {
-              if (release) release();
-            }
-          }
-        }
-
-        if (!cancelled && (anySpread || anyFlow)) {
+        if (!cancelled && (result.spreadFetched > 0 || result.flowFetched > 0)) {
           setCacheUpdateTick(t => t + 1);
         }
       } finally {
@@ -439,7 +348,7 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, filt
       if (cancelled || timerId) return;
       // Back off to 15s after 3 consecutive empty checks
       const delay = emptyRuns >= 3 ? 15000 : 5000;
-      timerId = setTimeout(() => { timerId = null; runGapFill(); }, delay);
+      timerId = setTimeout(() => { timerId = null; doGapFill(); }, delay);
     }
 
     scheduleNext();
