@@ -58,6 +58,13 @@ const GAMMA_CATEGORY_MAP = {
   'legal': 'Legal',
 };
 
+/** Safely coerce to finite number or null. Rejects NaN/Infinity/empty strings from bad API data. */
+function safeNum(val) {
+  if (val == null || val === '') return null;
+  const n = Number(val);
+  return isFinite(n) ? n : null;
+}
+
 export function processMarket(market) {
   const _engineFailures = [];
 
@@ -83,9 +90,9 @@ export function processMarket(market) {
   const volume = parseFloat(market.volume || 0);
   const volume24hr = parseFloat(market.volume24hr || 0);
 
-  const gammaBestBid = market.bestBid != null ? Number(market.bestBid) : null;
-  const gammaBestAsk = market.bestAsk != null ? Number(market.bestAsk) : null;
-  const gammaSpread = market.spread != null ? Number(market.spread) : null;
+  const gammaBestBid = safeNum(market.bestBid);
+  const gammaBestAsk = safeNum(market.bestAsk);
+  const gammaSpread = safeNum(market.spread);
 
   // Prefer real bid-ask spread when available, fall back to overround estimate
   if (gammaBestBid != null && gammaBestAsk != null && gammaBestBid > gammaBestAsk) {
@@ -169,19 +176,19 @@ export function processMarket(market) {
   }
 
   // ── Gamma API field extraction (no new API calls) ────────────────────────
-  const oneDayPriceChange = market.oneDayPriceChange != null ? Number(market.oneDayPriceChange) : null;
-  const lastTradePrice = market.lastTradePrice != null ? Number(market.lastTradePrice) : null;
-  const liquidityClob = market.liquidityClob != null ? Number(market.liquidityClob) : null;
-  const liquidityAmm = market.events?.[0]?.liquidityAmm != null ? Number(market.events[0].liquidityAmm) : null;
-  const competitive = market.competitive != null ? Number(market.competitive) : null;
+  const oneDayPriceChange = safeNum(market.oneDayPriceChange);
+  const lastTradePrice = safeNum(market.lastTradePrice);
+  const liquidityClob = safeNum(market.liquidityClob);
+  const liquidityAmm = safeNum(market.events?.[0]?.liquidityAmm);
+  const competitive = safeNum(market.competitive);
   const negRisk = typeof market.negRisk === 'boolean' ? market.negRisk : null;
-  const commentCount = market.events?.[0]?.commentCount != null ? Number(market.events[0].commentCount) : null;
-  const volume1wk = market.volume1wk != null ? Number(market.volume1wk) : null;
-  const volume1mo = market.volume1mo != null ? Number(market.volume1mo) : null;
+  const commentCount = safeNum(market.events?.[0]?.commentCount);
+  const volume1wk = safeNum(market.volume1wk);
+  const volume1mo = safeNum(market.volume1mo);
   const acceptingOrders = typeof market.acceptingOrders === 'boolean' ? market.acceptingOrders : null;
   const feesEnabled = market.feesEnabled ?? false;
   const gammaCategory = market.category || null;
-  const openInterest = market.events?.[0]?.openInterest != null ? Number(market.events[0].openInterest) : null;
+  const openInterest = safeNum(market.events?.[0]?.openInterest);
 
   return {
     id: market.id,

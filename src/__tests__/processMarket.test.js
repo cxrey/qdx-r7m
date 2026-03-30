@@ -277,6 +277,28 @@ describe('processMarket', () => {
     expect(m.competitive).toBe(0.85);
   });
 
+  it('returns null for non-numeric / Infinity field values', () => {
+    const m = processMarket(makeRawMarket({
+      bestBid: 'N/A', bestAsk: 'bad', spread: Infinity,
+      oneDayPriceChange: NaN, lastTradePrice: '',
+      liquidityClob: 'none', competitive: undefined,
+      volume1wk: '-Infinity', volume1mo: {},
+      events: [{ slug: 'test', liquidityAmm: 'n/a', commentCount: 'five', openInterest: NaN }],
+    }));
+    expect(m.gammaBestBid).toBeNull();
+    expect(m.gammaBestAsk).toBeNull();
+    expect(m.gammaSpread).toBeNull();
+    expect(m.oneDayPriceChange).toBeNull();
+    expect(m.lastTradePrice).toBeNull();
+    expect(m.liquidityClob).toBeNull();
+    expect(m.competitive).toBeNull();
+    expect(m.volume1wk).toBeNull();
+    expect(m.volume1mo).toBeNull();
+    expect(m.liquidityAmm).toBeNull();
+    expect(m.commentCount).toBeNull();
+    expect(m.openInterest).toBeNull();
+  });
+
   it('extracts market metadata fields when present', () => {
     const m = processMarket(makeRawMarket({
       liquidityClob: 5000,
