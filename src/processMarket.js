@@ -175,6 +175,7 @@ export function processMarket(market) {
   const acceptingOrders = typeof market.acceptingOrders === 'boolean' ? market.acceptingOrders : null;
   const feesEnabled = market.feesEnabled ?? false;
   const gammaCategory = market.category || null;
+  const openInterest = market.events?.[0]?.openInterest != null ? Number(market.events[0].openInterest) : null;
 
   return {
     id: market.id,
@@ -215,6 +216,7 @@ export function processMarket(market) {
     acceptingOrders,
     feesEnabled,
     gammaCategory,
+    openInterest,
     _engineFailures,
   };
 }

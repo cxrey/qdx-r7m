@@ -201,7 +201,7 @@ describe('processMarket', () => {
       'oneDayPriceChange', 'lastTradePrice',
       'liquidityClob', 'liquidityAmm', 'competitive', 'negRisk',
       'commentCount', 'volume1wk', 'volume1mo', 'acceptingOrders',
-      'feesEnabled', 'gammaCategory', '_engineFailures',
+      'feesEnabled', 'gammaCategory', 'openInterest', '_engineFailures',
     ];
     for (const key of expectedKeys) {
       expect(m).toHaveProperty(key);
@@ -289,6 +289,23 @@ describe('processMarket', () => {
     expect(m.acceptingOrders).toBeNull();
     expect(m.feesEnabled).toBe(false);
     expect(m.gammaCategory).toBeNull();
+  });
+
+  it('extracts openInterest from events[0]', () => {
+    const m = processMarket(makeRawMarket({
+      events: [{ slug: 'test', openInterest: 788.774564 }],
+    }));
+    expect(m.openInterest).toBeCloseTo(788.774564);
+  });
+
+  it('defaults openInterest to null when events lacks field', () => {
+    const m = processMarket(makeRawMarket());
+    expect(m.openInterest).toBeNull();
+  });
+
+  it('defaults openInterest to null when events is empty', () => {
+    const m = processMarket(makeRawMarket({ events: [] }));
+    expect(m.openInterest).toBeNull();
   });
 });
 
