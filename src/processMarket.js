@@ -58,6 +58,8 @@ const GAMMA_CATEGORY_MAP = {
   'legal': 'Legal',
 };
 
+const _loggedSlugs = new Set();
+
 /** Safely coerce to finite number or null. Rejects NaN/Infinity/empty strings from bad API data. */
 function safeNum(val) {
   if (val == null || val === '') return null;
@@ -79,8 +81,8 @@ export function processMarket(market) {
     _engineFailures.push('clobTokenIds');
   }
 
-  const yesPrice = outcomePrices[0] != null ? parseFloat(outcomePrices[0]) : null;
-  const noPrice = outcomePrices[1] != null ? parseFloat(outcomePrices[1]) : null;
+  const yesPrice = safeNum(outcomePrices[0]);
+  const noPrice = safeNum(outcomePrices[1]);
 
   let endDate = market.endDate ? new Date(market.endDate) : null;
   if (endDate && isNaN(endDate.getTime())) endDate = null;
@@ -112,7 +114,8 @@ export function processMarket(market) {
   // Prefer Gamma's own categorization when mapped, fall back to regex
   const rawCategory = market.category || null;
   const mappedCategory = rawCategory ? GAMMA_CATEGORY_MAP[rawCategory.toLowerCase()] : null;
-  if (rawCategory && !mappedCategory) {
+  if (rawCategory && !mappedCategory && !_loggedSlugs.has(rawCategory)) {
+    _loggedSlugs.add(rawCategory);
     console.debug('[processMarket] Unmapped Gamma category slug:', rawCategory);
   }
   const category = mappedCategory || inferCategory(question, slug);

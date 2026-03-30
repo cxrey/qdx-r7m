@@ -303,7 +303,7 @@ export class RefreshManager {
 
         for (const m of data) {
           let outcomePrices = [];
-          try { if (m.outcomePrices) outcomePrices = JSON.parse(m.outcomePrices); } catch { /* skip malformed */ }
+          try { if (m.outcomePrices) outcomePrices = JSON.parse(m.outcomePrices); } catch { console.debug('[RefreshManager] Skipping malformed outcomePrices for', m.id); }
           if (outcomePrices.length >= 2) {
             updates.set(m.id, {
               yesPrice: parseFloat(outcomePrices[0]),
