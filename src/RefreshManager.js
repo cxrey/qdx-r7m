@@ -579,10 +579,7 @@ function smartDiff(oldMarkets, newMarkets) {
     if (!oldM) {
       added.push(id);
     } else {
-      // Compare prices using string representation for speed
-      const oldPrices = `${oldM.yesPrice}|${oldM.noPrice}`;
-      const newPrices = `${newM.yesPrice}|${newM.noPrice}`;
-      if (oldPrices !== newPrices) {
+      if (oldM.yesPrice !== newM.yesPrice || oldM.noPrice !== newM.noPrice) {
         priceChanged.push(id);
       }
     }
