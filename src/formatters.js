@@ -11,23 +11,23 @@ export function formatVolume(v) {
 }
 
 export function formatPrice(p) {
-  if (p == null) return '\u2014';
+  if (p == null || isNaN(p)) return '\u2014';
   return `${(p * 100).toFixed(1)}\u00A2`;
 }
 
 export function formatDollars(val) {
-  if (val == null) return '\u2014';
+  if (val == null || isNaN(val)) return '\u2014';
   if (val >= 1000) return `$${(val / 1000).toFixed(1)}K`;
   return `$${val.toFixed(0)}`;
 }
 
 export function formatCents(val) {
-  if (val == null) return '\u2014';
+  if (val == null || isNaN(val)) return '\u2014';
   return `${(val * 100).toFixed(2)}\u00A2`;
 }
 
 export function formatPct(val) {
-  if (val == null) return '\u2014';
+  if (val == null || isNaN(val)) return '\u2014';
   return `${(val * 100).toFixed(2)}%`;
 }
 

@@ -105,6 +105,9 @@ export function processMarket(market) {
   // Prefer Gamma's own categorization when mapped, fall back to regex
   const rawCategory = market.category || null;
   const mappedCategory = rawCategory ? GAMMA_CATEGORY_MAP[rawCategory.toLowerCase()] : null;
+  if (rawCategory && !mappedCategory) {
+    console.debug('[processMarket] Unmapped Gamma category slug:', rawCategory);
+  }
   const category = mappedCategory || inferCategory(question, slug);
 
   let resolutionAnalysis = null;

@@ -302,7 +302,8 @@ export class RefreshManager {
         if (!Array.isArray(data) || data.length === 0) break;
 
         for (const m of data) {
-          const outcomePrices = m.outcomePrices ? JSON.parse(m.outcomePrices || '[]') : [];
+          let outcomePrices = [];
+          try { if (m.outcomePrices) outcomePrices = JSON.parse(m.outcomePrices); } catch { /* skip malformed */ }
           if (outcomePrices.length >= 2) {
             updates.set(m.id, {
               yesPrice: parseFloat(outcomePrices[0]),
