@@ -136,16 +136,56 @@ describe('fetchPriceHistory', () => {
 // ── fetchAllMarkets ────────────────────────────────────────────────
 
 describe('fetchAllMarkets', () => {
-  function makePage(n, startId = 0) {
-    return Array.from({ length: n }, (_, i) => ({ id: `m-${startId + i}` }));
+  // Helper: make an events page with n events, each containing marketsPerEvent markets.
+  // Returns the shape of a /events API response: array of event objects with nested markets.
+  function makeEventsPage(nEvents, startEventId = 0, marketsPerEvent = 1) {
+    return Array.from({ length: nEvents }, (_, i) => {
+      const eventId = startEventId + i;
+      return {
+        id: `evt-${eventId}`,
+        slug: `event-${eventId}`,
+        tags: [{ slug: 'crypto', label: 'Crypto' }],
+        markets: Array.from({ length: marketsPerEvent }, (_, j) => ({
+          id: `m-${eventId}-${j}`,
+          question: `Market ${eventId}-${j}`,
+        })),
+      };
+    });
   }
+
+  it('fetches from /events endpoint (not /markets)', async () => {
+    mockFetch.mockResolvedValue(new Response(JSON.stringify([]), { status: 200 }));
+    await fetchAllMarkets(vi.fn());
+    const url = mockFetch.mock.calls[0][0];
+    expect(url).toContain('/events?');
+    expect(url).not.toContain('/markets?');
+  });
+
+  it('flattens nested markets from events and injects parent event data', async () => {
+    let callCount = 0;
+    mockFetch.mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        // 1 event with 3 nested markets
+        return new Response(JSON.stringify(makeEventsPage(1, 0, 3)), { status: 200 });
+      }
+      return new Response(JSON.stringify([]), { status: 200 });
+    });
+    const result = await fetchAllMarkets(vi.fn());
+    expect(result.length).toBe(3);
+    // Each market should have events[0] injected with parent event data (tags, slug)
+    expect(result[0].events[0].tags[0].slug).toBe('crypto');
+    expect(result[0].events[0].slug).toBe('event-0');
+    // Nested markets array should NOT be on the injected event data
+    expect(result[0].events[0].markets).toBeUndefined();
+  });
 
   it('fetches in batches of 5 (CONCURRENCY)', async () => {
     let callCount = 0;
     mockFetch.mockImplementation(async () => {
       callCount++;
       if (callCount <= 5) {
-        return new Response(JSON.stringify(makePage(100, (callCount - 1) * 100)), { status: 200 });
+        return new Response(JSON.stringify(makeEventsPage(100, (callCount - 1) * 100)), { status: 200 });
       }
       // Second batch: return empty to signal done
       return new Response(JSON.stringify([]), { status: 200 });
@@ -154,44 +194,45 @@ describe('fetchAllMarkets', () => {
     expect(callCount).toBe(10); // 2 batches of 5
   });
 
-  it('calls onProgress with cumulative count after each batch', async () => {
+  it('calls onProgress with cumulative market count after each batch', async () => {
     const onProgress = vi.fn();
     let callCount = 0;
     mockFetch.mockImplementation(async () => {
       callCount++;
       if (callCount <= 5) {
-        return new Response(JSON.stringify(makePage(100, (callCount - 1) * 100)), { status: 200 });
+        // 100 events × 1 market each = 100 markets per page
+        return new Response(JSON.stringify(makeEventsPage(100, (callCount - 1) * 100)), { status: 200 });
       }
       return new Response(JSON.stringify([]), { status: 200 });
     });
     await fetchAllMarkets(onProgress);
-    expect(onProgress).toHaveBeenCalledWith(500); // 5 pages × 100
+    expect(onProgress).toHaveBeenCalledWith(500); // 5 pages × 100 markets
   });
 
   it('stops when a 200 page returns empty array', async () => {
     let callCount = 0;
     mockFetch.mockImplementation(async () => {
       callCount++;
-      if (callCount === 1) return new Response(JSON.stringify(makePage(100)), { status: 200 });
+      if (callCount === 1) return new Response(JSON.stringify(makeEventsPage(100)), { status: 200 });
       return new Response(JSON.stringify([]), { status: 200 });
     });
     const result = await fetchAllMarkets(vi.fn());
     expect(result.length).toBe(100);
   });
 
-  it('stops when a page returns fewer items than reference', async () => {
+  it('stops when a page returns fewer events than reference', async () => {
     let callCount = 0;
     mockFetch.mockImplementation(async () => {
       callCount++;
-      if (callCount === 1) return new Response(JSON.stringify(makePage(100, 0)), { status: 200 });
-      if (callCount === 2) return new Response(JSON.stringify(makePage(100, 100)), { status: 200 });
-      if (callCount === 3) return new Response(JSON.stringify(makePage(50, 200)), { status: 200 }); // partial
-      if (callCount === 4) return new Response(JSON.stringify(makePage(100, 300)), { status: 200 });
-      if (callCount === 5) return new Response(JSON.stringify(makePage(100, 400)), { status: 200 });
+      if (callCount === 1) return new Response(JSON.stringify(makeEventsPage(100, 0)), { status: 200 });
+      if (callCount === 2) return new Response(JSON.stringify(makeEventsPage(100, 100)), { status: 200 });
+      if (callCount === 3) return new Response(JSON.stringify(makeEventsPage(50, 200)), { status: 200 }); // partial
+      if (callCount === 4) return new Response(JSON.stringify(makeEventsPage(100, 300)), { status: 200 });
+      if (callCount === 5) return new Response(JSON.stringify(makeEventsPage(100, 400)), { status: 200 });
       return new Response(JSON.stringify([]), { status: 200 });
     });
     const result = await fetchAllMarkets(vi.fn());
-    // Should collect all from first batch (partial page triggers done flag)
+    // Should collect all from first batch (partial event page triggers done flag)
     expect(result.length).toBe(450);
   });
 
@@ -201,7 +242,7 @@ describe('fetchAllMarkets', () => {
       callCount++;
       if (callCount === 3) return new Response(JSON.stringify([]), { status: 429 });
       if (callCount <= 5) {
-        return new Response(JSON.stringify(makePage(100, (callCount - 1) * 100)), { status: 200 });
+        return new Response(JSON.stringify(makeEventsPage(100, (callCount - 1) * 100)), { status: 200 });
       }
       return new Response(JSON.stringify([]), { status: 200 });
     });
@@ -215,7 +256,7 @@ describe('fetchAllMarkets', () => {
     mockFetch.mockImplementation(async () => {
       callCount++;
       if (callCount === 3) return new Response(JSON.stringify([]), { status: 429 });
-      return new Response(JSON.stringify(makePage(100, (callCount - 1) * 100)), { status: 200 });
+      return new Response(JSON.stringify(makeEventsPage(100, (callCount - 1) * 100)), { status: 200 });
     });
     await fetchAllMarkets(vi.fn());
     // Only the first batch of 5 should run — no second batch
@@ -229,7 +270,7 @@ describe('fetchAllMarkets', () => {
       callCount++;
       if (callCount === 3) controller.abort();
       if (callCount <= 5) {
-        return new Response(JSON.stringify(makePage(100, (callCount - 1) * 100)), { status: 200 });
+        return new Response(JSON.stringify(makeEventsPage(100, (callCount - 1) * 100)), { status: 200 });
       }
       return new Response(JSON.stringify([]), { status: 200 });
     });
@@ -253,7 +294,7 @@ describe('fetchAllMarkets', () => {
       if (callCount === 2) return new Response('Server Error', { status: 500 });
       if (callCount === 4) throw new TypeError('network');
       if (callCount <= 5) {
-        return new Response(JSON.stringify(makePage(100, (callCount - 1) * 100)), { status: 200 });
+        return new Response(JSON.stringify(makeEventsPage(100, (callCount - 1) * 100)), { status: 200 });
       }
       return new Response(JSON.stringify([]), { status: 200 });
     });
@@ -268,7 +309,7 @@ describe('fetchAllMarkets', () => {
       callCount++;
       if (callCount === 2) throw new TypeError('fetch failed');
       if (callCount <= 5) {
-        return new Response(JSON.stringify(makePage(100, (callCount - 1) * 100)), { status: 200 });
+        return new Response(JSON.stringify(makeEventsPage(100, (callCount - 1) * 100)), { status: 200 });
       }
       return new Response(JSON.stringify([]), { status: 200 });
     });
@@ -288,6 +329,7 @@ describe('fetchAllMarkets', () => {
     mockFetch.mockResolvedValue(new Response(JSON.stringify([]), { status: 200 }));
     await fetchAllMarkets(vi.fn());
     const url = mockFetch.mock.calls[0][0];
+    expect(url).toContain('/events?');
     expect(url).toContain('active=true');
     expect(url).toContain('closed=false');
     expect(url).toContain('volume_num_min=100');
@@ -299,7 +341,7 @@ describe('fetchAllMarkets', () => {
     mockFetch.mockImplementation(async () => {
       callCount++;
       if (callCount <= 5) {
-        return new Response(JSON.stringify(makePage(100, (callCount - 1) * 100)), { status: 200 });
+        return new Response(JSON.stringify(makeEventsPage(100, (callCount - 1) * 100)), { status: 200 });
       }
       return new Response(JSON.stringify([]), { status: 200 });
     });
@@ -319,7 +361,7 @@ describe('fetchAllMarkets', () => {
       if (callCount === 3) {
         throw new DOMException('Aborted', 'AbortError');
       }
-      return new Response(JSON.stringify(makePage(100, (callCount - 1) * 100)), { status: 200 });
+      return new Response(JSON.stringify(makeEventsPage(100, (callCount - 1) * 100)), { status: 200 });
     });
     // Promise.all rejects on AbortError → catch breaks → no results collected
     const result = await fetchAllMarkets(vi.fn());
@@ -331,13 +373,44 @@ describe('fetchAllMarkets', () => {
     mockFetch.mockImplementation(async () => {
       callCount++;
       // Always return a full page — never triggers empty-page stop
-      return new Response(JSON.stringify(makePage(100, (callCount - 1) * 100)), { status: 200 });
+      return new Response(JSON.stringify(makeEventsPage(100, (callCount - 1) * 100)), { status: 200 });
     });
     const result = await fetchAllMarkets(vi.fn());
     // MAX_PAGES=200, CONCURRENCY=5 → 40 iterations × 5 = 200 fetch calls
     // Key assertion: it stops, not loops forever
     expect(callCount).toBe(200);
     expect(result.length).toBe(20_000);
+  });
+
+  it('handles events with multiple markets (fan-out)', async () => {
+    let callCount = 0;
+    mockFetch.mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        // 10 events × 5 markets each = 50 markets
+        return new Response(JSON.stringify(makeEventsPage(10, 0, 5)), { status: 200 });
+      }
+      return new Response(JSON.stringify([]), { status: 200 });
+    });
+    const result = await fetchAllMarkets(vi.fn());
+    expect(result.length).toBe(50);
+  });
+
+  it('skips events with no markets array', async () => {
+    let callCount = 0;
+    mockFetch.mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        return new Response(JSON.stringify([
+          { id: 'evt-1', slug: 'no-markets' }, // missing markets array
+          { id: 'evt-2', slug: 'with-markets', markets: [{ id: 'm-1' }] },
+        ]), { status: 200 });
+      }
+      return new Response(JSON.stringify([]), { status: 200 });
+    });
+    const result = await fetchAllMarkets(vi.fn());
+    expect(result.length).toBe(1);
+    expect(result[0].id).toBe('m-1');
   });
 });
 

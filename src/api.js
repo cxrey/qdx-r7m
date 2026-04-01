@@ -17,6 +17,24 @@ const TIMEOUT_ORDER_BOOK = 5_000;    // 5s per order book request
 const TIMEOUT_PRICE_HISTORY = 8_000; // 8s per price history request
 const TIMEOUT_LOOKUP = 8_000;        // 8s per direct lookup request
 
+/**
+ * Flatten an array of event objects into individual market objects.
+ * Injects parent event metadata (tags, slug, openInterest, etc.) into each
+ * nested market so processMarket can read market.events[0].tags etc.
+ */
+function flattenEventsToMarkets(events) {
+  const markets = [];
+  for (const event of events) {
+    const { markets: nestedMarkets, ...eventData } = event;
+    if (!Array.isArray(nestedMarkets)) continue;
+    for (const market of nestedMarkets) {
+      market.events = [eventData];
+      markets.push(market);
+    }
+  }
+  return markets;
+}
+
 export async function fetchAllMarkets(onProgress, signal) {
   const startTime = Date.now();
   let allRaw = [];
@@ -27,23 +45,27 @@ export async function fetchAllMarkets(onProgress, signal) {
   while (!done && !hitRateLimit && pageOffset < MAX_PAGES) {
     if (signal?.aborted) break;
 
-    // Build a batch of CONCURRENCY page fetches
+    // Build a batch of CONCURRENCY page fetches.
+    // Fetches from /events (not /markets) to get event-level tags for fee category resolution.
+    // Each event contains nested markets which are flattened after fetch.
     const batch = [];
     for (let i = 0; i < CONCURRENCY && (pageOffset + i) < MAX_PAGES; i++) {
       const offset = (pageOffset + i) * PAGE_SIZE;
-      const url = `${GAMMA_API}/markets?limit=${PAGE_SIZE}&offset=${offset}&active=true&closed=false&order=volume&ascending=false&volume_num_min=100`;
+      const url = `${GAMMA_API}/events?limit=${PAGE_SIZE}&offset=${offset}&active=true&closed=false&order=volume&ascending=false&volume_num_min=100`;
       batch.push(
         fetch(url, { signal: withTimeout(signal, TIMEOUT_GAMMA_PAGE) })
           .then(async (res) => {
-            if (res.status === 429) return { status: 429, data: [] };
-            if (!res.ok) return { status: res.status, data: [] };
+            if (res.status === 429) return { status: 429, events: [], marketCount: 0 };
+            if (!res.ok) return { status: res.status, events: [], marketCount: 0 };
             const data = await res.json();
-            return { status: 200, data: Array.isArray(data) ? data : [] };
+            const events = Array.isArray(data) ? data : [];
+            const markets = flattenEventsToMarkets(events);
+            return { status: 200, events, markets, eventCount: events.length, marketCount: markets.length };
           })
           .catch((err) => {
             if (err.name === 'AbortError') throw err;
             console.warn(`[fetchAllMarkets] Page ${pageOffset + i} failed:`, err.message);
-            return { status: 0, data: [] };
+            return { status: 0, events: [], marketCount: 0 };
           })
       );
     }
@@ -61,35 +83,33 @@ export async function fetchAllMarkets(onProgress, signal) {
     // Do NOT break early on 429 — pages after the 429 in the batch may have succeeded
     // (all requests were already in flight). Collect everything, then stop before next batch.
     for (let i = 0; i < results.length; i++) {
-      const { status, data } = results[i];
+      const result = results[i];
 
-      if (status === 429) {
+      if (result.status === 429) {
         hitRateLimit = true;
         // Don't break — keep collecting data from remaining successful pages in this batch
       }
 
-      if (data.length > 0) {
-        allRaw.push(...data);
+      if (result.markets?.length > 0) {
+        allRaw.push(...result.markets);
       }
 
-      if (data.length === 0 && status === 200) {
-        // Empty 200 response = no more data at this offset
+      if (result.eventCount === 0 && result.status === 200) {
+        // Empty 200 response = no more events at this offset
         done = true;
       }
     }
 
-    // Check if any page in the batch returned fewer results than the effective page size.
-    // Use the first *successful* (status 200) page's length as the reference — a failed
-    // page (status 0) returning empty data must not trigger end-of-data detection.
+    // Check if any page in the batch returned fewer events than the reference page.
+    // End-of-data detection is based on event count (pagination unit), not market count.
     if (!done && !hitRateLimit && results.length > 0) {
-      const refPage = results.find((r) => r.status === 200 && r.data.length > 0);
+      const refPage = results.find((r) => r.status === 200 && r.eventCount > 0);
       if (!refPage) {
         // No successful non-empty page in this batch — stop
         done = true;
       } else {
-        const effectivePageSize = refPage.data.length;
         for (let i = 0; i < results.length; i++) {
-          if (results[i] !== refPage && results[i].data.length < effectivePageSize && results[i].status === 200) {
+          if (results[i] !== refPage && results[i].eventCount < refPage.eventCount && results[i].status === 200) {
             done = true;
             break;
           }

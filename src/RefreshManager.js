@@ -374,7 +374,8 @@ export class RefreshManager {
 
       const newMarkets = [];
       for (let page = 0; page < NEW_MARKET_PAGES; page++) {
-        const url = `${GAMMA_API}/markets?limit=${PAGE_SIZE}&offset=${page * PAGE_SIZE}&active=true&closed=false&order=createdAt&ascending=false&volume_num_min=100`;
+        // Fetch from /events to get event-level tags for fee category resolution
+        const url = `${GAMMA_API}/events?limit=${PAGE_SIZE}&offset=${page * PAGE_SIZE}&active=true&closed=false&order=createdAt&ascending=false&volume_num_min=100`;
         const res = await fetch(url);
 
         if (res.status === 429 || res.status === 403) {
@@ -383,19 +384,25 @@ export class RefreshManager {
         }
         if (!res.ok) break;
 
-        const data = await res.json();
-        if (!Array.isArray(data) || data.length === 0) break;
+        const events = await res.json();
+        if (!Array.isArray(events) || events.length === 0) break;
 
-        for (const m of data) {
-          if (!existingIds.has(m.id)) {
-            let processed = processMarket(m);
-            if (processed.question) {
-              // Apply base rates if available
-              const rates = this._opts.baseRatesRef?.current;
-              if (rates) {
-                processed = enrichWithBaseRate(processed, rates);
+        // Flatten events → markets, injecting parent event data (tags, slug, etc.)
+        for (const event of events) {
+          const { markets: nestedMarkets, ...eventData } = event;
+          if (!Array.isArray(nestedMarkets)) continue;
+          for (const m of nestedMarkets) {
+            m.events = [eventData];
+            if (!existingIds.has(m.id)) {
+              let processed = processMarket(m);
+              if (processed.question) {
+                // Apply base rates if available
+                const rates = this._opts.baseRatesRef?.current;
+                if (rates) {
+                  processed = enrichWithBaseRate(processed, rates);
+                }
+                newMarkets.push(processed);
               }
-              newMarkets.push(processed);
             }
           }
         }
