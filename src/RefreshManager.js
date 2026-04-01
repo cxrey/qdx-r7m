@@ -10,7 +10,7 @@
 
 import { WebSocketPriceStream } from './WebSocketPriceStream';
 import { PriceUpdateBatcher } from './PriceUpdateBatcher';
-import { fetchAllMarkets } from './api';
+import { fetchAllMarkets, flattenEventsToMarkets } from './api';
 import { processMarket, enrichWithBaseRate } from './processMarket';
 import { processAllInWorker } from './workerManager';
 import { handleRateLimit, getBackoffMultiplier, onBackoffChange, isClobRateLimited } from './ApiHealthManager';
@@ -287,7 +287,8 @@ export class RefreshManager {
     // polling interval ignores backoff and would extend the rate limit window.
     if (isClobRateLimited()) return;
     try {
-      // Fetch first 3 pages of markets sorted by volume (most active)
+      // Fetch first 3 pages of markets sorted by volume (most active).
+      // Intentionally uses /markets (not /events) — only needs prices, not tags.
       const updates = new Map();
       for (let page = 0; page < 3; page++) {
         const url = `${GAMMA_API}/markets?limit=100&offset=${page * 100}&active=true&closed=false&order=volume&ascending=false`;
@@ -387,22 +388,16 @@ export class RefreshManager {
         const events = await res.json();
         if (!Array.isArray(events) || events.length === 0) break;
 
-        // Flatten events → markets, injecting parent event data (tags, slug, etc.)
-        for (const event of events) {
-          const { markets: nestedMarkets, ...eventData } = event;
-          if (!Array.isArray(nestedMarkets)) continue;
-          for (const m of nestedMarkets) {
-            m.events = [eventData];
-            if (!existingIds.has(m.id)) {
-              let processed = processMarket(m);
-              if (processed.question) {
-                // Apply base rates if available
-                const rates = this._opts.baseRatesRef?.current;
-                if (rates) {
-                  processed = enrichWithBaseRate(processed, rates);
-                }
-                newMarkets.push(processed);
+        const flattened = flattenEventsToMarkets(events);
+        for (const m of flattened) {
+          if (!existingIds.has(m.id)) {
+            let processed = processMarket(m);
+            if (processed.question) {
+              const rates = this._opts.baseRatesRef?.current;
+              if (rates) {
+                processed = enrichWithBaseRate(processed, rates);
               }
+              newMarkets.push(processed);
             }
           }
         }

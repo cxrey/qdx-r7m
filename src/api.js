@@ -22,7 +22,7 @@ const TIMEOUT_LOOKUP = 8_000;        // 8s per direct lookup request
  * Injects parent event metadata (tags, slug, openInterest, etc.) into each
  * nested market so processMarket can read market.events[0].tags etc.
  */
-function flattenEventsToMarkets(events) {
+export function flattenEventsToMarkets(events) {
   const markets = [];
   for (const event of events) {
     const { markets: nestedMarkets, ...eventData } = event;
@@ -55,8 +55,8 @@ export async function fetchAllMarkets(onProgress, signal) {
       batch.push(
         fetch(url, { signal: withTimeout(signal, TIMEOUT_GAMMA_PAGE) })
           .then(async (res) => {
-            if (res.status === 429) return { status: 429, events: [], marketCount: 0 };
-            if (!res.ok) return { status: res.status, events: [], marketCount: 0 };
+            if (res.status === 429) return { status: 429, events: [], eventCount: 0, marketCount: 0 };
+            if (!res.ok) return { status: res.status, events: [], eventCount: 0, marketCount: 0 };
             const data = await res.json();
             const events = Array.isArray(data) ? data : [];
             const markets = flattenEventsToMarkets(events);
@@ -65,7 +65,7 @@ export async function fetchAllMarkets(onProgress, signal) {
           .catch((err) => {
             if (err.name === 'AbortError') throw err;
             console.warn(`[fetchAllMarkets] Page ${pageOffset + i} failed:`, err.message);
-            return { status: 0, events: [], marketCount: 0 };
+            return { status: 0, events: [], eventCount: 0, marketCount: 0 };
           })
       );
     }
