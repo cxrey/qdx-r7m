@@ -76,8 +76,8 @@ export const TAG_SLUG_TO_FEE_SLUG = {
 };
 
 // Last-resort fallback: map display category → fee slug for markets with no tags.
-// Must stay in sync with CATEGORY_RULES categories — if a new category is added there,
-// add a corresponding entry here or it will silently fall through to _default fee params.
+// Only map categories where the fee slug is confirmed by Polymarket's tag data.
+// Unmapped categories (Science, Legal) fall through to null → _default.
 export const DISPLAY_TO_FEE_SLUG = {
   'Politics':    'us-politics',
   'Crypto':      'crypto',
@@ -86,8 +86,6 @@ export const DISPLAY_TO_FEE_SLUG = {
   'Geopolitics': 'world-politics',
   'Tech':        'technology',
   'Pop Culture': 'pop-culture',
-  'Science':     'science',
-  'Legal':       'other',
   'Other':       'other',
 };
 

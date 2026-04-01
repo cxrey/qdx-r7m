@@ -107,15 +107,15 @@ describe('computeEffectiveFeeRate', () => {
     expect(rate).toBeLessThan(0.001);
   });
 
-  // Exponent 0.5 (science) produces higher fees at extremes than exponent 1 (politics)
+  // Exponent 0.5 (economics) produces higher fees at extremes than exponent 1 (politics)
   it('exponent 0.5 produces higher fees at extremes than exponent 1', () => {
-    const scienceAt20 = computeEffectiveFeeRate(0.20, 'science', true);
+    const economicsAt20 = computeEffectiveFeeRate(0.20, 'economics', true);
     const politicsAt20 = computeEffectiveFeeRate(0.20, 'us-politics', true);
-    // science feeRate=0.025 exp=0.5 vs politics feeRate=0.04 exp=1
+    // economics feeRate=0.03 exp=0.5 vs politics feeRate=0.04 exp=1
     // At 0.20: p(1-p) = 0.16
-    // science: 0.025 × 0.16^0.5 = 0.025 × 0.4 = 0.01
+    // economics: 0.03 × 0.16^0.5 = 0.03 × 0.4 = 0.012
     // politics: 0.04 × 0.16^1 = 0.04 × 0.16 = 0.0064
-    expect(scienceAt20).toBeGreaterThan(politicsAt20);
+    expect(economicsAt20).toBeGreaterThan(politicsAt20);
   });
 
   // Exponent 2 (mentions) produces lower fees at extremes than exponent 1
@@ -249,4 +249,31 @@ describe('fee slug mapping sync', () => {
       expect(FEE_PARAM_SLUGS.has(feeSlug), `DISPLAY_TO_FEE_SLUG["${display}"] maps to "${feeSlug}" which is not in FEE_PARAM_SLUGS`).toBe(true);
     }
   });
+});
+
+describe('peak effective rates at p=0.50 (regression guard)', () => {
+  // At p=0.50, p×(1-p) = 0.25. These values come from the Polymarket docs fee table.
+  // If anyone changes FEE_PARAMS values, these tests break.
+  const cases = [
+    // category,           expected,   formula
+    ['crypto',             0.018,      '0.072 × 0.25^1'],
+    ['sports',             0.0075,     '0.03 × 0.25^1'],
+    ['business',           0.01,       '0.04 × 0.25^1'],
+    ['us-current-affairs', 0.01,       '0.04 × 0.25^1'],
+    ['us-politics',        0.01,       '0.04 × 0.25^1'],
+    ['technology',         0.01,       '0.04 × 0.25^1'],
+    ['pop-culture',        0.0125,     '0.05 × 0.25^1'],
+    ['economics',          0.015,      '0.03 × 0.25^0.5'],
+    ['weather',            0.0125,     '0.025 × 0.25^0.5'],
+    ['culture',            0.0125,     '0.05 × 0.25^1'],
+    ['world-politics',     0,          'fee-free'],
+    ['mentions',           0.015625,   '0.25 × 0.25^2'],
+    ['other',              0.0125,     '0.2 × 0.25^2'],
+  ];
+
+  for (const [category, expected, formula] of cases) {
+    it(`${category}: ${formula} = ${expected}`, () => {
+      expect(computeEffectiveFeeRate(0.50, category, true)).toBeCloseTo(expected, 6);
+    });
+  }
 });
