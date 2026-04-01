@@ -185,11 +185,11 @@ describe('computeFeePP', () => {
 });
 
 describe('computeMakerRebatePP', () => {
-  // Business (finance) has 50% rebate
-  it('returns 50% of feePP for business at p=0.50', () => {
+  // Business (finance) has 25% rebate (verified against live feeSchedule)
+  it('returns 25% of feePP for business at p=0.50', () => {
     const feePP = computeFeePP(0.50, 'business', true);
     const rebate = computeMakerRebatePP(0.50, 'business', true);
-    expect(rebate).toBeCloseTo(feePP * 0.50, 6);
+    expect(rebate).toBeCloseTo(feePP * 0.25, 6);
   });
 
   // Crypto has 20% rebate
@@ -264,7 +264,7 @@ describe('peak effective rates at p=0.50 (regression guard)', () => {
     ['technology',         0.01,       '0.04 × 0.25^1'],
     ['pop-culture',        0.0125,     '0.05 × 0.25^1'],
     ['economics',          0.015,      '0.03 × 0.25^0.5'],
-    ['weather',            0.0125,     '0.025 × 0.25^0.5'],
+    ['weather',            0.0125,     '0.05 × 0.25^1'],
     ['culture',            0.0125,     '0.05 × 0.25^1'],
     ['world-politics',     0,          'fee-free'],
     ['mentions',           0.015625,   '0.25 × 0.25^2'],

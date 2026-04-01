@@ -12,30 +12,32 @@
 
 // Fee parameters by Gamma category slug.
 //
-// Verified 2026-04-01:
-//   - CLOB GET /fee-rate?token_id={id} exists (bare /fee-rate → 400, not 404)
-//   - CLOB returns {"base_fee":1000} for fee-enabled tokens (BPS for order signing, not effective rate)
-//   - Individual /markets/{id} has authoritative feeSchedule: {rate, exponent, rebateRate, takerOnly}
-//   - Bulk /markets and /events endpoints do NOT populate feeSchedule/makerBaseFee/takerBaseFee
-//   - Tags exist on /events endpoint but are stripped from /markets nested events
-//   - extractFeeCategoryFromTags() is a no-op until market loading fetches event tags
-//   - 6 live feeTypes verified: crypto_fees_v2, sports_fees_v2, finance_prices_fees,
-//     politics_fees, weather_fees, culture_fees (see Commit 4b for full comparison)
+// Verified 2026-04-01 against individual /markets/{id} feeSchedule responses:
+//   feeType              | rate  | exp | rebate | Our key          | Match
+//   crypto_fees_v2       | 0.072 | 1   | 0.20   | crypto           | YES
+//   sports_fees_v2       | 0.03  | 1   | 0.25   | sports           | YES
+//   finance_prices_fees  | 0.04  | 1   | 0.25   | business         | YES (rebate fixed from 0.50)
+//   politics_fees        | 0.04  | 1   | 0.25   | us-politics      | YES
+//   weather_fees         | 0.05  | 1   | 0.25   | weather          | YES (was 0.025/0.5, fixed)
+//   culture_fees         | 0.05  | 1   | 0.25   | culture          | YES
+//
+// Unverified (no live feeType found): us-current-affairs, technology, pop-culture,
+//   economics, world-politics, mentions, other — values from Polymarket docs table.
 // Re-verify when new feeType values appear or unverified categories go live.
 const FEE_PARAMS = {
-  'crypto':             { feeRate: 0.072, exponent: 1,   makerRebatePct: 0.20 },
-  'sports':             { feeRate: 0.03,  exponent: 1,   makerRebatePct: 0.25 },
-  'business':           { feeRate: 0.04,  exponent: 1,   makerRebatePct: 0.50 },
-  'us-current-affairs': { feeRate: 0.04,  exponent: 1,   makerRebatePct: 0.25 },
-  'us-politics':        { feeRate: 0.04,  exponent: 1,   makerRebatePct: 0.25 },
-  'technology':         { feeRate: 0.04,  exponent: 1,   makerRebatePct: 0.25 },
-  'pop-culture':        { feeRate: 0.05,  exponent: 1,   makerRebatePct: 0.25 },
-  'economics':          { feeRate: 0.03,  exponent: 0.5, makerRebatePct: 0.25 },
-  'weather':            { feeRate: 0.025, exponent: 0.5, makerRebatePct: 0.25 },
-  'culture':            { feeRate: 0.05,  exponent: 1,   makerRebatePct: 0.25 },
-  'world-politics':     { feeRate: 0,     exponent: 1,   makerRebatePct: 0 },
-  'mentions':           { feeRate: 0.25,  exponent: 2,   makerRebatePct: 0.25 },
-  'other':              { feeRate: 0.2,   exponent: 2,   makerRebatePct: 0.25 },
+  'crypto':             { feeRate: 0.072, exponent: 1,   makerRebatePct: 0.20 },  // crypto_fees_v2
+  'sports':             { feeRate: 0.03,  exponent: 1,   makerRebatePct: 0.25 },  // sports_fees_v2
+  'business':           { feeRate: 0.04,  exponent: 1,   makerRebatePct: 0.25 },  // finance_prices_fees
+  'us-current-affairs': { feeRate: 0.04,  exponent: 1,   makerRebatePct: 0.25 },  // unverified (docs: Politics)
+  'us-politics':        { feeRate: 0.04,  exponent: 1,   makerRebatePct: 0.25 },  // politics_fees
+  'technology':         { feeRate: 0.04,  exponent: 1,   makerRebatePct: 0.25 },  // unverified (docs: Tech)
+  'pop-culture':        { feeRate: 0.05,  exponent: 1,   makerRebatePct: 0.25 },  // unverified (docs: Culture)
+  'economics':          { feeRate: 0.03,  exponent: 0.5, makerRebatePct: 0.25 },  // unverified (docs: Economics)
+  'weather':            { feeRate: 0.05,  exponent: 1,   makerRebatePct: 0.25 },  // weather_fees
+  'culture':            { feeRate: 0.05,  exponent: 1,   makerRebatePct: 0.25 },  // culture_fees
+  'world-politics':     { feeRate: 0,     exponent: 1,   makerRebatePct: 0 },     // unverified (docs: Geopolitics)
+  'mentions':           { feeRate: 0.25,  exponent: 2,   makerRebatePct: 0.25 },  // unverified (docs: Mentions)
+  'other':              { feeRate: 0.2,   exponent: 2,   makerRebatePct: 0.25 },  // unverified (docs: Other)
   '_default':           { feeRate: 0.04,  exponent: 1,   makerRebatePct: 0.25 },
 };
 
