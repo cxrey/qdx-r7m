@@ -134,7 +134,8 @@ export function processMarket(market) {
   const yesPrice = safeNum(outcomePrices[0]);
   const noPrice = safeNum(outcomePrices[1]);
 
-  let endDate = market.endDate ? new Date(market.endDate) : null;
+  const rawEndDate = market.endDate || market.events?.[0]?.endDate;
+  let endDate = rawEndDate ? new Date(rawEndDate) : null;
   if (endDate && isNaN(endDate.getTime())) endDate = null;
   const now = new Date();
   const daysLeft = endDate ? Math.max(0, Math.ceil((endDate - now) / (1000 * 60 * 60 * 24))) : null;
@@ -183,7 +184,8 @@ export function processMarket(market) {
 
   let resolutionAnalysis = null;
   try {
-    resolutionAnalysis = analyzeResolution({ ...market, yesPrice, endDate: market.endDate, end_date: market.endDate, created_at: market.createdAt });
+    const rawCreatedAt = market.createdAt || market.events?.[0]?.createdAt;
+    resolutionAnalysis = analyzeResolution({ ...market, yesPrice, endDate: rawEndDate, end_date: rawEndDate, created_at: rawCreatedAt });
   } catch (e) {
     console.warn('[processMarket] Resolution analysis failed for', market.id, e.message);
     _engineFailures.push('resolution');

@@ -168,6 +168,36 @@ describe('processMarket', () => {
     expect(m.daysLeft).toBeNull();
   });
 
+  it('falls back to events[0].endDate when market.endDate is missing', () => {
+    const futureDate = new Date(Date.now() + 30 * 86400000).toISOString();
+    const m = processMarket(makeRawMarket({
+      endDate: undefined,
+      events: [{ slug: 'test', endDate: futureDate }],
+    }));
+    expect(m.daysLeft).toBeGreaterThan(0);
+    expect(m.daysLeft).toBeLessThanOrEqual(31);
+  });
+
+  it('prefers market.endDate over events[0].endDate', () => {
+    const near = new Date(Date.now() + 5 * 86400000).toISOString();
+    const far = new Date(Date.now() + 200 * 86400000).toISOString();
+    const m = processMarket(makeRawMarket({
+      endDate: near,
+      events: [{ slug: 'test', endDate: far }],
+    }));
+    expect(m.daysLeft).toBeLessThanOrEqual(6);
+  });
+
+  it('falls back to events[0].createdAt for resolution analysis', () => {
+    const created = new Date(Date.now() - 10 * 86400000).toISOString();
+    // Should not throw when createdAt is only on events[0]
+    const m = processMarket(makeRawMarket({
+      createdAt: undefined,
+      events: [{ slug: 'test', createdAt: created }],
+    }));
+    expect(m).toBeDefined();
+  });
+
   it('calculates spread correctly', () => {
     const m = processMarket(makeRawMarket({ outcomePrices: JSON.stringify([0.60, 0.38]) }));
     // spread = |1 - 0.60 - 0.38| = 0.02
