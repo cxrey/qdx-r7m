@@ -81,7 +81,6 @@ function detectEnumeratedList(text) {
 // ─── Main Functions ───
 
 export function classifyResolution(market) {
-  const title = market.question || market.title || '';
   const parts = [
     market.description || '',
     market.resolutionSource || '',

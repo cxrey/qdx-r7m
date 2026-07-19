@@ -39,20 +39,21 @@ const ORGS = [
 // ── Position Fetching ──
 
 export async function fetchPositions(walletAddress) {
+  const wallet = encodeURIComponent(walletAddress);
   let positions = null;
 
   // Try user param
   try {
-    const res = await fetch(`${DATA_API}/positions?user=${walletAddress}`, { signal: withTimeout(null, TIMEOUT_DATA_API) });
+    const res = await fetch(`${DATA_API}/positions?user=${wallet}`, { signal: withTimeout(null, TIMEOUT_DATA_API) });
     if (res.ok) {
       const data = await res.json();
-      console.log('[PortfolioEngine] Positions API response (user=):', data);
       if (Array.isArray(data) && data.length > 0) positions = data;
       else if (data && typeof data === 'object' && !Array.isArray(data)) {
         // Might be wrapped in an object
         const arr = data.positions || data.data || data.results;
         if (Array.isArray(arr) && arr.length > 0) positions = arr;
       }
+      console.debug('[PortfolioEngine] positions?user= returned', positions?.length ?? 0, 'positions');
     }
   } catch (e) {
     console.warn('[PortfolioEngine] positions?user= failed:', e.message);
@@ -61,15 +62,15 @@ export async function fetchPositions(walletAddress) {
   // Try address param as fallback
   if (!positions) {
     try {
-      const res = await fetch(`${DATA_API}/positions?address=${walletAddress}`, { signal: withTimeout(null, TIMEOUT_DATA_API) });
+      const res = await fetch(`${DATA_API}/positions?address=${wallet}`, { signal: withTimeout(null, TIMEOUT_DATA_API) });
       if (res.ok) {
         const data = await res.json();
-        console.log('[PortfolioEngine] Positions API response (address=):', data);
         if (Array.isArray(data) && data.length > 0) positions = data;
         else if (data && typeof data === 'object' && !Array.isArray(data)) {
           const arr = data.positions || data.data || data.results;
           if (Array.isArray(arr) && arr.length > 0) positions = arr;
         }
+        console.debug('[PortfolioEngine] positions?address= returned', positions?.length ?? 0, 'positions');
       }
     } catch (e) {
       console.warn('[PortfolioEngine] positions?address= failed:', e.message);
@@ -79,14 +80,14 @@ export async function fetchPositions(walletAddress) {
   // Also try to fetch trade history for entry price data
   let trades = null;
   try {
-    const res = await fetch(`${DATA_API}/trades?user=${walletAddress}`, { signal: withTimeout(null, TIMEOUT_DATA_API) });
+    const res = await fetch(`${DATA_API}/trades?user=${wallet}`, { signal: withTimeout(null, TIMEOUT_DATA_API) });
     if (res.ok) {
       const data = await res.json();
-      console.log('[PortfolioEngine] Trades API response:', data);
       if (Array.isArray(data)) trades = data;
       else if (data && (data.trades || data.data || data.results)) {
         trades = data.trades || data.data || data.results;
       }
+      console.debug('[PortfolioEngine] trades returned', trades?.length ?? 0, 'trades');
     }
   } catch (e) {
     console.warn('[PortfolioEngine] trades fetch failed:', e.message);
@@ -758,7 +759,16 @@ export function getCachedPositions() {
 }
 
 export function setCachedPositions(data) {
-  localStorage.setItem(PORTFOLIO_CACHE_KEY, JSON.stringify({ data, ts: Date.now() }));
+  try {
+    // Strip the attached market objects — each carries the full processed
+    // market (resolution analysis, engines, description), which blows the
+    // localStorage quota. Markets are re-attached on load via
+    // matchPositionsToMarkets anyway.
+    const slim = Array.isArray(data)
+      ? data.map(({ market: _market, ...rest }) => rest)
+      : data;
+    localStorage.setItem(PORTFOLIO_CACHE_KEY, JSON.stringify({ data: slim, ts: Date.now() }));
+  } catch { /* quota exceeded — skip caching */ }
 }
 
 // ── Dismissed alerts storage ──

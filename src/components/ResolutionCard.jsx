@@ -240,7 +240,6 @@ function BoundaryTimeline({ lifecycle, windowType, windowLength }) {
   // Window bracket for rolling windows
   let windowBracket = null;
   if (windowType === 'ROLLING_WINDOW' && windowLength) {
-    const wDays = windowLength.value * (windowLength.unit === 'week' ? 7 : windowLength.unit === 'month' ? 30 : 1);
     // Approximate bracket position as % of remaining
     const bracketWidthPct = Math.min(remainingPct * 0.6, 25);
     windowBracket = { widthPct: bracketWidthPct, label: `${windowLength.value}${windowLength.unit[0]}` };

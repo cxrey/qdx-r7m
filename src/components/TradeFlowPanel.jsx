@@ -5,7 +5,7 @@
  * DESIGN PHILOSOPHY: Informational only. No directional recommendations.
  * All signals are one data point among many.
  */
-import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   fetchMarketTrades, fetchMarketHolders, fetchWalletActivity,
   getLeaderboardIndex, analyzeTradeFlow, assessWalletRelevance,
@@ -36,7 +36,7 @@ function Skeleton({ className }) {
 
 // ─── Main Component ─────────────────────────────────────────────────
 
-export default function TradeFlowPanel({ market, bookData }) {
+export default function TradeFlowPanel({ market }) {
   const [flowData, setFlowData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -286,7 +286,7 @@ function ManipulationWarnings({ flowData }) {
 }
 
 function FlowSummary({ flowData }) {
-  const { walletCountYes, walletCountNo, totalUniqueWallets, totalVolume24h, yesBuyVolume, noBuyVolume,
+  const { walletCountYes, walletCountNo, totalUniqueWallets, totalVolume24h, yesBuyVolume,
     largeTradeCount24h, whaleTradeCount24h, largeWalletCountYes, largeWalletCountNo,
     accelerationLabel, acceleration, singleWalletDominance } = flowData;
 
@@ -544,7 +544,7 @@ function ConcentrationText({ pct }) {
   );
 }
 
-function LargeTradesSection({ flowData, category }) {
+function LargeTradesSection({ flowData }) {
   const trades = flowData.recentLargeTrades;
   if (!trades || trades.length === 0) {
     return (

@@ -61,7 +61,7 @@ export function ConjunctionCell({ conjunction }) {
 /**
  * Full interactive conjunction calculator card for expanded detail panel.
  */
-export default function ConjunctionCard({ market, conjunction, allMarkets }) {
+export default function ConjunctionCard({ market, conjunction }) {
   const {
     type, conditionCount, requiredCount, conditions, confidence,
     defaultProbs, sensitivityTable, impliedIndividualProb,
@@ -315,7 +315,7 @@ export default function ConjunctionCard({ market, conjunction, allMarkets }) {
   );
 }
 
-function SensitivityRow({ row, isClosest, yesPrice }) {
+function SensitivityRow({ row, isClosest }) {
   return (
     <>
       <div

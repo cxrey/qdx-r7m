@@ -120,7 +120,7 @@ export function generateMarketsWithTradeData(count, seed = 42) {
     });
 
     const holderCount = 5 + ((random() * 45) | 0);
-    const holders = Array.from({ length: holderCount }, (_, j) => ({
+    const holders = Array.from({ length: holderCount }, () => ({
       address: `0x${((random() * 1e12) | 0).toString(16).padStart(40, '0')}`,
       balance: (10 + random() * 10000).toFixed(2),
       outcome: random() > 0.5 ? 'Yes' : 'No',

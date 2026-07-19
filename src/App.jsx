@@ -47,7 +47,7 @@ function App() {
 
   // Auto-refresh system
   const {
-    autoRefreshEnabled, toggleAutoRefresh, wsStatus, statusMessage,
+    autoRefreshEnabled, toggleAutoRefresh, wsStatus,
     toasts, removeToast, priceFlashes, handleManualRefresh,
     pricesDirtyRef, pendingPriceUpdatesRef,
   } = useAutoRefresh({ rawMarkets, setRawMarkets, baseRatesRef, refresh });
@@ -201,7 +201,7 @@ function App() {
   // Direct lookup
   const lookup = useDirectLookup(rawMarkets, baseRatesRef);
   const {
-    detection, fetchedMarkets, foundInLoadedId, lookupLoading, lookupError,
+    fetchedMarkets, foundInLoadedId,
     isLookupActive, runLookup, clearLookup,
   } = lookup;
 
@@ -213,11 +213,6 @@ function App() {
       clearLookup();
     }
   }, [debouncedSearch, runLookup, clearLookup]);
-
-  // Immediate lookup on paste (bypasses debounce)
-  const handlePaste = useCallback((cleanedValue) => {
-    runLookup(cleanedValue, true);
-  }, [runLookup]);
 
   const handleSearchChange = useCallback((e) => {
     setFilters((f) => ({ ...f, search: e.target.value }));

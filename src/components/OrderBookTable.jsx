@@ -25,10 +25,12 @@ export default function OrderBookTable({ bids, asks }) {
       .slice(0, LEVELS);
 
     // Cumulative totals
-    let cum = 0;
-    const bidLevels = parsedBids.map((b) => { cum += b.size; return { ...b, total: cum }; });
-    cum = 0;
-    const askLevels = parsedAsks.map((a) => { cum += a.size; return { ...a, total: cum }; });
+    const bidLevels = [];
+    let cumBid = 0;
+    for (const b of parsedBids) { cumBid += b.size; bidLevels.push({ ...b, total: cumBid }); }
+    const askLevels = [];
+    let cumAsk = 0;
+    for (const a of parsedAsks) { cumAsk += a.size; askLevels.push({ ...a, total: cumAsk }); }
 
     const bestBid = parsedBids[0]?.price ?? 0;
     const bestAsk = parsedAsks[0]?.price ?? 0;

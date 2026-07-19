@@ -46,7 +46,8 @@ console.log(`Per-market total: ${((afterProc - baseline) / 5000).toFixed(0)} byt
 // Immer enrichment delta
 const rates = generateBaseRates(42);
 const heapBeforeEnrich = measureHeap('before-enrichment');
-const enriched = produce(processed, draft => {
+// Retained in a variable so the heap measurement below sees the allocation
+const _enriched = produce(processed, draft => {
   for (let i = 0; i < draft.length; i++) {
     const result = enrichWithBaseRate(draft[i], rates);
     if (result !== draft[i]) {

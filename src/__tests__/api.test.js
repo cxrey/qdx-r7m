@@ -356,7 +356,7 @@ describe('fetchAllMarkets', () => {
 
   it('returns empty array without throwing on AbortError mid-batch', async () => {
     let callCount = 0;
-    mockFetch.mockImplementation(async (url, opts) => {
+    mockFetch.mockImplementation(async () => {
       callCount++;
       if (callCount === 3) {
         throw new DOMException('Aborted', 'AbortError');

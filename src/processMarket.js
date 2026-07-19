@@ -140,6 +140,15 @@ export function processMarket(market) {
   const now = new Date();
   const daysLeft = endDate ? Math.max(0, Math.ceil((endDate - now) / (1000 * 60 * 60 * 24))) : null;
 
+  // Full market lifetime (created → end) — the quantity BaseRateEngine
+  // buckets resolved markets by. Distinct from daysLeft (time remaining).
+  const rawCreatedAt = market.createdAt || market.events?.[0]?.createdAt;
+  let createdDate = rawCreatedAt ? new Date(rawCreatedAt) : null;
+  if (createdDate && isNaN(createdDate.getTime())) createdDate = null;
+  const durationDays = endDate && createdDate
+    ? Math.max(0, Math.ceil((endDate - createdDate) / (1000 * 60 * 60 * 24)))
+    : null;
+
   const volume = parseFloat(market.volume || 0);
   const volume24hr = parseFloat(market.volume24hr || 0);
 
@@ -184,7 +193,6 @@ export function processMarket(market) {
 
   let resolutionAnalysis = null;
   try {
-    const rawCreatedAt = market.createdAt || market.events?.[0]?.createdAt;
     resolutionAnalysis = analyzeResolution({ ...market, yesPrice, endDate: rawEndDate, end_date: rawEndDate, created_at: rawCreatedAt });
   } catch (e) {
     console.warn('[processMarket] Resolution analysis failed for', market.id, e.message);
@@ -286,6 +294,7 @@ export function processMarket(market) {
     volume,
     volume24hr,
     daysLeft,
+    durationDays,
     endDate: endDate ? endDate.toLocaleDateString() : 'N/A',
     category,
     edgeScore,

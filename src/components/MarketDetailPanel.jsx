@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, useMemo, lazy, Suspense } from 'react';
+import { useState, useEffect, useCallback, lazy, Suspense } from 'react';
 import { fetchPriceHistory, fetchOrderBook } from '../api';
 import { useFetchWithCache } from '../hooks/useFetchWithCache';
 import PriceChart from './PriceChart';
@@ -53,7 +53,7 @@ function Skeleton({ className }) {
   return <div className={`animate-pulse bg-gray-800 rounded ${className}`} />;
 }
 
-export default function MarketDetailPanel({ market, onBookData, onFlowData, onLivePriceUpdate, portfolio }) {
+export default function MarketDetailPanel({ market, onBookData, onLivePriceUpdate, portfolio }) {
   const [side, setSide] = useState('yes'); // 'yes' or 'no'
   const [timeframe, setTimeframe] = useState(TIMEFRAMES[2]); // default 30D
 

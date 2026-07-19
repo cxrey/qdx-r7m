@@ -8,7 +8,7 @@ const CLOB_API = '/clob-api';
 
 const PAGE_SIZE = 100;
 const CONCURRENCY = 5;
-const MAX_PAGES = 200; // Safety cap: 200 pages × 100/page = 20K markets max
+const MAX_PAGES = 200; // Safety cap: 200 pages × 100 events/page = 20K events max (markets are nested per event, so more markets)
 
 // ── Request-level timeouts ──────────────────────────────────────
 // Prevents hung fetches from blocking concurrent batches indefinitely.

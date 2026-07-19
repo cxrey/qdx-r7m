@@ -58,7 +58,7 @@ function NoEdgeCard({ kelly }) {
 }
 
 // ── Sensitivity Table ──
-function SensitivityTableView({ rows, side, sideProb }) {
+function SensitivityTableView({ rows, side }) {
   return (
     <div className="rounded-lg border border-[#1f2937]" style={{ background: '#111827' }}>
       <div className="px-3 py-2 border-b border-gray-800">
@@ -278,6 +278,10 @@ function FinalSizing({ kelly, constrained, settings, scenarios, onJournal }) {
           <div className="text-[10px] text-gray-500 mb-3">
             {kelly.robustness.label}. Full Kelly would be {(kelly.fullKelly * 100).toFixed(1)}%
             (${(kelly.fullKelly * settings.bankroll).toFixed(0)}).
+            {kelly.takerFeeRate > 0 && (
+              <> Sized on fee-adjusted edge of {kelly.feeAdjustedEdge.toFixed(1)}pp
+                (taker fee ≈{(kelly.takerFeeRate * 100).toFixed(2)}% of trade value).</>
+            )}
           </div>
           <ConstraintWarnings constraints={constrained} />
 
@@ -391,15 +395,22 @@ export default function KellyCalculator({ market, portfolio }) {
   // Convert slider value to YES probability for the engine
   const estProb = side === 'YES' ? sideProb : (1 - sideProb);
 
+  // Fee context — without this, calculateKelly treats every market as
+  // fee-free and oversizes bets on fee-enabled categories.
+  const feeOptions = useMemo(
+    () => ({ gammaCategory: market.gammaCategory, feesEnabled: market.feesEnabled ?? false }),
+    [market.gammaCategory, market.feesEnabled]
+  );
+
   // Core calculations
   const kelly = useMemo(
-    () => calculateKelly(estProb, marketPrice, side),
-    [estProb, marketPrice, side]
+    () => calculateKelly(estProb, marketPrice, side, feeOptions),
+    [estProb, marketPrice, side, feeOptions]
   );
 
   const sensitivity = useMemo(
-    () => calculateSensitivityTable(marketPrice, estProb, side, settings),
-    [marketPrice, estProb, side, settings]
+    () => calculateSensitivityTable(marketPrice, estProb, side, settings, feeOptions),
+    [marketPrice, estProb, side, settings, feeOptions]
   );
 
   const betDollars = kelly.valid && !kelly.noEdge
@@ -606,9 +617,6 @@ export default function KellyCalculator({ market, portfolio }) {
 // Export a compact inline component for table rows
 export function KellySizeLink({ market }) {
   if (!market.yesPrice && !market.noPrice) return null;
-
-  const price = market.yesPrice ?? market.noPrice ?? 0.5;
-  const settings = getKellySettings();
 
   // Quick check: is there any possible edge?
   const hasAnyAnalysis = market.flb || market.baseRate || market.volumeEfficiency;

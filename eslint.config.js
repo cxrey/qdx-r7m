@@ -23,7 +23,26 @@ export default defineConfig([
       },
     },
     rules: {
-      'no-unused-vars': ['error', { varsIgnorePattern: '^[A-Z_]' }],
+      'no-unused-vars': ['error', {
+        varsIgnorePattern: '^[A-Z_]',
+        argsIgnorePattern: '^_',
+        // Allow `const { search, ...rest } = filters` to strip keys
+        ignoreRestSiblings: true,
+      }],
+      // The codebase deliberately mirrors frequently-changing values into
+      // refs during render (e.g. `marketsRef.current = rawMarkets` in
+      // App/ResultsTable/useAutoRefresh) so 7-updates/sec price ticks don't
+      // recreate memoized row data. Those mirrors are read during render by
+      // design; the effect-based alternative would read stale values. The
+      // experimental refs rule cannot distinguish this pattern from misuse.
+      'react-hooks/refs': 'off',
+    },
+  },
+  {
+    // Benchmarks run under Node (tsx), not the browser
+    files: ['src/__benchmarks__/**/*.js'],
+    languageOptions: {
+      globals: { ...globals.node },
     },
   },
 ])

@@ -24,18 +24,21 @@ export default function DepthChart({ bids, asks }) {
       .sort((a, b) => a.price - b.price);
 
     // Cumulative bids (from highest to lowest)
+    const bidPoints = [];
     let cumBid = 0;
-    const bidPoints = parsedBids.map((b) => {
+    for (const b of parsedBids) {
       cumBid += b.size;
-      return { price: b.price, bidDepth: cumBid };
-    }).reverse(); // reverse so price goes low -> high
+      bidPoints.push({ price: b.price, bidDepth: cumBid });
+    }
+    bidPoints.reverse(); // reverse so price goes low -> high
 
     // Cumulative asks (from lowest to highest)
+    const askPoints = [];
     let cumAsk = 0;
-    const askPoints = parsedAsks.map((a) => {
+    for (const a of parsedAsks) {
       cumAsk += a.size;
-      return { price: a.price, askDepth: cumAsk };
-    });
+      askPoints.push({ price: a.price, askDepth: cumAsk });
+    }
 
     // Merge into one dataset by price
     const merged = [];

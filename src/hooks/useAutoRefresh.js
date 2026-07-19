@@ -191,6 +191,21 @@ export function useAutoRefresh({ rawMarkets, setRawMarkets, baseRatesRef, refres
     prevMarketCountRef.current = rawMarkets.length;
   }, [rawMarkets.length, enabled]);
 
+  // Rebuild the marketId → index map whenever the market count changes.
+  // Previously it was only built in onFullRefresh/onNewMarkets, so on the
+  // initial load (which comes through useMarkets, not the manager) it stayed
+  // empty and flash-direction lookups were dead until the first Tier-3
+  // refresh. Keyed on length, not identity — price ticks (~7/sec) preserve
+  // array positions, so indices stay valid between count changes.
+  useEffect(() => {
+    const idxMap = indexMapRef.current;
+    idxMap.clear();
+    const arr = marketsRef.current;
+    for (let i = 0; i < arr.length; i++) {
+      idxMap.set(arr[i].id, i);
+    }
+  }, [rawMarkets.length]);
+
   // Toggle auto-refresh
   const toggleEnabled = useCallback(() => {
     setEnabled((prev) => {

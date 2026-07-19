@@ -5,7 +5,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { fetchOrderBook, fetchPriceHistory } from '../api';
-import { isClobRateLimited, triggerClobRateLimit } from '../clobRateLimit';
+import { triggerClobRateLimit } from '../clobRateLimit';
 import { HOVER_DEBOUNCE_DELAY, PREFETCH_CACHE_TTL, PREFETCH_LRU_CAP } from '../uiConfig';
 import { createHoverPrefetcher } from '../hoverPrefetchUtils';
 import { makePlainObjectCache } from '../batchFetchUtils';

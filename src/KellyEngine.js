@@ -181,13 +181,19 @@ function assessRobustness(gapPp, estProb) {
 
 /**
  * Calculate Kelly fractions for a multi-outcome market (3+ outcomes).
- * Uses iterative approximation since closed-form multi-outcome Kelly
- * doesn't have a simple solution.
+ *
+ * APPROXIMATION: computes an independent binary Kelly per outcome, then
+ * scales proportionally if the total exceeds the allocation cap. This is
+ * NOT true multi-outcome Kelly (which requires joint optimization) and
+ * tends to overstate risk for mutually exclusive outcomes, where
+ * simultaneous YES bets partially hedge each other — so it errs
+ * conservative on sizing.
  *
  * @param {Array<{name: string, estProb: number, marketPrice: number}>} outcomes
+ * @param {Object} feeOptions - { gammaCategory, feesEnabled } passed to calculateKelly
  * @returns {Object} Multi-outcome Kelly result
  */
-export function calculateMultiOutcomeKelly(outcomes) {
+export function calculateMultiOutcomeKelly(outcomes, feeOptions = {}) {
   if (!outcomes || outcomes.length < 2) {
     return { valid: false, reason: 'Need at least 2 outcomes' };
   }
@@ -207,7 +213,7 @@ export function calculateMultiOutcomeKelly(outcomes) {
 
   // For each outcome, calculate independent Kelly as if it were binary
   const results = normalized.map((o) => {
-    const kelly = calculateKelly(o.estProb, o.marketPrice, 'YES');
+    const kelly = calculateKelly(o.estProb, o.marketPrice, 'YES', feeOptions);
     return {
       name: o.name,
       estProb: o.estProb,
@@ -237,7 +243,7 @@ export function calculateMultiOutcomeKelly(outcomes) {
     valid: true,
     outcomes: scaledResults,
     totalAllocation: scaledResults.reduce((s, r) => s + r.recommendedFraction, 0),
-    probsNormalized: totalProb !== 1,
+    probsNormalized: Math.abs(totalProb - 1) > 1e-9,
     originalProbSum: totalProb,
   };
 }
@@ -252,9 +258,10 @@ export function calculateMultiOutcomeKelly(outcomes) {
  * @param {number} centerProb - Your center estimate
  * @param {string} side - 'YES' or 'NO'
  * @param {Object} settings - Kelly settings
+ * @param {Object} feeOptions - { gammaCategory, feesEnabled } passed to calculateKelly
  * @returns {Array} Rows of sensitivity data
  */
-export function calculateSensitivityTable(marketPrice, centerProb, side = 'YES', settings = null) {
+export function calculateSensitivityTable(marketPrice, centerProb, side = 'YES', settings = null, feeOptions = {}) {
   const s = settings || getKellySettings();
   const rows = [];
 
@@ -268,7 +275,7 @@ export function calculateSensitivityTable(marketPrice, centerProb, side = 'YES',
   }
 
   for (const prob of steps) {
-    const kelly = calculateKelly(prob, marketPrice, side);
+    const kelly = calculateKelly(prob, marketPrice, side, feeOptions);
     const dollars = kelly.valid && !kelly.noEdge
       ? Math.max(0, kelly.fractionalKelly * s.bankroll)
       : 0;
@@ -299,17 +306,21 @@ export function calculateSensitivityTable(marketPrice, centerProb, side = 'YES',
  * Calculate outcomes under different scenarios.
  *
  * @param {number} betSize - Dollar amount of the bet
- * @param {number} marketPrice - Price paid per share
+ * @param {number} marketPrice - Price paid per share of the SELECTED side
+ *   (yesPrice for YES, noPrice for NO — same convention as calculateKelly)
  * @param {string} side - 'YES' or 'NO'
- * @param {number} estProb - Estimated probability
+ * @param {number} estProb - Estimated probability of YES (the event)
  * @param {Object} settings - Kelly settings
  * @returns {Object} Scenario analysis
  */
 export function calculateScenarios(betSize, marketPrice, side, estProb, settings = null) {
   const s = settings || getKellySettings();
 
-  // Shares purchased
-  const entryPrice = side === 'YES' ? marketPrice : (1 - marketPrice);
+  // Shares purchased at the selected side's own price.
+  // (Previously NO inverted the price a second time — callers already pass
+  // noPrice for NO — so NO bets were priced at ~yesPrice and shares/EV
+  // were wrong.)
+  const entryPrice = marketPrice;
   const shares = betSize / entryPrice;
 
   // Win scenario: each share pays $1
@@ -318,7 +329,6 @@ export function calculateScenarios(betSize, marketPrice, side, estProb, settings
   const winReturn = betSize > 0 ? (winProfit / betSize) * 100 : 0;
 
   // Lose scenario: shares worth $0
-  const lossPayout = 0;
   const lossAmount = betSize;
 
   // Expected value

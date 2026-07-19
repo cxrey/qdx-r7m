@@ -267,7 +267,6 @@ export function onBackoffChange(fn) {
 }
 
 function _escalateBackoff() {
-  const oldMultiplier = backoffMultiplier;
   backoffMultiplier = Math.min(backoffMultiplier * 2, BACKOFF_MAX);
 
   console.warn(`[ApiHealthManager] Backoff multiplier now ${backoffMultiplier}x`);

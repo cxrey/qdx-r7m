@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { fetchAllMarkets } from '../api';
 import { enrichWithBaseRate } from '../processMarket';
 import { processAllInWorker, terminateAnalysisWorker } from '../workerManager';
-import { fetchResolvedMarkets, computeBaseRates } from '../BaseRateEngine';
+import { getBaseRates } from '../BaseRateEngine';
 
 // Plain map + identity check: enrichWithBaseRate returns the same reference
 // when base rate is unchanged (short-circuit), so we only create a new array
@@ -43,8 +43,7 @@ export function useMarkets() {
     try {
       // Start base rate fetch in parallel with market fetch
       const baseRatePromise = !baseRatesRef.current
-        ? fetchResolvedMarkets(controller.signal)
-            .then(({ resolvedMarkets }) => computeBaseRates(resolvedMarkets))
+        ? getBaseRates(controller.signal)
             .catch((e) => {
               if (e.name !== 'AbortError') {
                 if (e?.status === 429) {
@@ -132,9 +131,14 @@ export function useMarkets() {
         baseRatePromise.then(rates => {
           // Use controllerRef.current (not captured `controller`) to avoid
           // stale closure if loadMarkets was called again while pending.
-          if (rates && controllerRef.current === controller && !controller.signal.aborted) {
-            baseRatesRef.current = rates;
-            setRawMarkets(enrichMarketsUpdater(rates));
+          if (controllerRef.current === controller && !controller.signal.aborted) {
+            if (rates) {
+              baseRatesRef.current = rates;
+              setRawMarkets(enrichMarketsUpdater(rates));
+            }
+            // Always clear the loading flag — a failed base-rate fetch
+            // resolves null and previously left "Loading base rates..."
+            // showing forever.
             setBaseRatesLoading(false);
           }
         });

@@ -441,7 +441,6 @@ describe('calculateEdgeScore', () => {
   // --- Spread ---
   it('tight spread (<2%) → +25', () => {
     const base = calculateEdgeScore(makeScoreInput({ volume: 0, yesPrice: 0.50, noPrice: 0.50, spread: 0.005, daysLeft: null }));
-    const noSpread = calculateEdgeScore(makeScoreInput({ volume: 0, yesPrice: null, daysLeft: null, spread: null }));
     // Price also scores +25, so isolate spread
     const priceOnly = calculateEdgeScore(makeScoreInput({ volume: 0, yesPrice: 0.50, noPrice: 0.50, spread: null, daysLeft: null }));
     expect(base - priceOnly).toBe(25);

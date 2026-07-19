@@ -1,4 +1,4 @@
-import { triggerClobRateLimit, isClobRateLimited } from './clobRateLimit';
+import { triggerClobRateLimit } from './clobRateLimit';
 
 /**
  * Check if an error is a CLOB rate limit (429/403).

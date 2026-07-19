@@ -6,7 +6,6 @@
 import { useState, useMemo, useCallback } from 'react';
 import {
   calculateMultiOutcomeKelly,
-  applyPortfolioConstraints,
   getKellySettings,
 } from '../KellyEngine';
 
@@ -28,7 +27,7 @@ function RobustnessBadge({ level }) {
   );
 }
 
-export default function MultiOutcomeKelly({ outcomes: initialOutcomes, portfolio }) {
+export default function MultiOutcomeKelly({ outcomes: initialOutcomes }) {
   const [settings] = useState(getKellySettings);
   const [collapsed, setCollapsed] = useState(true);
 

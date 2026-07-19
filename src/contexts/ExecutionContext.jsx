@@ -34,6 +34,7 @@ export function ExecutionProvider({ children }) {
   return <ExecutionContext.Provider value={value}>{children}</ExecutionContext.Provider>;
 }
 
+// eslint-disable-next-line react-refresh/only-export-components -- idiomatic context hook co-located with its provider
 export function useExecutionStyle() {
   return useContext(ExecutionContext);
 }

@@ -372,6 +372,11 @@ export class RefreshManager {
     try {
       const existingMarkets = this._opts.getCurrentMarkets?.() || [];
       const existingIds = new Set(existingMarkets.map((m) => m.id));
+      // Dedupe within this run too: pages are fetched sequentially ordered
+      // by createdAt, so a market created mid-run shifts offsets and can
+      // appear on two pages — without this, it would be added twice
+      // (duplicate rows / duplicate React keys).
+      const seenThisRun = new Set();
 
       const newMarkets = [];
       for (let page = 0; page < NEW_MARKET_PAGES; page++) {
@@ -390,7 +395,8 @@ export class RefreshManager {
 
         const flattened = flattenEventsToMarkets(events);
         for (const m of flattened) {
-          if (!existingIds.has(m.id)) {
+          if (!existingIds.has(m.id) && !seenThisRun.has(m.id)) {
+            seenThisRun.add(m.id);
             let processed = processMarket(m);
             if (processed.question) {
               const rates = this._opts.baseRatesRef?.current;
@@ -565,7 +571,7 @@ export class RefreshManager {
 
 /**
  * Compare old and new market arrays to detect changes.
- * Uses JSON.stringify of price arrays for efficient comparison.
+ * Builds id-keyed maps and compares yesPrice/noPrice per market.
  */
 function smartDiff(oldMarkets, newMarkets) {
   const oldMap = new Map(oldMarkets.map((m) => [m.id, m]));

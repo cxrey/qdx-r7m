@@ -18,6 +18,7 @@ export function PortfolioProvider({ value, children }) {
   return <PortfolioContext.Provider value={value}>{children}</PortfolioContext.Provider>;
 }
 
+// eslint-disable-next-line react-refresh/only-export-components -- idiomatic context hook co-located with its provider
 export function usePortfolioContext() {
   return useContext(PortfolioContext);
 }

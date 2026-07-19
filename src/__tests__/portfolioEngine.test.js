@@ -7,7 +7,6 @@ vi.mock('../fetchUtils', () => ({
 }));
 
 import {
-  fetchPositions,
   normalizePosition,
   matchPositionsToMarkets,
   extractEntities,
@@ -15,16 +14,12 @@ import {
   buildCorrelationClusters,
   calculateConcentration,
   screenNewTrade,
-  generateAlerts,
-  getPositionSignals,
   getStoredWallet,
   setStoredWallet,
   getManualPositions,
   addManualPosition,
   removeManualPosition,
   clearManualPositions,
-  getCachedPositions,
-  setCachedPositions,
   getDismissedAlerts,
   dismissAlert,
   resetDismissedAlerts,
@@ -361,10 +356,7 @@ describe('screenNewTrade', () => {
   });
 
   it('returns OPPOSING when candidate opposes existing position side', () => {
-    // Create a position on a specific market with side YES
     const sharedMarket = makeMarket({ id: 'opp1', question: 'Will Trump win 2024?', description: 'Election', slug: 'trump-2024', category: 'Politics' });
-    const existingPos = { market: sharedMarket, side: 'YES', currentValue: 200, size: 200, currentPrice: 0.55 };
-    const { clusters } = buildCorrelationClusters([existingPos]);
 
     // Same slug => EVENT overlap (0.8 corr), candidate side defaults to YES but we check opposing logic
     // screenNewTrade creates candidatePos with side 'YES', so for OPPOSING we need existing side !== 'YES'

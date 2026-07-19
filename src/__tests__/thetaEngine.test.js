@@ -225,19 +225,21 @@ describe('calculateTheta — CUMULATIVE', () => {
 // ─── calculateTheta — TOUCH_CUMULATIVE ───────────────────────────────
 
 describe('calculateTheta — TOUCH_CUMULATIVE', () => {
-  it('produces positive yesTheta (time gives more chances to trigger)', () => {
+  it('produces negative yesTheta (each day without a touch removes a chance)', () => {
+    // The market price conditions on "no touch yet" — a touched market
+    // resolves — so P(touch by deadline) declines as remaining time shrinks.
     const result = calculateTheta(0.50, 30, 'TOUCH_CUMULATIVE');
-    expect(result.dailyYesTheta).toBeGreaterThan(0);
-    expect(result.dailyNoTheta).toBeLessThan(0);
+    expect(result.dailyYesTheta).toBeLessThan(0);
+    expect(result.dailyNoTheta).toBeGreaterThan(0);
   });
 
-  it('yesTheta is -(pTomorrow - pToday) using hazard model', () => {
+  it('yesTheta is (pTomorrow - pToday) using hazard model', () => {
     const p = 0.50;
     const d = 30;
     const h = 1 - Math.pow(1 - p, 1 / d);
     const pToday = 1 - Math.pow(1 - h, d);
     const pTomorrow = 1 - Math.pow(1 - h, d - 1);
-    const expected = -(pTomorrow - pToday);
+    const expected = pTomorrow - pToday; // negative
 
     const result = calculateTheta(p, d, 'TOUCH_CUMULATIVE');
     expect(result.dailyYesTheta).toBeCloseTo(expected, 10);
@@ -422,7 +424,9 @@ describe('analyzeTheta — integration', () => {
     expect(Array.isArray(result.zones)).toBe(true);
   });
 
-  it('returns TOUCH_CUMULATIVE with bestSide YES for instantaneous markets', () => {
+  it('returns TOUCH_CUMULATIVE with bestSide NO for instantaneous markets', () => {
+    // Time decay favors NO on touch markets too: each day without a touch
+    // removes a remaining chance to trigger.
     const result = analyzeTheta({
       yesPrice: 0.30,
       noPrice: 0.70,
@@ -433,8 +437,9 @@ describe('analyzeTheta — integration', () => {
     });
 
     expect(result.structureType).toBe('TOUCH_CUMULATIVE');
-    expect(result.bestSide).toBe('YES');
+    expect(result.bestSide).toBe('NO');
     expect(result.bestTheta).toBeGreaterThan(0);
+    expect(result.dailyYesTheta).toBeLessThan(0);
   });
 
   it('returns CUMULATIVE with bestSide NO for continuous markets', () => {

@@ -132,7 +132,7 @@ export default function BaseRateCard({ baseRate, flb }) {
             <>Market prices YES <strong className="text-emerald-400">{baseRate.absGapCents.toFixed(1)}¢ below</strong> historical base rate. Possible value opportunity.</>
           )}
           {baseRate.gapType === 'FAIR' && (
-            <>Market price is within historical norms for {baseRate.category} markets in the {baseRate.priceBucket} range.</>
+            <>Market price is within historical norms for {baseRate.category} markets with a {baseRate.durationBucket} lifetime.</>
           )}
         </div>
       </div>
@@ -156,8 +156,8 @@ export default function BaseRateCard({ baseRate, flb }) {
           <div className="text-sm text-gray-300">{baseRate.category}</div>
         </div>
         <div>
-          <div className="text-xs text-gray-500">Price Bucket</div>
-          <div className="text-sm text-gray-300">{baseRate.priceBucket}</div>
+          <div className="text-xs text-gray-500">Duration</div>
+          <div className="text-sm text-gray-300">{baseRate.durationBucket}</div>
         </div>
         <div>
           <div className="text-xs text-gray-500">Sample Size</div>
