@@ -28,12 +28,23 @@ describe('calculateKelly with fee options', () => {
     });
 
     expect(withFee.valid).toBe(true);
-    // takerFeeRate = 0.072 × (0.50 × 0.50)^1 = 0.018
-    expect(withFee.takerFeeRate).toBeCloseTo(0.018, 6);
+    // takerFeeRate (fraction of dollars staked) = feePerShare / price
+    // = 0.07 × 0.25 / 0.50 = 0.035 (docs: $1.75 fee on a $50 notional)
+    expect(withFee.takerFeeRate).toBeCloseTo(0.035, 6);
     // feeAdjustedEdge should be less than raw edge (both in pp)
     expect(withFee.feeAdjustedEdge).toBeLessThan(noFee.edge);
-    // Difference in pp should be ~1.8pp (takerFeeRate * 100)
-    expect(noFee.edge - withFee.feeAdjustedEdge).toBeCloseTo(1.8, 1);
+    // Difference in pp should be ~3.5pp (takerFeeRate * 100)
+    expect(noFee.edge - withFee.feeAdjustedEdge).toBeCloseTo(3.5, 1);
+  });
+
+  it('uses a live feeSchedule from feeOptions over the category table', () => {
+    const withSchedule = calculateKelly(0.60, 0.50, 'YES', {
+      gammaCategory: 'crypto',
+      feesEnabled: true,
+      feeSchedule: { rate: 0.04, exponent: 1, rebateRate: 0.25 },
+    });
+    // 0.04 × 0.25 / 0.50 = 0.02 — schedule wins over crypto's 0.07 table entry
+    expect(withSchedule.takerFeeRate).toBeCloseTo(0.02, 6);
   });
 
   it('produces smaller Kelly fraction with fees than without', () => {
@@ -48,16 +59,14 @@ describe('calculateKelly with fee options', () => {
   });
 
   it('zeros Kelly fraction when fees consume entire edge', () => {
-    // Small edge scenario: 51% estimate vs 50% price → ~2pp edge
-    // Crypto fee at 50¢ = 1.8pp effective fee rate → barely positive
-    // Let's use an even tighter edge
+    // Small edge scenario: 50.5% estimate vs 50¢ price → ~1pp raw edge,
+    // crypto fee = 3.5% of stake → fee exceeds edge
     const result = calculateKelly(0.505, 0.50, 'YES', {
       gammaCategory: 'crypto',
       feesEnabled: true,
     });
 
-    // 0.505 vs 0.50 gives ~1pp raw edge, crypto fee = 1.8% effective rate
-    // Fee exceeds edge → either noEdge is true, or feeAdjustedFullKelly is 0
+    // Either noEdge is true, or feeAdjustedFullKelly is 0
     expect(result.valid).toBe(true);
     expect(result.noEdge || result.feeAdjustedFullKelly === 0).toBe(true);
   });
@@ -80,8 +89,8 @@ describe('calculateKelly with fee options', () => {
     });
 
     expect(result.valid).toBe(true);
-    // sports at 0.50: feeRate=0.03 × 0.25 = 0.0075
-    expect(result.takerFeeRate).toBeCloseTo(0.0075, 6);
+    // sports at 0.50: 0.05 × 0.25 / 0.50 = 0.025
+    expect(result.takerFeeRate).toBeCloseTo(0.025, 6);
     expect(result.feeAdjustedEdge).toBeLessThan(result.edge);
   });
 
@@ -92,12 +101,12 @@ describe('calculateKelly with fee options', () => {
   });
 
   it('uses correct fee for off-center prices', () => {
-    // Crypto at p=0.20: effectiveFeeRate = 0.072 × (0.20 × 0.80)^1 = 0.072 × 0.16 = 0.01152
+    // Crypto at p=0.20: feePerShare = 0.07 × 0.16 = 0.0112 → /0.20 = 0.056
     const result = calculateKelly(0.35, 0.20, 'YES', {
       gammaCategory: 'crypto',
       feesEnabled: true,
     });
 
-    expect(result.takerFeeRate).toBeCloseTo(0.01152, 6);
+    expect(result.takerFeeRate).toBeCloseTo(0.056, 6);
   });
 });

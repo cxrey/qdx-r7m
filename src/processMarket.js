@@ -1,5 +1,5 @@
 import { analyzeConjunction, conjunctionEdgeBonus } from './ConjunctionEngine';
-import { computeEffectiveFeeRate, computeFeePP, computeRoundTripCostPP, isFeeFree, FEE_PARAM_SLUGS } from './feeCalculator';
+import { computeEffectiveFeeRate, computeFeePP, computeRoundTripCostPP, isFeeFree, FEE_PARAM_SLUGS, FEETYPE_TO_FEE_SLUG, normalizeFeeSchedule } from './feeCalculator';
 import { analyzeFLB } from './FLBEngine';
 import { analyzeTheta } from './ThetaEngine';
 import { analyzeResolution } from './ResolutionAnalyzer';
@@ -76,8 +76,8 @@ export const TAG_SLUG_TO_FEE_SLUG = {
 };
 
 // Last-resort fallback: map display category → fee slug for markets with no tags.
-// Must stay in sync with CATEGORY_RULES categories — if a new category is added there,
-// add a corresponding entry here or it will silently fall through to _default fee params.
+// Only map categories where the fee slug is confirmed by Polymarket's tag data.
+// Unmapped categories (Science, Legal) fall through to null → _default.
 export const DISPLAY_TO_FEE_SLUG = {
   'Politics':    'us-politics',
   'Crypto':      'crypto',
@@ -86,8 +86,6 @@ export const DISPLAY_TO_FEE_SLUG = {
   'Geopolitics': 'world-politics',
   'Tech':        'technology',
   'Pop Culture': 'pop-culture',
-  'Science':     'science',
-  'Legal':       'other',
   'Other':       'other',
 };
 
@@ -136,10 +134,20 @@ export function processMarket(market) {
   const yesPrice = safeNum(outcomePrices[0]);
   const noPrice = safeNum(outcomePrices[1]);
 
-  let endDate = market.endDate ? new Date(market.endDate) : null;
+  const rawEndDate = market.endDate || market.events?.[0]?.endDate;
+  let endDate = rawEndDate ? new Date(rawEndDate) : null;
   if (endDate && isNaN(endDate.getTime())) endDate = null;
   const now = new Date();
   const daysLeft = endDate ? Math.max(0, Math.ceil((endDate - now) / (1000 * 60 * 60 * 24))) : null;
+
+  // Full market lifetime (created → end) — the quantity BaseRateEngine
+  // buckets resolved markets by. Distinct from daysLeft (time remaining).
+  const rawCreatedAt = market.createdAt || market.events?.[0]?.createdAt;
+  let createdDate = rawCreatedAt ? new Date(rawCreatedAt) : null;
+  if (createdDate && isNaN(createdDate.getTime())) createdDate = null;
+  const durationDays = endDate && createdDate
+    ? Math.max(0, Math.ceil((endDate - createdDate) / (1000 * 60 * 60 * 24)))
+    : null;
 
   const volume = parseFloat(market.volume || 0);
   const volume24hr = parseFloat(market.volume24hr || 0);
@@ -172,20 +180,23 @@ export function processMarket(market) {
   }
   const category = mappedCategory || inferCategory(question, slug);
 
-  // ── gammaCategory (fee slug) derivation ──────────────────────
-  // Three category concepts exist in the codebase:
-  //   1. Display category (UI): 'Crypto', 'Sports', 'Politics', etc.
-  //      Inferred from question text via regex (inferCategory). Used for UI pills and filters.
-  //   2. Gamma API category (raw): 'crypto', 'sports', 'us-politics', etc.
-  //      From market.category field — currently always null (API doesn't populate it).
-  //   3. Fee slug (gammaCategory): key into FEE_PARAMS for fee calculation.
-  //      Derived below with priority: rawCategory > event tags > display-category fallback.
+  // ── Fee schedule + gammaCategory (fee slug) derivation ───────
+  // The live per-market feeSchedule ({ rate, exponent, rebateRate }) is the
+  // authoritative fee source — every fee-enabled Gamma market carries one.
+  // gammaCategory (fee slug) is only the FALLBACK path for markets without
+  // a schedule, derived with priority:
+  //   market.feeType (live) > rawCategory > event tags > display-category.
+  // Display category ('Crypto', 'Sports', ...) remains a separate concept
+  // used for UI pills and filters.
+  const feeType = market.feeType || null;
+  const feeSchedule = normalizeFeeSchedule(market.feeSchedule);
+  const feeTypeSlug = feeType ? (FEETYPE_TO_FEE_SLUG[feeType] || null) : null;
   const tagCategory = extractFeeCategoryFromTags(market.events?.[0]?.tags);
-  const gammaCategory = rawCategory || tagCategory || DISPLAY_TO_FEE_SLUG[category] || null;
+  const gammaCategory = feeTypeSlug || rawCategory || tagCategory || DISPLAY_TO_FEE_SLUG[category] || null;
 
   let resolutionAnalysis = null;
   try {
-    resolutionAnalysis = analyzeResolution({ ...market, yesPrice, endDate: market.endDate, end_date: market.endDate, created_at: market.createdAt });
+    resolutionAnalysis = analyzeResolution({ ...market, yesPrice, endDate: rawEndDate, end_date: rawEndDate, created_at: rawCreatedAt });
   } catch (e) {
     console.warn('[processMarket] Resolution analysis failed for', market.id, e.message);
     _engineFailures.push('resolution');
@@ -193,7 +204,7 @@ export function processMarket(market) {
 
   let flb = null;
   try {
-    flb = analyzeFLB({ yesPrice, noPrice, spread, resolutionAnalysis, gammaCategory, feesEnabled: market.feesEnabled ?? false });
+    flb = analyzeFLB({ yesPrice, noPrice, spread, resolutionAnalysis, gammaCategory, feesEnabled: market.feesEnabled ?? false, feeSchedule });
   } catch (e) {
     console.warn('[processMarket] FLB analysis failed for', market.id, e.message);
     _engineFailures.push('flb');
@@ -250,9 +261,9 @@ export function processMarket(market) {
   const openInterest = safeNum(market.events?.[0]?.openInterest);
 
   // Fee calculations — computed before edgeScore so the fee penalty/bonus applies on first pass
-  const effectiveTakerFee = computeEffectiveFeeRate(yesPrice, gammaCategory, feesEnabled);
-  const takerFeePP = computeFeePP(yesPrice, gammaCategory, feesEnabled);
-  const feeFree = isFeeFree(gammaCategory);
+  const effectiveTakerFee = computeEffectiveFeeRate(yesPrice, gammaCategory, feesEnabled, feeSchedule);
+  const takerFeePP = computeFeePP(yesPrice, gammaCategory, feesEnabled, feeSchedule);
+  const feeFree = isFeeFree(gammaCategory, feeSchedule);
 
   let edgeScore = 0;
   try {
@@ -269,7 +280,7 @@ export function processMarket(market) {
   // Theta break-even: how many days of theta needed to overcome round-trip costs
   let thetaBreakEvenDays = null;
   if (theta && spread != null) {
-    const roundTrip = computeRoundTripCostPP(yesPrice, spread, gammaCategory, feesEnabled);
+    const roundTrip = computeRoundTripCostPP(yesPrice, spread, gammaCategory, feesEnabled, feeSchedule);
     const dailyThetaPP = Math.abs(theta.bestTheta) * 100;
     thetaBreakEvenDays = roundTrip.totalCostPP > 0 && dailyThetaPP > 0
       ? Math.ceil(roundTrip.totalCostPP / dailyThetaPP)
@@ -286,6 +297,7 @@ export function processMarket(market) {
     volume,
     volume24hr,
     daysLeft,
+    durationDays,
     endDate: endDate ? endDate.toLocaleDateString() : 'N/A',
     category,
     edgeScore,
@@ -315,6 +327,8 @@ export function processMarket(market) {
     acceptingOrders,
     feesEnabled,
     gammaCategory,
+    feeType,
+    feeSchedule,
     openInterest,
     effectiveTakerFee,
     takerFeePP,

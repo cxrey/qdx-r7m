@@ -7,6 +7,7 @@ const SLIDER_RESOLUTION = 1000;
  * Maps a 0-SLIDER_RESOLUTION slider position to the actual value range using a cubic curve,
  * giving much more resolution at the low end.
  */
+// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located with its only consumer; tested directly
 export function createScaleMapper(min, max, useLogScale) {
   if (!useLogScale) {
     // Linear mapping
@@ -32,6 +33,7 @@ export function createScaleMapper(min, max, useLogScale) {
 /**
  * Smart rounding based on magnitude.
  */
+// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located with its only consumer; tested directly
 export function smartRound(val, min, max) {
   const range = max - min;
   if (range <= 1000) return Math.round(val);
@@ -62,7 +64,7 @@ export default function DualRangeSlider({
   }
 
   function parseRaw(text) {
-    const cleaned = text.replace(/[^0-9.\-]/g, '');
+    const cleaned = text.replace(/[^0-9.-]/g, '');
     if (cleaned === '' || cleaned === '-') return NaN;
     return Number(cleaned);
   }

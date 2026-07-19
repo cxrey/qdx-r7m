@@ -46,7 +46,6 @@ export const BASE_RATE_FAIR_GAP_CENTS = 3;
 export const BASE_RATE_SUGGESTION_GAP_CENTS = 5;
 
 export const DURATION_BUCKETS = [7, 30, 90, 180]; // days
-export const PRICE_BUCKETS = [10, 25, 40, 60, 75, 90]; // cents
 
 // ─── ResolutionAnalyzer ────────────────────────────────────────────
 export const STRICTNESS_BASE_SCORE = 50;

@@ -10,7 +10,7 @@
 
 import { WebSocketPriceStream } from './WebSocketPriceStream';
 import { PriceUpdateBatcher } from './PriceUpdateBatcher';
-import { fetchAllMarkets } from './api';
+import { fetchAllMarkets, flattenEventsToMarkets } from './api';
 import { processMarket, enrichWithBaseRate } from './processMarket';
 import { processAllInWorker } from './workerManager';
 import { handleRateLimit, getBackoffMultiplier, onBackoffChange, isClobRateLimited } from './ApiHealthManager';
@@ -287,7 +287,8 @@ export class RefreshManager {
     // polling interval ignores backoff and would extend the rate limit window.
     if (isClobRateLimited()) return;
     try {
-      // Fetch first 3 pages of markets sorted by volume (most active)
+      // Fetch first 3 pages of markets sorted by volume (most active).
+      // Intentionally uses /markets (not /events) — only needs prices, not tags.
       const updates = new Map();
       for (let page = 0; page < 3; page++) {
         const url = `${GAMMA_API}/markets?limit=100&offset=${page * 100}&active=true&closed=false&order=volume&ascending=false`;
@@ -371,10 +372,16 @@ export class RefreshManager {
     try {
       const existingMarkets = this._opts.getCurrentMarkets?.() || [];
       const existingIds = new Set(existingMarkets.map((m) => m.id));
+      // Dedupe within this run too: pages are fetched sequentially ordered
+      // by createdAt, so a market created mid-run shifts offsets and can
+      // appear on two pages — without this, it would be added twice
+      // (duplicate rows / duplicate React keys).
+      const seenThisRun = new Set();
 
       const newMarkets = [];
       for (let page = 0; page < NEW_MARKET_PAGES; page++) {
-        const url = `${GAMMA_API}/markets?limit=${PAGE_SIZE}&offset=${page * PAGE_SIZE}&active=true&closed=false&order=createdAt&ascending=false&volume_num_min=100`;
+        // Fetch from /events to get event-level tags for fee category resolution
+        const url = `${GAMMA_API}/events?limit=${PAGE_SIZE}&offset=${page * PAGE_SIZE}&active=true&closed=false&order=createdAt&ascending=false&volume_num_min=100`;
         const res = await fetch(url);
 
         if (res.status === 429 || res.status === 403) {
@@ -383,14 +390,15 @@ export class RefreshManager {
         }
         if (!res.ok) break;
 
-        const data = await res.json();
-        if (!Array.isArray(data) || data.length === 0) break;
+        const events = await res.json();
+        if (!Array.isArray(events) || events.length === 0) break;
 
-        for (const m of data) {
-          if (!existingIds.has(m.id)) {
+        const flattened = flattenEventsToMarkets(events);
+        for (const m of flattened) {
+          if (!existingIds.has(m.id) && !seenThisRun.has(m.id)) {
+            seenThisRun.add(m.id);
             let processed = processMarket(m);
             if (processed.question) {
-              // Apply base rates if available
               const rates = this._opts.baseRatesRef?.current;
               if (rates) {
                 processed = enrichWithBaseRate(processed, rates);
@@ -563,7 +571,7 @@ export class RefreshManager {
 
 /**
  * Compare old and new market arrays to detect changes.
- * Uses JSON.stringify of price arrays for efficient comparison.
+ * Builds id-keyed maps and compares yesPrice/noPrice per market.
  */
 function smartDiff(oldMarkets, newMarkets) {
   const oldMap = new Map(oldMarkets.map((m) => [m.id, m]));

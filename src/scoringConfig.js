@@ -116,8 +116,11 @@ export const FEE_FREE_BONUS = 2;
 
 // --- Fee Display ---
 // Color thresholds for the fee column in the table (percentage of trade value).
-export const FEE_DISPLAY_YELLOW_PCT = 0.5;
-export const FEE_DISPLAY_RED_PCT = 1.0;
+// Recalibrated for the corrected effectiveFeeRate (= feePerShare / price):
+// mid-price peaks are now ~2% (politics/finance) to ~3.5% (crypto), and
+// low-priced longshots approach the raw category rate.
+export const FEE_DISPLAY_YELLOW_PCT = 1.0;
+export const FEE_DISPLAY_RED_PCT = 2.5;
 
 // --- Global ---
 export const MAX_EDGE_SCORE = 100;

@@ -184,12 +184,23 @@ describe('calculateScenarios', () => {
   });
 
   it('computes win/loss for a NO bet', () => {
+    // marketPrice is the NO share price (same convention as calculateKelly):
+    // NO trading at 40¢ with estProb(YES)=0.3 → win prob 0.7
     const s = calculateScenarios(100, 0.4, 'NO', 0.3, settings);
-    // entryPrice for NO = 1 - 0.4 = 0.6
-    expect(s.entryPrice).toBeCloseTo(0.6, 5);
-    const expectedShares = 100 / 0.6;
+    expect(s.entryPrice).toBeCloseTo(0.4, 5);
+    const expectedShares = 100 / 0.4;
     expect(s.shares).toBeCloseTo(expectedShares, 1);
     expect(s.win.prob).toBeCloseTo(0.7, 5); // 1 - estProb for NO
+    expect(s.win.profit).toBeCloseTo(expectedShares - 100, 1); // shares × $1 − bet
+  });
+
+  it('NO bet at the same side price yields same shares as a YES bet', () => {
+    // Regression: NO used to invert the price a second time (double
+    // inversion), pricing a 40¢ NO position at 60¢.
+    const yes = calculateScenarios(100, 0.4, 'YES', 0.6, settings);
+    const no = calculateScenarios(100, 0.4, 'NO', 0.4, settings);
+    expect(no.shares).toBeCloseTo(yes.shares, 5);
+    expect(no.entryPrice).toBeCloseTo(yes.entryPrice, 5);
   });
 
   it('calculates positive EV when edge exists', () => {

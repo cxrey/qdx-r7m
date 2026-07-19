@@ -29,7 +29,7 @@ function StructureBadge({ type, confidence }) {
   let bg = 'rgba(0,212,170,0.08)';
   let border = '#00d4aa50';
   if (isTouch) {
-    label = 'Touch — Time Helps Yes';
+    label = 'Touch — Chances Shrink';
     color = '#60a5fa';
     bg = 'rgba(96,165,250,0.08)';
     border = '#60a5fa50';
@@ -197,21 +197,12 @@ function ProjectionChart({ yesPrice, daysRemaining, marketStructure }) {
 }
 
 export default function ThetaCard({ theta, market, priceHistory }) {
-  if (!theta) {
-    const msg = market.daysLeft == null
-      ? 'No resolution date — theta N/A'
-      : market.daysLeft < 0
-        ? 'Past resolution date'
-        : 'Insufficient data for theta analysis';
-    return (
-      <AnalysisCard title="Time Decay Analysis" emptyWhen emptyMessage={msg} />
-    );
-  }
-
-  const accel = accelLabel(theta.thetaAcceleration);
+  // Hooks must run unconditionally — guard on theta inside each memo,
+  // then early-return below.
 
   // Information residual from price history
   const residual = useMemo(() => {
+    if (!theta) return null;
     if (!priceHistory || !priceHistory.history || priceHistory.history.length < 2) return null;
     const hist = priceHistory.history;
     const now = hist[hist.length - 1];
@@ -228,10 +219,11 @@ export default function ThetaCard({ theta, market, priceHistory }) {
     if (daysDiff < 1) return null;
 
     return calculateInformationResidual(now.p, closest.p, theta.dailyYesTheta, daysDiff);
-  }, [priceHistory, theta.dailyYesTheta]);
+  }, [priceHistory, theta]);
 
   // Projection summary
   const projSummary = useMemo(() => {
+    if (!theta) return null;
     if (!market.daysLeft || market.daysLeft < 7) return null;
     const projDays = Math.min(14, Math.floor(market.daysLeft) - 1);
     if (projDays < 1) return null;
@@ -244,7 +236,20 @@ export default function ThetaCard({ theta, market, priceHistory }) {
       from: (market.yesPrice * 100).toFixed(1),
       to: (last.projectedYes * 100).toFixed(1),
     };
-  }, [market.yesPrice, market.daysLeft, theta.structureType]);
+  }, [market.yesPrice, market.daysLeft, theta]);
+
+  if (!theta) {
+    const msg = market.daysLeft == null
+      ? 'No resolution date — theta N/A'
+      : market.daysLeft < 0
+        ? 'Past resolution date'
+        : 'Insufficient data for theta analysis';
+    return (
+      <AnalysisCard title="Time Decay Analysis" emptyWhen emptyMessage={msg} />
+    );
+  }
+
+  const accel = accelLabel(theta.thetaAcceleration);
 
   return (
     <AnalysisCard

@@ -2,13 +2,19 @@
  * WebSocketPriceStream — connects to Polymarket's market WebSocket
  * for real-time price streaming (Tier 1).
  *
- * Protocol (from docs):
+ * Protocol (docs.polymarket.com/api-reference/wss/market, verified 2026-07-19):
  *   URL: wss://ws-subscriptions-clob.polymarket.com/ws/market
- *   Handshake: { assets_ids: [], type: "market" }
- *   Subscribe: { operation: "subscribe", assets_ids: [...] }
+ *   Handshake: { assets_ids: [], type: "market", initial_dump, custom_feature_enabled }
+ *   Subscribe: { operation: "subscribe", assets_ids: [...], custom_feature_enabled }
  *   Unsubscribe: { operation: "unsubscribe", assets_ids: [...] }
  *   Heartbeat: send text "PING" every 10s, expect text "PONG"
- *   Events: price_change, last_trade_price, book, best_bid_ask, new_market, market_resolved
+ *   Events: price_change, last_trade_price, book, tick_size_change — always;
+ *           best_bid_ask, new_market, market_resolved — ONLY when
+ *           custom_feature_enabled: true is sent (we rely on new_market for
+ *           Tier-2 discovery and market_resolved for resolution callbacks).
+ *   initial_dump: false — skips the per-asset orderbook snapshot on
+ *   subscribe; we ignore book events and subscribe ~10K assets, so the
+ *   default (true) would burst thousands of unused snapshots.
  */
 
 const WS_URL = 'wss://ws-subscriptions-clob.polymarket.com/ws/market';
@@ -71,8 +77,9 @@ export class WebSocketPriceStream {
       console.log('[WS] Connected');
       this._reconnectAttempts = 0;
 
-      // Send handshake
-      this._send({ assets_ids: [], type: 'market' });
+      // Send handshake — custom_feature_enabled unlocks new_market /
+      // market_resolved events; initial_dump: false skips unused book snapshots
+      this._send({ assets_ids: [], type: 'market', initial_dump: false, custom_feature_enabled: true });
 
       // Start heartbeat immediately (server expects it)
       this._startPing();
@@ -220,7 +227,7 @@ export class WebSocketPriceStream {
       if (this._destroyed || !this._ws || this._ws.readyState !== WebSocket.OPEN) break;
 
       const chunk = assetIds.slice(i, i + MAX_ASSETS_PER_SUB);
-      this._send({ operation: 'subscribe', assets_ids: chunk });
+      this._send({ operation: 'subscribe', assets_ids: chunk, custom_feature_enabled: true });
       sent += chunk.length;
 
       if (i + MAX_ASSETS_PER_SUB < total) {

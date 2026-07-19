@@ -1,7 +1,13 @@
 // Base Rate Engine
 // Fetches resolved Polymarket markets, computes empirical base rates by
-// category / structure / duration / price bucket, and compares active market
-// prices to historical base rates to detect "narrative premiums".
+// category / duration, and compares active market prices to historical
+// base rates to detect "narrative premiums".
+//
+// NOTE: price buckets were deliberately removed. Resolved markets only expose
+// their FINAL outcomePrices (~1.0 for YES, ~0.0 for NO), so bucketing by that
+// price leaks the resolution into the "base rate" and manufactures fake
+// BUY_YES/BUY_NO signals at price extremes. Only dimensions observable
+// before resolution (category, total lifetime) are safe to condition on.
 
 import { inferCategory } from './categoryPatterns';
 import { withTimeout, TIMEOUT_GAMMA_PAGE } from './fetchUtils';
@@ -11,7 +17,12 @@ const GAMMA_API = '/gamma-api';
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ─── Cache helpers ───
-const CACHE_KEY = 'polymarket_base_rates';
+// Stores COMPUTED base rates (a few KB), not the raw resolved markets —
+// 5,000 raw market objects routinely blew the localStorage quota, so the
+// cache silently never persisted and every session refetched everything.
+// v2 suffix: invalidates old caches that held raw markets / price buckets.
+const CACHE_KEY = 'polymarket_base_rates_v2';
+const LEGACY_CACHE_KEY = 'polymarket_base_rates';
 const CACHE_TTL = CACHE_TTL_24H;
 
 function loadCache() {
@@ -74,9 +85,6 @@ async function fetchResolvedPage(url, signal, maxRetries = 3) {
 }
 
 export async function fetchResolvedMarkets(signal) {
-  const cached = loadCache();
-  if (cached?.resolvedMarkets) return cached;
-
   const startTime = Date.now();
   const markets = [];
   let pageOffset = 0;
@@ -160,9 +168,26 @@ export async function fetchResolvedMarkets(signal) {
 
   console.log(`[BaseRateEngine] Fetched ${markets.length} resolved markets across ${pageCount} pages in ${Date.now() - startTime}ms.`);
 
-  const result = { resolvedMarkets: markets, fetchedAt: Date.now() };
-  saveCache(result);
-  return result;
+  return { resolvedMarkets: markets, fetchedAt: Date.now() };
+}
+
+/**
+ * Main entry point: return computed base rates, from cache when fresh.
+ * Fetches resolved markets and computes rates on cache miss. Only caches
+ * when the sample is large enough — a rate-limited partial fetch shouldn't
+ * poison the cache for 24h.
+ */
+export async function getBaseRates(signal) {
+  try { localStorage.removeItem(LEGACY_CACHE_KEY); } catch { /* ignore */ }
+  const cached = loadCache();
+  if (cached?.global) return cached;
+
+  const { resolvedMarkets } = await fetchResolvedMarkets(signal);
+  const rates = computeBaseRates(resolvedMarkets);
+  if (rates.global.total >= BASE_RATE_MIN_DATA_POINTS) {
+    saveCache(rates);
+  }
+  return rates;
 }
 
 // Category inference — uses shared patterns from categoryPatterns.js
@@ -177,28 +202,16 @@ function durationBucket(days) {
   return '>180d';
 }
 
-// Price bucket (initial yes price in cents)
-function priceBucket(price) {
-  if (price == null || isNaN(price)) return 'unknown';
-  const c = price * 100;
-  if (c <= 10) return '0-10¢';
-  if (c <= 25) return '11-25¢';
-  if (c <= 40) return '26-40¢';
-  if (c <= 60) return '41-60¢';
-  if (c <= 75) return '61-75¢';
-  if (c <= 90) return '76-90¢';
-  return '91-100¢';
-}
-
 // ─── Compute base rates ───
+// Conditions only on pre-resolution observables: category and total lifetime.
+// (Final outcomePrices are settlement values — see leakage note at top.)
 export function computeBaseRates(resolvedMarkets) {
   // Tracks: { total, yesResolved } for each key
   const buckets = {
     global: { total: 0, yesResolved: 0 },
     byCategory: {},
     byDuration: {},
-    byPriceBucket: {},
-    byCategoryAndPrice: {},
+    byCategoryAndDuration: {},
   };
 
   for (const m of resolvedMarkets) {
@@ -208,14 +221,7 @@ export function computeBaseRates(resolvedMarkets) {
     const question = m.question || m.title || '';
     const category = inferCategory(question);
 
-    // Parse initial yes price
-    let yesPrice = null;
-    try {
-      const prices = JSON.parse(m.outcomePrices || '[]');
-      yesPrice = prices[0] != null ? parseFloat(prices[0]) : null;
-    } catch { /* ignore */ }
-
-    // Duration
+    // Duration: full market lifetime (created → end)
     let duration = null;
     if (m.createdAt && m.endDate) {
       const created = new Date(m.createdAt);
@@ -224,7 +230,6 @@ export function computeBaseRates(resolvedMarkets) {
     }
 
     const durBucket = durationBucket(duration);
-    const pBucket = priceBucket(yesPrice);
 
     // Increment
     const inc = (obj, key) => {
@@ -238,8 +243,7 @@ export function computeBaseRates(resolvedMarkets) {
 
     inc(buckets.byCategory, category);
     inc(buckets.byDuration, durBucket);
-    inc(buckets.byPriceBucket, pBucket);
-    inc(buckets.byCategoryAndPrice, `${category}|${pBucket}`);
+    inc(buckets.byCategoryAndDuration, `${category}|${durBucket}`);
   }
 
   return buckets;
@@ -271,7 +275,7 @@ function determineResolution(m) {
 
 // ─── Per-market analysis ───
 export function analyzeBaseRate(market, baseRates) {
-  if (!baseRates || !baseRates.global || baseRates.global.total < 20) {
+  if (!baseRates || !baseRates.global || baseRates.global.total < BASE_RATE_MIN_DATA_POINTS) {
     return null;
   }
 
@@ -279,15 +283,14 @@ export function analyzeBaseRate(market, baseRates) {
   if (yesPrice == null) return null;
 
   const category = market.category || 'Other';
-  const pBucket = priceBucket(yesPrice);
-  const daysLeft = market.daysLeft;
-  const durBucket = durationBucket(daysLeft);
+  // Match on FULL lifetime (created → end), the same quantity the resolved-
+  // market buckets were built from — not daysLeft (time remaining).
+  const durBucket = durationBucket(market.durationDays);
 
   // Find best matching bucket (most specific → least specific)
-  const catPriceKey = `${category}|${pBucket}`;
-  const catPrice = baseRates.byCategoryAndPrice?.[catPriceKey];
+  const catDurKey = `${category}|${durBucket}`;
+  const catDur = baseRates.byCategoryAndDuration?.[catDurKey];
   const catOnly = baseRates.byCategory?.[category];
-  const priceOnly = baseRates.byPriceBucket?.[pBucket];
   const durOnly = baseRates.byDuration?.[durBucket];
   const global = baseRates.global;
 
@@ -296,23 +299,17 @@ export function analyzeBaseRate(market, baseRates) {
   let totalWeight = 0;
   const sources = [];
 
-  if (catPrice && catPrice.total >= 10) {
-    const rate = catPrice.yesResolved / catPrice.total;
+  if (catDur && catDur.total >= 10) {
+    const rate = catDur.yesResolved / catDur.total;
     weightedRate += rate * 3;
     totalWeight += 3;
-    sources.push({ label: `${category} + ${pBucket}`, rate, n: catPrice.total, weight: 3 });
+    sources.push({ label: `${category} + ${durBucket}`, rate, n: catDur.total, weight: 3 });
   }
   if (catOnly && catOnly.total >= 15) {
     const rate = catOnly.yesResolved / catOnly.total;
     weightedRate += rate * 2;
     totalWeight += 2;
     sources.push({ label: category, rate, n: catOnly.total, weight: 2 });
-  }
-  if (priceOnly && priceOnly.total >= 15) {
-    const rate = priceOnly.yesResolved / priceOnly.total;
-    weightedRate += rate * 2;
-    totalWeight += 2;
-    sources.push({ label: `Price ${pBucket}`, rate, n: priceOnly.total, weight: 2 });
   }
   if (durOnly && durOnly.total >= 10) {
     const rate = durOnly.yesResolved / durOnly.total;
@@ -368,7 +365,7 @@ export function analyzeBaseRate(market, baseRates) {
     suggestion,
     sources,
     totalSamples,
-    priceBucket: pBucket,
+    durationBucket: durBucket,
     category,
   };
 }

@@ -9,10 +9,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { fetchOrderBook } from '../api';
 import { calculateSpread } from '../SpreadFrictionEngine';
-import {
-  fetchMarketTrades, analyzeTradeFlow, getLeaderboardIndex,
-  peekCachedTradeFlow, setCachedTradeFlow,
-} from '../TradeFlowEngine';
+import { fetchMarketTrades, peekCachedTradeFlow } from '../TradeFlowEngine';
 import { isClobRateLimited, triggerClobRateLimit } from '../clobRateLimit';
 import {
   SPREAD_FETCH_DELAY, FLOW_FETCH_DELAY,

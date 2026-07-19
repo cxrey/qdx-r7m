@@ -113,7 +113,7 @@ try {
   const hoverMarket = generateMarkets(1)[0];
   const spreadCache = new Map();
 
-  globalThis.fetch = async (url) => {
+  globalThis.fetch = async () => {
     await new Promise(r => setTimeout(r, 2));
     return {
       ok: true,

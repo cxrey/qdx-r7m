@@ -16,7 +16,6 @@ import {
   setCachedPositions,
   getDismissedAlerts,
   dismissAlert as dismissAlertStorage,
-  resetDismissedAlerts,
   screenNewTrade,
 } from '../PortfolioEngine';
 

@@ -10,7 +10,7 @@ vi.mock('../categoryPatterns', () => ({
 }));
 
 import {
-  fetchResolvedMarkets, computeBaseRates, analyzeBaseRate,
+  fetchResolvedMarkets, getBaseRates, computeBaseRates, analyzeBaseRate,
   getBaseRateEdgeConfidence,
 } from '../BaseRateEngine';
 import { setupLocalStorageMock } from './helpers/mockLocalStorage';
@@ -44,39 +44,94 @@ function makeResolvedMarkets(n, startId = 0) {
   }));
 }
 
-// ── fetchResolvedMarkets ───────────────────────────────────────────
+// ── getBaseRates (cache wrapper) ───────────────────────────────────
 
-describe('fetchResolvedMarkets', () => {
-  it('returns cached result from localStorage within 24h', async () => {
-    const cached = {
-      ts: Date.now(),
-      data: { resolvedMarkets: [{ id: 'cached-1' }], fetchedAt: Date.now() },
+describe('getBaseRates', () => {
+  it('returns cached computed rates from localStorage within 24h', async () => {
+    const cachedRates = {
+      global: { total: 100, yesResolved: 40 },
+      byCategory: {},
+      byDuration: {},
+      byCategoryAndDuration: {},
     };
-    mockLocalStorage['polymarket_base_rates'] = JSON.stringify(cached);
+    mockLocalStorage['polymarket_base_rates_v2'] = JSON.stringify({
+      ts: Date.now(),
+      data: cachedRates,
+    });
 
-    const result = await fetchResolvedMarkets();
-    expect(result).toEqual(cached.data);
+    const result = await getBaseRates();
+    expect(result).toEqual(cachedRates);
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it('ignores expired cache (>24h)', async () => {
-    const expired = {
+  it('ignores expired cache (>24h) and fetches fresh', async () => {
+    mockLocalStorage['polymarket_base_rates_v2'] = JSON.stringify({
       ts: Date.now() - 25 * 60 * 60 * 1000, // 25 hours ago
-      data: { resolvedMarkets: [{ id: 'old' }], fetchedAt: Date.now() },
-    };
-    mockLocalStorage['polymarket_base_rates'] = JSON.stringify(expired);
+      data: { global: { total: 100, yesResolved: 40 } },
+    });
 
     // Return empty pages so it finishes quickly
     mockFetch.mockResolvedValue(new Response(JSON.stringify([]), { status: 200 }));
 
-    const promise = fetchResolvedMarkets();
+    const promise = getBaseRates();
     await vi.runAllTimersAsync();
     const result = await promise;
 
     expect(mockFetch).toHaveBeenCalled(); // fetched fresh
-    expect(result.resolvedMarkets).toEqual([]); // no data from empty pages
+    expect(result.global.total).toBe(0); // no data from empty pages
   });
 
+  it('removes the legacy raw-market cache key', async () => {
+    mockLocalStorage['polymarket_base_rates'] = JSON.stringify({ ts: Date.now(), data: {} });
+    mockFetch.mockResolvedValue(new Response(JSON.stringify([]), { status: 200 }));
+
+    const promise = getBaseRates();
+    await vi.runAllTimersAsync();
+    await promise;
+
+    expect(localStorage.removeItem).toHaveBeenCalledWith('polymarket_base_rates');
+  });
+
+  it('saves computed rates (not raw markets) when sample is large enough', async () => {
+    let callCount = 0;
+    mockFetch.mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) {
+        return new Response(JSON.stringify(makeResolvedMarkets(100)), { status: 200 });
+      }
+      return new Response(JSON.stringify([]), { status: 200 });
+    });
+
+    const promise = getBaseRates();
+    await vi.runAllTimersAsync();
+    await promise;
+
+    const savedCall = localStorage.setItem.mock.calls.find(
+      ([key]) => key === 'polymarket_base_rates_v2'
+    );
+    expect(savedCall).toBeTruthy();
+    const saved = JSON.parse(savedCall[1]);
+    expect(saved.data.global.total).toBe(100);
+    expect(saved.data.resolvedMarkets).toBeUndefined();
+  });
+
+  it('does not cache when the sample is too small (rate-limited partial fetch)', async () => {
+    mockFetch.mockResolvedValue(new Response(JSON.stringify([]), { status: 200 }));
+
+    const promise = getBaseRates();
+    await vi.runAllTimersAsync();
+    await promise;
+
+    const savedCall = localStorage.setItem.mock.calls.find(
+      ([key]) => key === 'polymarket_base_rates_v2'
+    );
+    expect(savedCall).toBeFalsy();
+  });
+});
+
+// ── fetchResolvedMarkets ───────────────────────────────────────────
+
+describe('fetchResolvedMarkets', () => {
   it('fetches 4 concurrent pages per batch (RESOLVED_CONCURRENCY)', async () => {
     let callCount = 0;
     mockFetch.mockImplementation(async () => {
@@ -111,19 +166,6 @@ describe('fetchResolvedMarkets', () => {
     const result = await promise;
 
     expect(result.resolvedMarkets.length).toBe(200);
-  });
-
-  it('saves result to localStorage', async () => {
-    mockFetch.mockResolvedValue(new Response(JSON.stringify([]), { status: 200 }));
-
-    const promise = fetchResolvedMarkets();
-    await vi.runAllTimersAsync();
-    await promise;
-
-    expect(localStorage.setItem).toHaveBeenCalledWith(
-      'polymarket_base_rates',
-      expect.any(String)
-    );
   });
 
   it('continues batch on partial 429 failure', async () => {
@@ -211,7 +253,7 @@ describe('fetchResolvedMarkets', () => {
     // Retry-After: 5 seconds
     await vi.advanceTimersByTimeAsync(5000);
     await vi.runAllTimersAsync();
-    const result = await promise;
+    await promise;
 
     expect(callCount).toBeGreaterThan(1); // retried after Retry-After delay
   });
@@ -259,14 +301,19 @@ describe('computeBaseRates', () => {
     expect(rates.global.total).toBe(1); // only the Yes market counted
   });
 
-  it('buckets by price range', () => {
-    const markets = [
-      makeResolved('Yes', [0.55, 0.45]), // 41-60¢ bucket
-      makeResolved('No', [0.08, 0.92]),  // 0-10¢ bucket
-    ];
+  it('buckets by full lifetime duration (created → end)', () => {
+    // makeResolved: created 60d ago, ended 30d ago → 30-day lifetime → 8-30d
+    const markets = [makeResolved('Yes'), makeResolved('No')];
     const rates = computeBaseRates(markets);
-    expect(rates.byPriceBucket['41-60¢'].total).toBe(1);
-    expect(rates.byPriceBucket['0-10¢'].total).toBe(1);
+    expect(rates.byDuration['8-30d'].total).toBe(2);
+    expect(rates.byDuration['8-30d'].yesResolved).toBe(1);
+    expect(rates.byCategoryAndDuration['Other|8-30d'].total).toBe(2);
+  });
+
+  it('does not build price buckets (post-resolution prices are settlement values)', () => {
+    const rates = computeBaseRates([makeResolved('Yes', [0.99, 0.01])]);
+    expect(rates.byPriceBucket).toBeUndefined();
+    expect(rates.byCategoryAndPrice).toBeUndefined();
   });
 
   it('returns empty buckets for empty input', () => {
@@ -281,16 +328,15 @@ describe('computeBaseRates', () => {
 describe('analyzeBaseRate', () => {
   // Minimal base rates with enough samples for analysis
   const baseRates = {
-    global: { total: 100, yesResolved: 50 }, // 50% base rate
-    byCategory: { Other: { total: 50, yesResolved: 25 } },
-    byPriceBucket: { '41-60¢': { total: 50, yesResolved: 30 } },
-    byDuration: { '8-30d': { total: 20, yesResolved: 10 } },
-    byCategoryAndPrice: { 'Other|41-60¢': { total: 20, yesResolved: 12 } },
+    global: { total: 100, yesResolved: 50 },                                  // 50%
+    byCategory: { Other: { total: 50, yesResolved: 25 } },                    // 50%
+    byDuration: { '8-30d': { total: 20, yesResolved: 10 } },                  // 50%
+    byCategoryAndDuration: { 'Other|8-30d': { total: 20, yesResolved: 12 } }, // 60%
   };
 
   it('returns null when baseRates has < 20 global samples', () => {
     const result = analyzeBaseRate(
-      { yesPrice: 0.55, category: 'Other', daysLeft: 15 },
+      { yesPrice: 0.55, category: 'Other', durationDays: 15 },
       { global: { total: 10, yesResolved: 5 } },
     );
     expect(result).toBeNull();
@@ -303,20 +349,30 @@ describe('analyzeBaseRate', () => {
 
   it('computes weighted base rate from matching buckets', () => {
     const result = analyzeBaseRate(
-      { yesPrice: 0.55, category: 'Other', daysLeft: 15 },
+      { yesPrice: 0.55, category: 'Other', durationDays: 15 },
       baseRates,
     );
     expect(result).not.toBeNull();
-    // Weighted: catPrice(60%×3) + cat(50%×2) + price(60%×2) + dur(50%×1) = 4.5/8 = 0.5625
-    expect(result.baseRate).toBeCloseTo(0.5625, 4);
+    // Weighted: catDur(60%×3) + cat(50%×2) + dur(50%×1) = 3.3/6 = 0.55
+    expect(result.baseRate).toBeCloseTo(0.55, 4);
     expect(result.marketPrice).toBe(0.55);
-    expect(result.sources.length).toBeGreaterThanOrEqual(2);
+    expect(result.sources.length).toBe(3);
+  });
+
+  it('matches duration buckets on durationDays (full lifetime), not daysLeft', () => {
+    // durationDays 15 → '8-30d' bucket matches; daysLeft should be ignored
+    const result = analyzeBaseRate(
+      { yesPrice: 0.55, category: 'Other', durationDays: 15, daysLeft: 200 },
+      baseRates,
+    );
+    expect(result.durationBucket).toBe('8-30d');
+    expect(result.sources.some((s) => s.label === 'Duration 8-30d')).toBe(true);
   });
 
   it('classifies NARRATIVE_PREMIUM when market overprices YES', () => {
-    // Market at 80¢, base rate ~50% → gap = +30¢ → NARRATIVE_PREMIUM
+    // Market at 85¢, base rate 55% → gap = +30¢ → NARRATIVE_PREMIUM
     const result = analyzeBaseRate(
-      { yesPrice: 0.80, category: 'Other', daysLeft: 15 },
+      { yesPrice: 0.85, category: 'Other', durationDays: 15 },
       baseRates,
     );
     expect(result.gapType).toBe('NARRATIVE_PREMIUM');
@@ -324,26 +380,19 @@ describe('analyzeBaseRate', () => {
   });
 
   it('classifies NARRATIVE_DISCOUNT when market underprices YES', () => {
-    // Market at 20¢, base rate ~50% → gap = -30¢ → NARRATIVE_DISCOUNT
-    const lowPriceRates = {
-      ...baseRates,
-      byPriceBucket: { ...baseRates.byPriceBucket, '11-25¢': { total: 50, yesResolved: 30 } },
-      byCategoryAndPrice: { ...baseRates.byCategoryAndPrice, 'Other|11-25¢': { total: 20, yesResolved: 12 } },
-    };
+    // Market at 25¢, base rate 55% → gap = -30¢ → NARRATIVE_DISCOUNT
     const result = analyzeBaseRate(
-      { yesPrice: 0.20, category: 'Other', daysLeft: 15 },
-      lowPriceRates,
+      { yesPrice: 0.25, category: 'Other', durationDays: 15 },
+      baseRates,
     );
     expect(result.gapType).toBe('NARRATIVE_DISCOUNT');
     expect(result.suggestion).toBe('BUY_YES');
   });
 
   it('classifies FAIR when gap < 3¢', () => {
-    // Weighted base rate for Other|41-60¢: catPrice=60%, cat=50%, price=60%, dur=50%
-    // Weighted avg ≈ (0.6*3 + 0.5*2 + 0.6*2 + 0.5*1) / 8 ≈ 0.5625
-    // Set market at 56¢ so gap ≈ 0
+    // Weighted base rate ≈ 0.55; market at 56¢ → gap ≈ 1¢
     const result = analyzeBaseRate(
-      { yesPrice: 0.56, category: 'Other', daysLeft: 15 },
+      { yesPrice: 0.56, category: 'Other', durationDays: 15 },
       baseRates,
     );
     expect(result.gapType).toBe('FAIR');

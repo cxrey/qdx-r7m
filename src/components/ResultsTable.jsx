@@ -3,7 +3,7 @@ import { List, useDynamicRowHeight } from 'react-window';
 import MarketRow from './MarketRow';
 import { calculateSpread } from '../SpreadFrictionEngine';
 import { createHoverPrefetcher } from '../hoverPrefetchUtils';
-import { fetchMarketTrades, getLeaderboardIndex, analyzeTradeFlow, peekCachedTradeFlow, setCachedTradeFlow } from '../TradeFlowEngine';
+import { peekCachedTradeFlow, setCachedTradeFlow } from '../TradeFlowEngine';
 import { runSpreadBatch, runFlowBatch, runGapFill } from '../batchFetchUtils';
 import {
   ROW_HEIGHT, HEADER_HEIGHT, FOOTER_HEIGHT, BANNER_HEIGHT, CYAN,
@@ -29,7 +29,7 @@ const GRID_COLS = '1fr 55px 55px 80px 75px 45px 80px 45px 60px 70px 75px 60px 58
 // Row component for react-window v2
 // In v2, rowProps are spread directly as component props (not wrapped in `data`)
 function VirtualRow({
-  index, style, ariaAttributes,
+  index, style,
   marketsRef, expandedMarketId, scrollWidth,
   spreadCacheRef, priceFlashesRef,
   foundInLoadedId, isApiFetched, handleToggleExpand, handleBookData,
@@ -126,7 +126,6 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, filt
     acquireSlot: acquireClobSlot,
     hasSlotAvailable: hasClobSlotAvailable,
   }), []);
-  const prefetchCache = useRef(prefetcher.cache);
 
   // CLOB rate limit circuit breaker (shared module)
   const [clobRateLimited, setClobRateLimited] = useState(isClobRateLimited);
@@ -365,7 +364,6 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, filt
     foundInLoadedId, isApiFetched, handleToggleExpand, handleBookData,
     handleFlowData, onLivePriceUpdate,
     filters, handleRowHover, handleRowHoverEnd,
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [expandedMarketId, scrollWidth,
        foundInLoadedId, isApiFetched, handleToggleExpand, handleBookData,
        handleFlowData, onLivePriceUpdate,

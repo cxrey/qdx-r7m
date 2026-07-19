@@ -10,7 +10,6 @@ import {
   deleteJournalEntry,
   addReEvaluation,
   computeCalibrationMetrics,
-  getKellySettings,
 } from '../KellyEngine';
 import {
   ResponsiveContainer,

@@ -199,22 +199,26 @@ export function assessWalletRelevance(walletActivity, marketCategory, leaderboar
   }
 
   const rank = leaderboardEntry?.rank;
+  // Wallets not on the leaderboard have no rank — avoid "Ranked #undefined"
+  const rankPrefix = rank != null ? `Ranked #${rank} overall, ` : '';
   let relevanceLevel, displayText;
 
   if (categoryTradeCount >= 10 && categoryWinRate != null && categoryWinRate > 0.55) {
     relevanceLevel = 'RELEVANT_EXPERT';
-    displayText = `Ranked #${rank} overall, ${(categoryWinRate * 100).toFixed(0)}% win rate in ${marketCategory} (${categoryTradeCount} trades)`;
+    displayText = `${rankPrefix}${(categoryWinRate * 100).toFixed(0)}% win rate in ${marketCategory} (${categoryTradeCount} trades)`;
   } else if (categoryTradeCount >= 10) {
     relevanceLevel = 'CATEGORY_ACTIVE';
     displayText = categoryWinRate != null
-      ? `Ranked #${rank} overall, active in ${marketCategory} (${categoryTradeCount} trades, ${(categoryWinRate * 100).toFixed(0)}% win rate)`
-      : `Ranked #${rank} overall, active in ${marketCategory} (${categoryTradeCount} trades, win rate unknown)`;
+      ? `${rankPrefix}active in ${marketCategory} (${categoryTradeCount} trades, ${(categoryWinRate * 100).toFixed(0)}% win rate)`
+      : `${rankPrefix}active in ${marketCategory} (${categoryTradeCount} trades, win rate unknown)`;
   } else if (categoryTradeCount >= 5) {
     relevanceLevel = 'SOME_HISTORY';
-    displayText = `Ranked #${rank} overall, limited ${marketCategory} history (${categoryTradeCount} trades)`;
+    displayText = `${rankPrefix}limited ${marketCategory} history (${categoryTradeCount} trades)`;
   } else {
     relevanceLevel = 'NO_TRACK_RECORD';
-    displayText = `Ranked #${rank} overall, no ${marketCategory} track record`;
+    displayText = rankPrefix
+      ? `${rankPrefix}no ${marketCategory} track record`
+      : `No track record in ${marketCategory}`;
   }
 
   return { categoryTradeCount, categoryWinRate, relevanceLevel, displayText };

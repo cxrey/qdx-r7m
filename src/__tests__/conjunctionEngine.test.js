@@ -415,43 +415,20 @@ describe('conjunctionEdgeBonus', () => {
     expect(conjunctionEdgeBonus({ isConjunction: false })).toBe(0);
   });
 
-  it('returns 12 for ALL_OF with 3+ conditions and gapPp > 10', () => {
-    const conj = { isConjunction: true, type: 'ALL_OF', conditionCount: 3, requiredCount: 3, gapPp: 15 };
-    expect(conjunctionEdgeBonus(conj)).toBe(12);
-  });
-
-  it('returns 6 for ALL_OF with 2 conditions and gapPp > 8', () => {
-    const conj = { isConjunction: true, type: 'ALL_OF', conditionCount: 2, requiredCount: 2, gapPp: 9 };
-    expect(conjunctionEdgeBonus(conj)).toBe(6);
-  });
-
-  it('returns 10 for K_OF_N with requiredCount > n/2 and gapPp > 10', () => {
-    const conj = { isConjunction: true, type: 'K_OF_N', conditionCount: 4, requiredCount: 3, gapPp: 12 };
-    expect(conjunctionEdgeBonus(conj)).toBe(10);
-  });
-
-  it('returns 8 for K_OF_N with requiredCount <= n/2 and gapPp < -5', () => {
-    const conj = { isConjunction: true, type: 'K_OF_N', conditionCount: 4, requiredCount: 2, gapPp: -7 };
-    expect(conjunctionEdgeBonus(conj)).toBe(8);
-  });
-
-  it('returns 10 for ANY_OF with gapPp < -10', () => {
-    const conj = { isConjunction: true, type: 'ANY_OF', conditionCount: 3, requiredCount: 1, gapPp: -12 };
-    expect(conjunctionEdgeBonus(conj)).toBe(10);
-  });
-
-  it('returns 10 for SEQUENTIAL with 3+ conditions and gapPp > 10', () => {
-    const conj = { isConjunction: true, type: 'SEQUENTIAL', conditionCount: 3, requiredCount: 3, gapPp: 15 };
-    expect(conjunctionEdgeBonus(conj)).toBe(10);
-  });
-
-  it('returns 0 when no bonus threshold is met', () => {
-    const conj = { isConjunction: true, type: 'ALL_OF', conditionCount: 2, requiredCount: 2, gapPp: 3 };
-    expect(conjunctionEdgeBonus(conj)).toBe(0);
-  });
-
-  it('returns 0 when gapPp is undefined', () => {
-    const conj = { isConjunction: true, type: 'ALL_OF', conditionCount: 3, requiredCount: 3 };
-    expect(conjunctionEdgeBonus(conj)).toBe(0);
+  it('always returns 0 — the automatic gap is circular and must not be scored', () => {
+    // These fixtures used to collect +12/+10/+8 bonuses purely from the
+    // self-referential default gap (derived from the market price itself).
+    const fixtures = [
+      { isConjunction: true, type: 'ALL_OF', conditionCount: 3, requiredCount: 3, gapPp: 15 },
+      { isConjunction: true, type: 'ALL_OF', conditionCount: 2, requiredCount: 2, gapPp: 9 },
+      { isConjunction: true, type: 'K_OF_N', conditionCount: 4, requiredCount: 3, gapPp: 12 },
+      { isConjunction: true, type: 'K_OF_N', conditionCount: 4, requiredCount: 2, gapPp: -7 },
+      { isConjunction: true, type: 'ANY_OF', conditionCount: 3, requiredCount: 1, gapPp: -12 },
+      { isConjunction: true, type: 'SEQUENTIAL', conditionCount: 3, requiredCount: 3, gapPp: 15 },
+      { isConjunction: true, type: 'ALL_OF', conditionCount: 3, requiredCount: 3 },
+    ];
+    for (const conj of fixtures) {
+      expect(conjunctionEdgeBonus(conj)).toBe(0);
+    }
   });
 });

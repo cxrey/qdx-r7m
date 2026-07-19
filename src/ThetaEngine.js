@@ -73,20 +73,19 @@ export function calculateTheta(yesPrice, daysRemaining, marketStructure, measure
   let dailyYesTheta, dailyNoTheta, impliedHazardRate;
 
   if (marketStructure === 'TOUCH_CUMULATIVE') {
-    // Touch markets: time helps Yes (more time = more chances to trigger)
-    // Model as inverse of standard: yesTheta is POSITIVE
+    // Touch markets: YES = P(event triggers at least once before deadline)
+    // = 1 - (1-h)^d. A day passing WITHOUT a touch removes one remaining
+    // chance, so P declines — same decay direction as STANDARD. (The market
+    // price already conditions on "no touch yet": a touched market resolves.
+    // "More time = more chances" is a cross-sectional comparison between
+    // markets, not the direction of time decay within one market.)
     const h = inferHazardRate(yesPrice, daysRemaining);
     if (h == null) return null;
 
     const pToday = 1 - Math.pow(1 - h, daysRemaining);
     const pTomorrow = 1 - Math.pow(1 - h, daysRemaining - 1);
-    // For touch, we flip: more time gone = more chances used, so p_tomorrow < p_today in standard
-    // But the VALUE of the position increases as time passes without trigger... actually for touch:
-    // Each day that passes without the touch happening, the remaining time shrinks,
-    // BUT touch markets have already "banked" all prior days as chances.
-    // Net: yesTheta = -(pTomorrow - pToday) = positive (time favors Yes having more tries)
-    dailyYesTheta = -(pTomorrow - pToday); // positive
-    dailyNoTheta = -dailyYesTheta; // negative
+    dailyYesTheta = pTomorrow - pToday; // negative: fewer chances left
+    dailyNoTheta = -dailyYesTheta;
     impliedHazardRate = h;
   } else if (marketStructure === 'CUMULATIVE') {
     // Cumulative event model: YES = probability event occurs within remaining days.
@@ -116,27 +115,16 @@ export function calculateTheta(yesPrice, daysRemaining, marketStructure, measure
     impliedHazardRate = h;
   }
 
-  // Theta acceleration: compare theta today vs theta 7 days from now
+  // Theta acceleration: compare theta today vs theta 7 days from now.
+  // All structures share the same survival-model form, so one formula
+  // works with the structure's implied daily rate.
   let thetaAcceleration = 0;
   const futureDays = daysRemaining - THETA_ACCELERATION_LOOKAHEAD_DAYS;
   if (futureDays >= 1 && Math.abs(dailyYesTheta) > 0.00001) {
-    let futureTheta;
-    if (marketStructure === 'CUMULATIVE') {
-      const q = impliedHazardRate;
-      const pFuture = 1 - Math.pow(1 - q, futureDays);
-      const pFutureMinus1 = 1 - Math.pow(1 - q, futureDays - 1);
-      futureTheta = pFutureMinus1 - pFuture;
-    } else if (marketStructure === 'TOUCH_CUMULATIVE') {
-      const h = impliedHazardRate;
-      const pFuture = 1 - Math.pow(1 - h, futureDays);
-      const pFutureMinus1 = 1 - Math.pow(1 - h, futureDays - 1);
-      futureTheta = -(pFutureMinus1 - pFuture);
-    } else {
-      const h = impliedHazardRate;
-      const pFuture = 1 - Math.pow(1 - h, futureDays);
-      const pFutureMinus1 = 1 - Math.pow(1 - h, futureDays - 1);
-      futureTheta = pFutureMinus1 - pFuture;
-    }
+    const rate = impliedHazardRate;
+    const pFuture = 1 - Math.pow(1 - rate, futureDays);
+    const pFutureMinus1 = 1 - Math.pow(1 - rate, futureDays - 1);
+    const futureTheta = pFutureMinus1 - pFuture;
     thetaAcceleration = (Math.abs(futureTheta) - Math.abs(dailyYesTheta)) / Math.abs(dailyYesTheta);
   }
 
@@ -190,15 +178,9 @@ export function projectDecayCurve(yesPrice, daysRemaining, marketStructure, proj
       const dFuture = daysRemaining - k;
       if (dFuture <= 0) continue;
 
-      let projectedYes;
-      if (marketStructure === 'TOUCH_CUMULATIVE') {
-        // Touch: cumulative probability of triggering rises as time left increases
-        // With fewer days left, fewer chances → projected p is lower going forward
-        // But from NOW's perspective looking forward, p_future = 1 - (1-h)^dFuture
-        projectedYes = 1 - Math.pow(1 - h, dFuture);
-      } else {
-        projectedYes = 1 - Math.pow(1 - h, dFuture);
-      }
+      // STANDARD and TOUCH_CUMULATIVE share the hazard model:
+      // fewer days left → fewer chances → lower projected YES.
+      const projectedYes = 1 - Math.pow(1 - h, dFuture);
       const bandWidth = 0.05 * Math.sqrt(k / 7);
       points.push({
         day: k,
@@ -290,7 +272,7 @@ export function detectThetaZones(yesPrice, daysRemaining, theta) {
  * Returns everything needed for table display (no price history needed).
  */
 export function analyzeTheta(market) {
-  const { yesPrice, noPrice, daysLeft, question, description, resolutionAnalysis } = market;
+  const { yesPrice, daysLeft, question, description, resolutionAnalysis } = market;
 
   if (daysLeft == null || daysLeft < 0) {
     return null;
@@ -310,17 +292,13 @@ export function analyzeTheta(market) {
 
   const zones = detectThetaZones(yesPrice, daysLeft, theta);
 
-  // Best theta: the positive side (time decay benefits this side)
-  let bestTheta, bestSide;
-  if (structure.type === 'TOUCH_CUMULATIVE') {
-    // Touch: more time = more chances to trigger, YES theta is positive
-    bestTheta = theta.dailyYesTheta;
-    bestSide = 'YES';
-  } else {
-    // STANDARD & CUMULATIVE: fewer days = lower YES prob, NO theta is positive
-    bestTheta = theta.dailyNoTheta;
-    bestSide = 'NO';
-  }
+  // Best theta: the positive side (time decay benefits this side).
+  // For every structure — STANDARD, CUMULATIVE, and TOUCH_CUMULATIVE —
+  // a day passing without the event lowers the YES probability, so time
+  // decay always benefits NO. (Touch markets are no exception: each day
+  // without a touch removes a remaining chance.)
+  const bestTheta = theta.dailyNoTheta;
+  const bestSide = 'NO';
 
   return {
     ...theta,

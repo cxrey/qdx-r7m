@@ -420,7 +420,16 @@ export function analyzeConjunction(market) {
   const { type, conditionCount, requiredCount, conditions, confidence } = detection;
   const yesPrice = market.yesPrice ?? 0;
 
-  // Default individual probabilities
+  // Default individual probabilities.
+  //
+  // ILLUSTRATIVE ONLY: these are reverse-engineered FROM the market price
+  // (inverting the independence formula), so the compoundProb/gap computed
+  // below deviates from the price only by the correlation adjustment and
+  // type penalties — i.e. the gap is deterministic per type, an artifact of
+  // the model's own assumptions, NOT detected mispricing. It exists to seed
+  // the interactive ConjunctionCard, where the user supplies real
+  // per-condition estimates. It must never feed edgeScore
+  // (see conjunctionEdgeBonus).
   let defaultProbs;
   if (type === 'ALL_OF' || type === 'SEQUENTIAL') {
     // Inverse: what prob per condition makes the product equal the market price?
@@ -480,20 +489,20 @@ export function analyzeConjunction(market) {
 // --- Edge Score Contribution ---
 
 /**
- * Calculate edge score bonus from conjunction analysis.
+ * Edge score bonus from conjunction analysis: always 0.
+ *
+ * The automatic gap is circular — the default per-condition probabilities
+ * are inverted from the market price itself, so the "gap" is a deterministic
+ * artifact of the correlation adjustment and type penalties (e.g. every
+ * SEQUENTIAL market with 3+ extracted conditions showed ~+10pp "overpriced"
+ * and collected +10 edge score). There is no non-circular automatic signal
+ * available, so conjunction detection is informational only; sizing insight
+ * comes from the interactive card where the user supplies real
+ * per-condition probabilities.
+ *
+ * Kept as a function so the edge-score wiring stays in place if a
+ * user-supplied-probability signal is ever routed through it.
  */
-export function conjunctionEdgeBonus(conjunction) {
-  if (!conjunction?.isConjunction) return 0;
-
-  const { type, conditionCount, requiredCount, gapPp } = conjunction;
-  const absGap = Math.abs(gapPp ?? 0);
-
-  if (type === 'ALL_OF' && conditionCount >= 3 && gapPp > 10) return 12;
-  if (type === 'ALL_OF' && conditionCount >= 2 && gapPp > 8) return 6;
-  if (type === 'K_OF_N' && requiredCount > conditionCount / 2 && gapPp > 10) return 10;
-  if (type === 'K_OF_N' && requiredCount <= conditionCount / 2 && gapPp < -5) return 8;
-  if (type === 'ANY_OF' && gapPp < -10) return 10;
-  if (type === 'SEQUENTIAL' && conditionCount >= 3 && gapPp > 10) return 10;
-
+export function conjunctionEdgeBonus() {
   return 0;
 }
