@@ -56,11 +56,47 @@ describe('Fee pipeline integration', () => {
   it('crypto at p=0.50 produces correct fee fields through processMarket', () => {
     const m = processMarket(makeRawMarket());
 
-    // effectiveTakerFee = 0.072 × (0.50 × 0.50)^1 = 0.018
-    expect(m.effectiveTakerFee).toBeCloseTo(0.018, 6);
-    // takerFeePP = 0.018 × 0.50 × 100 = 0.9
-    expect(m.takerFeePP).toBeCloseTo(0.9, 4);
+    // Docs worked example: fee = shares × 0.07 × p(1−p) → 1.75¢/share at 50¢
+    // takerFeePP = 0.07 × 0.25 × 100 = 1.75
+    expect(m.takerFeePP).toBeCloseTo(1.75, 4);
+    // effectiveTakerFee = feePerShare / price = 0.0175 / 0.50 = 0.035
+    expect(m.effectiveTakerFee).toBeCloseTo(0.035, 6);
     expect(m.feeFree).toBe(false);
+  });
+
+  it('live feeSchedule on the market overrides the category table', () => {
+    const m = processMarket(makeRawMarket({
+      id: 'sched-1',
+      feeType: 'sports_fees_v2',
+      feeSchedule: { rate: 0.05, exponent: 1, rebateRate: 0.15, takerOnly: true },
+      category: 'crypto', // schedule must win over the crypto table entry
+    }));
+    // takerFeePP = 0.05 × 0.25 × 100 = 1.25 (sports schedule, not crypto's 1.75)
+    expect(m.takerFeePP).toBeCloseTo(1.25, 4);
+    expect(m.effectiveTakerFee).toBeCloseTo(0.025, 6);
+    // Normalized schedule + feeType are carried on the processed market
+    expect(m.feeSchedule).toEqual({ feeRate: 0.05, exponent: 1, makerRebatePct: 0.15 });
+    expect(m.feeType).toBe('sports_fees_v2');
+  });
+
+  it('feeType maps to the fee slug with priority over category/tags', () => {
+    const m = processMarket(makeRawMarket({
+      id: 'sched-2',
+      question: 'Will it rain tomorrow?',
+      feeType: 'finance_prices_fees',
+      category: undefined,
+      events: [{ slug: 'rain', tags: [{ label: 'Crypto', slug: 'crypto' }] }],
+    }));
+    expect(m.gammaCategory).toBe('business');
+  });
+
+  it('zero-rate live schedule marks the market fee-free', () => {
+    const m = processMarket(makeRawMarket({
+      id: 'sched-3',
+      feeSchedule: { rate: 0, exponent: 1, rebateRate: 0 },
+    }));
+    expect(m.feeFree).toBe(true);
+    expect(m.takerFeePP).toBe(0);
   });
 
   it('geopolitics market is fee-free', () => {
@@ -190,7 +226,7 @@ describe('Fee pipeline integration', () => {
         events: [{ slug: 'rain', tags: [{ label: 'Crypto', slug: 'crypto' }] }],
       }));
       expect(m.gammaCategory).toBe('crypto');
-      expect(m.effectiveTakerFee).toBeCloseTo(0.018, 6);
+      expect(m.effectiveTakerFee).toBeCloseTo(0.035, 6);
     });
 
     it('mapped tag: politics tag resolves to us-politics fee slug', () => {
@@ -214,7 +250,7 @@ describe('Fee pipeline integration', () => {
         events: [{ slug: 'btc' }],
       }));
       expect(m.gammaCategory).toBe('crypto');
-      expect(m.effectiveTakerFee).toBeCloseTo(0.018, 6);
+      expect(m.effectiveTakerFee).toBeCloseTo(0.035, 6);
     });
 
     it('rawCategory (if ever present) takes priority over tags', () => {

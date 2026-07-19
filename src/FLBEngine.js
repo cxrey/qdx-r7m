@@ -44,7 +44,7 @@ export function getAdjustedProbability(price, amplifier = 1.0) {
 }
 
 export function analyzeFLB(market) {
-  const { yesPrice, noPrice, spread, resolutionAnalysis, gammaCategory, feesEnabled } = market;
+  const { yesPrice, noPrice, spread, resolutionAnalysis, gammaCategory, feesEnabled, feeSchedule } = market;
 
   if (yesPrice == null || noPrice == null) {
     return {
@@ -119,8 +119,8 @@ export function analyzeFLB(market) {
 
   // Fee-adjusted net edges (convert pp to decimal for consistency with edge units)
   const bestPrice = bestSide === 'YES' ? yesPrice : bestSide === 'NO' ? noPrice : null;
-  const takerFeePP = computeFeePP(bestPrice, gammaCategory, feesEnabled);
-  const makerRebatePP = computeMakerRebatePP(bestPrice, gammaCategory, feesEnabled);
+  const takerFeePP = computeFeePP(bestPrice, gammaCategory, feesEnabled, feeSchedule);
+  const makerRebatePP = computeMakerRebatePP(bestPrice, gammaCategory, feesEnabled, feeSchedule);
   const takerFeeDecimal = takerFeePP / 100;
   const makerRebateDecimal = makerRebatePP / 100;
   const netEdgeTaker = bestEdgeAfterSpread - takerFeeDecimal;

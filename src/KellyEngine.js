@@ -70,9 +70,11 @@ export function calculateKelly(estProb, marketPrice, side = 'YES', feeOptions = 
 
   // Edge = expected value per dollar
   const edge = (b * p) - q;
-  // Fee adjustment: effectiveFeeRate is per-dollar like edge
-  const { gammaCategory, feesEnabled } = feeOptions;
-  const takerFeeRate = computeEffectiveFeeRate(marketPrice, gammaCategory, feesEnabled);
+  // Fee adjustment: effectiveFeeRate is per-dollar like edge.
+  // feeSchedule (live per-market params) takes priority over the
+  // gammaCategory fallback table inside the fee calculator.
+  const { gammaCategory, feesEnabled, feeSchedule } = feeOptions;
+  const takerFeeRate = computeEffectiveFeeRate(marketPrice, gammaCategory, feesEnabled, feeSchedule);
   const feeAdjustedEdge = edge - takerFeeRate;
   const edgePp = edge * 100;
 

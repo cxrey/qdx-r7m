@@ -396,10 +396,16 @@ export default function KellyCalculator({ market, portfolio }) {
   const estProb = side === 'YES' ? sideProb : (1 - sideProb);
 
   // Fee context — without this, calculateKelly treats every market as
-  // fee-free and oversizes bets on fee-enabled categories.
+  // fee-free and oversizes bets on fee-enabled categories. feeSchedule is
+  // the live per-market schedule (authoritative); gammaCategory is the
+  // fallback table key.
   const feeOptions = useMemo(
-    () => ({ gammaCategory: market.gammaCategory, feesEnabled: market.feesEnabled ?? false }),
-    [market.gammaCategory, market.feesEnabled]
+    () => ({
+      gammaCategory: market.gammaCategory,
+      feesEnabled: market.feesEnabled ?? false,
+      feeSchedule: market.feeSchedule ?? null,
+    }),
+    [market.gammaCategory, market.feesEnabled, market.feeSchedule]
   );
 
   // Core calculations

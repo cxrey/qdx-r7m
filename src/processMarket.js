@@ -1,5 +1,5 @@
 import { analyzeConjunction, conjunctionEdgeBonus } from './ConjunctionEngine';
-import { computeEffectiveFeeRate, computeFeePP, computeRoundTripCostPP, isFeeFree, FEE_PARAM_SLUGS } from './feeCalculator';
+import { computeEffectiveFeeRate, computeFeePP, computeRoundTripCostPP, isFeeFree, FEE_PARAM_SLUGS, FEETYPE_TO_FEE_SLUG, normalizeFeeSchedule } from './feeCalculator';
 import { analyzeFLB } from './FLBEngine';
 import { analyzeTheta } from './ThetaEngine';
 import { analyzeResolution } from './ResolutionAnalyzer';
@@ -180,16 +180,19 @@ export function processMarket(market) {
   }
   const category = mappedCategory || inferCategory(question, slug);
 
-  // ── gammaCategory (fee slug) derivation ──────────────────────
-  // Three category concepts exist in the codebase:
-  //   1. Display category (UI): 'Crypto', 'Sports', 'Politics', etc.
-  //      Inferred from question text via regex (inferCategory). Used for UI pills and filters.
-  //   2. Gamma API category (raw): 'crypto', 'sports', 'us-politics', etc.
-  //      From market.category field — currently always null (API doesn't populate it).
-  //   3. Fee slug (gammaCategory): key into FEE_PARAMS for fee calculation.
-  //      Derived below with priority: rawCategory > event tags > display-category fallback.
+  // ── Fee schedule + gammaCategory (fee slug) derivation ───────
+  // The live per-market feeSchedule ({ rate, exponent, rebateRate }) is the
+  // authoritative fee source — every fee-enabled Gamma market carries one.
+  // gammaCategory (fee slug) is only the FALLBACK path for markets without
+  // a schedule, derived with priority:
+  //   market.feeType (live) > rawCategory > event tags > display-category.
+  // Display category ('Crypto', 'Sports', ...) remains a separate concept
+  // used for UI pills and filters.
+  const feeType = market.feeType || null;
+  const feeSchedule = normalizeFeeSchedule(market.feeSchedule);
+  const feeTypeSlug = feeType ? (FEETYPE_TO_FEE_SLUG[feeType] || null) : null;
   const tagCategory = extractFeeCategoryFromTags(market.events?.[0]?.tags);
-  const gammaCategory = rawCategory || tagCategory || DISPLAY_TO_FEE_SLUG[category] || null;
+  const gammaCategory = feeTypeSlug || rawCategory || tagCategory || DISPLAY_TO_FEE_SLUG[category] || null;
 
   let resolutionAnalysis = null;
   try {
@@ -201,7 +204,7 @@ export function processMarket(market) {
 
   let flb = null;
   try {
-    flb = analyzeFLB({ yesPrice, noPrice, spread, resolutionAnalysis, gammaCategory, feesEnabled: market.feesEnabled ?? false });
+    flb = analyzeFLB({ yesPrice, noPrice, spread, resolutionAnalysis, gammaCategory, feesEnabled: market.feesEnabled ?? false, feeSchedule });
   } catch (e) {
     console.warn('[processMarket] FLB analysis failed for', market.id, e.message);
     _engineFailures.push('flb');
@@ -258,9 +261,9 @@ export function processMarket(market) {
   const openInterest = safeNum(market.events?.[0]?.openInterest);
 
   // Fee calculations — computed before edgeScore so the fee penalty/bonus applies on first pass
-  const effectiveTakerFee = computeEffectiveFeeRate(yesPrice, gammaCategory, feesEnabled);
-  const takerFeePP = computeFeePP(yesPrice, gammaCategory, feesEnabled);
-  const feeFree = isFeeFree(gammaCategory);
+  const effectiveTakerFee = computeEffectiveFeeRate(yesPrice, gammaCategory, feesEnabled, feeSchedule);
+  const takerFeePP = computeFeePP(yesPrice, gammaCategory, feesEnabled, feeSchedule);
+  const feeFree = isFeeFree(gammaCategory, feeSchedule);
 
   let edgeScore = 0;
   try {
@@ -277,7 +280,7 @@ export function processMarket(market) {
   // Theta break-even: how many days of theta needed to overcome round-trip costs
   let thetaBreakEvenDays = null;
   if (theta && spread != null) {
-    const roundTrip = computeRoundTripCostPP(yesPrice, spread, gammaCategory, feesEnabled);
+    const roundTrip = computeRoundTripCostPP(yesPrice, spread, gammaCategory, feesEnabled, feeSchedule);
     const dailyThetaPP = Math.abs(theta.bestTheta) * 100;
     thetaBreakEvenDays = roundTrip.totalCostPP > 0 && dailyThetaPP > 0
       ? Math.ceil(roundTrip.totalCostPP / dailyThetaPP)
@@ -324,6 +327,8 @@ export function processMarket(market) {
     acceptingOrders,
     feesEnabled,
     gammaCategory,
+    feeType,
+    feeSchedule,
     openInterest,
     effectiveTakerFee,
     takerFeePP,
