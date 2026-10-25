@@ -7,6 +7,7 @@ vi.mock('../fetchUtils', () => ({
 }));
 
 import {
+  fetchPositions,
   normalizePosition,
   matchPositionsToMarkets,
   extractEntities,
@@ -24,6 +25,7 @@ import {
   dismissAlert,
   resetDismissedAlerts,
 } from '../PortfolioEngine';
+import { envelope, jsonResponse, v2Position, v2Trade, WALLET, YES_TOKEN, CONDITION } from './helpers/dataApiV2Fixtures';
 
 // ── Helpers ──
 
@@ -467,5 +469,59 @@ describe('localStorage helpers', () => {
     expect(getDismissedAlerts()).toEqual(['alert-1', 'alert-2']);
     resetDismissedAlerts();
     expect(getDismissedAlerts()).toEqual([]);
+  });
+});
+
+describe('fetchPositions (Data API v2)', () => {
+  let mockFetch;
+  beforeEach(() => { mockFetch = vi.fn(); vi.stubGlobal('fetch', mockFetch); });
+
+  const route = (url) => (url.includes('/v2/positions') ? 'positions' : url.includes('/v2/trades') ? 'trades' : 'other');
+
+  it('calls /v2/positions and /v2/trades with the user param', async () => {
+    mockFetch.mockImplementation(async (url) => jsonResponse(envelope(route(url) === 'positions' ? [v2Position()] : [v2Trade()])));
+    await fetchPositions(WALLET);
+    const urls = mockFetch.mock.calls.map((c) => c[0]);
+    expect(urls).toContain(`/data-api/v2/positions?user=${WALLET}`);
+    expect(urls).toContain(`/data-api/v2/trades?user=${WALLET}&limit=100`);
+    expect(urls.some((u) => /[?&]address=/.test(u))).toBe(false);
+  });
+
+  it('returns v1-shaped positions that normalizePosition understands', async () => {
+    mockFetch.mockImplementation(async (url) => jsonResponse(envelope(route(url) === 'positions' ? [v2Position()] : [])));
+    const { positions, error } = await fetchPositions(WALLET);
+    expect(error).toBeNull();
+    const norm = normalizePosition(positions[0]);
+    expect(norm).toMatchObject({ conditionId: CONDITION, tokenId: YES_TOKEN, size: 1500, entryPrice: 0.4 });
+  });
+
+  it('follows the cursor so portfolios over one page are not truncated', async () => {
+    let positionCalls = 0;
+    mockFetch.mockImplementation(async (url) => {
+      if (route(url) !== 'positions') return jsonResponse(envelope([]));
+      positionCalls++;
+      const page = Array.from({ length: 100 }, (_, i) => v2Position({ token_id: `${positionCalls}-${i}` }));
+      return jsonResponse(envelope(page, { nextCursor: positionCalls < 3 ? `c${positionCalls}` : null }));
+    });
+    const { positions } = await fetchPositions(WALLET);
+    expect(positionCalls).toBe(3);
+    expect(positions).toHaveLength(300);
+  });
+
+  it('reports an error when the wallet has no positions (unchanged behaviour)', async () => {
+    mockFetch.mockImplementation(async () => jsonResponse(envelope([])));
+    const { positions, error } = await fetchPositions(WALLET);
+    expect(positions).toEqual([]);
+    expect(error).toMatch(/Could not fetch positions/);
+  });
+
+  it('survives a failing trades call', async () => {
+    mockFetch.mockImplementation(async (url) => (route(url) === 'positions'
+      ? jsonResponse(envelope([v2Position()]))
+      : new Response('Server Error', { status: 500 })));
+    const { positions, trades, error } = await fetchPositions(WALLET);
+    expect(positions).toHaveLength(1);
+    expect(trades).toEqual([]);
+    expect(error).toBeNull();
   });
 });
