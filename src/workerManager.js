@@ -22,6 +22,10 @@ const MIN_CHUNK_SIZE = 2_000;
 const WORKER_TIMEOUT = 30_000; // 30s timeout per chunk
 
 const pool = []; // pool[slot] → Worker (created lazily)
+// slot → Set of in-flight requests ({ lost, abandon }). A slot's Worker is
+// shared by every concurrent batch, so when it's killed (timeout/crash) ALL
+// of its requests must be told — not just the one that noticed.
+const pendingBySlot = new Map();
 let nextRequestId = 1;
 
 function getWorker(slot) {
@@ -34,10 +38,23 @@ function getWorker(slot) {
   return pool[slot];
 }
 
-function terminateWorker(slot) {
+/**
+ * Kill the Worker at `slot`. Its other in-flight requests would otherwise
+ * never get a reply and sit out their own 30s timeout, so:
+ * - `fallback` (timeout/crash): each falls back to the main thread now;
+ * - otherwise (shutdown): each resolves empty — callers are being torn down.
+ */
+function terminateWorker(slot, { fallback = false, reason = 'Worker replaced' } = {}) {
   if (pool[slot]) {
     pool[slot].terminate();
     pool[slot] = null;
+  }
+  const pending = pendingBySlot.get(slot);
+  if (!pending) return;
+  pendingBySlot.delete(slot);
+  for (const req of pending) {
+    if (fallback) req.lost(reason);
+    else req.abandon();
   }
 }
 
@@ -71,12 +88,14 @@ function processChunk(chunk, slot) {
 
   return new Promise((resolve) => {
     let settled = false;
+    let fallingBack = false;
     let w = null;
 
     const settle = (results) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
+      pendingBySlot.get(slot)?.delete(entry);
       if (w) {
         try { w.removeEventListener('message', handler); } catch (e) { console.warn('[Worker] Failed to remove message listener:', e); }
         try { w.removeEventListener('error', errorHandler); } catch (e) { console.warn('[Worker] Failed to remove error listener:', e); }
@@ -85,7 +104,8 @@ function processChunk(chunk, slot) {
     };
 
     const fallbackToMainThread = (reason) => {
-      if (settled) return;
+      if (settled || fallingBack) return;
+      fallingBack = true;
       console.warn(`[Worker ${slot}] ${reason}, falling back to main thread for ${chunk.length} markets (UI will freeze briefly)`);
       import('./processMarket').then(({ processMarket }) => {
         settle(chunk.map((m) => processMarket(m)));
@@ -95,11 +115,13 @@ function processChunk(chunk, slot) {
     // Timeout: terminate a hung Worker so the next call gets a fresh one —
     // otherwise every later request to this slot would time out too.
     const timeout = setTimeout(() => {
-      if (!settled) {
-        terminateWorker(slot);
-        fallbackToMainThread('Timed out after 30s');
-      }
+      if (!settled) terminateWorker(slot, { fallback: true, reason: 'Timed out after 30s' });
     }, WORKER_TIMEOUT);
+
+    // Registered so a sibling request killing this slot's Worker reaches us
+    const entry = { lost: fallbackToMainThread, abandon: () => settle([]) };
+    if (!pendingBySlot.has(slot)) pendingBySlot.set(slot, new Set());
+    pendingBySlot.get(slot).add(entry);
 
     try {
       w = getWorker(slot);
@@ -120,9 +142,8 @@ function processChunk(chunk, slot) {
 
     const errorHandler = (err) => {
       // Worker-level errors aren't per-request; the Worker is likely in a bad
-      // state, so replace it and fall back for this chunk.
-      terminateWorker(slot);
-      fallbackToMainThread(`Error: ${err.message || err}`);
+      // state, so replace it — every request on this slot falls back.
+      terminateWorker(slot, { fallback: true, reason: `Error: ${err.message || err}` });
     };
 
     w.addEventListener('message', handler);
@@ -134,10 +155,12 @@ function processChunk(chunk, slot) {
 /**
  * Process all markets across the Worker pool. Results keep input order.
  * Never rejects: a failing chunk falls back to the main thread.
+ * @param {object} [opts]
+ * @param {number} [opts.poolSize=POOL_SIZE] — max Workers (injectable for tests)
  */
-export async function processAllInWorker(rawMarkets) {
+export async function processAllInWorker(rawMarkets, { poolSize = POOL_SIZE } = {}) {
   if (rawMarkets.length === 0) return [];
-  const chunks = splitIntoChunks(rawMarkets, workerCountFor(rawMarkets.length));
+  const chunks = splitIntoChunks(rawMarkets, workerCountFor(rawMarkets.length, poolSize));
   const results = await Promise.all(chunks.map((chunk, slot) => processChunk(chunk, slot)));
   return results.flat();
 }

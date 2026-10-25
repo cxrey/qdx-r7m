@@ -40,3 +40,14 @@ export function formatTimeAgo(timestamp) {
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
   return `${Math.floor(diff / 86400)}d ago`;
 }
+
+/**
+ * Compact dollar volume for slider boxes: "$1.5M", "$15K", "$0".
+ * Values under $1K print as whole dollars (not "$0K").
+ */
+export function formatVolumeShort(v) {
+  if (v >= 1_000_000) return `$${(v / 1_000_000).toFixed(1)}M`;
+  const dollars = Math.round(v); // round first so 999.6 reads "$1K", not "$1000"
+  if (dollars >= 1_000) return `$${(dollars / 1_000).toFixed(0)}K`;
+  return `$${dollars}`;
+}

@@ -2,8 +2,8 @@ import { useCallback, useMemo } from 'react';
 import DualRangeSlider from './DualRangeSlider';
 import { DEFAULT_FILTERS, VOLUME_FILTER_MAX } from '../filterDefaults';
 import { CATALOG_MIN_VOLUME } from '../engineConfig';
+import { formatVolumeShort } from '../formatters';
 
-const formatVolumeShort = (v) => (v >= 1_000_000 ? `$${(v / 1_000_000).toFixed(1)}M` : `$${(v / 1_000).toFixed(0)}K`);
 import { useExecutionStyle } from '../contexts/ExecutionContext';
 
 const SORT_OPTIONS = [

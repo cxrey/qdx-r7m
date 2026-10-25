@@ -48,6 +48,9 @@ export class RefreshManager {
     // Assets of markets settled via market_resolved — later quotes are ignored
     this._resolvedAssets = new Set();
 
+    // marketId → consecutive incomplete Tier 3 crawls that missed it
+    this._unconfirmedMisses = new Map();
+
     // Aborts in-flight Tier 2 / polling requests on stop()
     this._bgController = null;
 
@@ -515,7 +518,7 @@ export class RefreshManager {
 
       // Smart diff against current markets
       const currentMarkets = this._opts.getCurrentMarkets?.() || [];
-      processed = keepUnconfirmedMarkets(processed, currentMarkets, complete);
+      processed = keepUnconfirmedMarkets(processed, currentMarkets, complete, this._unconfirmedMisses);
       const diff = smartDiff(currentMarkets, processed);
 
       if (diff.hasChanges) {
@@ -614,18 +617,45 @@ export class RefreshManager {
 
 // ── Smart Diff ──────────────────────────────────────────────────
 
+// A market missing from this many consecutive INCOMPLETE crawls is dropped
+// anyway — otherwise a band that keeps failing would keep resolved markets
+// forever.
+export const MAX_UNCONFIRMED_REFRESHES = 3;
+
 /**
  * After an INCOMPLETE catalog crawl (a band stopped early on a failed page,
  * rate limit, or page cap), markets missing from the crawl are unconfirmed,
  * not removed: keep the current copies so a transient failure can't wipe
  * thousands of rows until the next refresh. A complete crawl is authoritative.
+ *
+ * `misses` (marketId → consecutive unconfirmed refreshes) persists across
+ * calls and is updated in place: a market seen again resets to 0, and one
+ * unconfirmed for MAX_UNCONFIRMED_REFRESHES refreshes in a row is dropped.
  */
-export function keepUnconfirmedMarkets(crawled, currentMarkets, complete) {
-  if (complete) return crawled;
+export function keepUnconfirmedMarkets(crawled, currentMarkets, complete, misses = new Map()) {
+  if (complete) {
+    misses.clear();
+    return crawled;
+  }
   const crawledIds = new Set(crawled.map((m) => m.id));
-  const kept = currentMarkets.filter((m) => !crawledIds.has(m.id));
-  if (kept.length > 0) {
-    console.warn(`[RefreshManager] Tier 3 crawl incomplete — keeping ${kept.length} markets it didn't reach`);
+  for (const id of crawledIds) misses.delete(id);
+
+  const kept = [];
+  let dropped = 0;
+  for (const m of currentMarkets) {
+    if (crawledIds.has(m.id)) continue;
+    const count = (misses.get(m.id) || 0) + 1;
+    if (count >= MAX_UNCONFIRMED_REFRESHES) {
+      misses.delete(m.id);
+      dropped++;
+    } else {
+      misses.set(m.id, count);
+      kept.push(m);
+    }
+  }
+  if (kept.length > 0 || dropped > 0) {
+    console.warn(`[RefreshManager] Tier 3 crawl incomplete — keeping ${kept.length} markets it didn't reach` +
+      (dropped > 0 ? `, dropping ${dropped} unconfirmed for ${MAX_UNCONFIRMED_REFRESHES} refreshes in a row` : ''));
   }
   return kept.length > 0 ? crawled.concat(kept) : crawled;
 }
