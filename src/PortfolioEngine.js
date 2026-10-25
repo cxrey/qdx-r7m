@@ -3,8 +3,7 @@
  * Position fetching, correlation analysis, clustering, concentration metrics, alerts, and trade screening.
  */
 
-import { withTimeout, TIMEOUT_DATA_API } from './fetchUtils';
-import { DATA_API } from './apiConfig';
+import { dataApiGet, toV1Row } from './dataApi';
 
 // ── localStorage keys (grouped at top for visibility) ──
 const MANUAL_KEY = 'polymarket-portfolio-manual';
@@ -37,57 +36,31 @@ const ORGS = [
 
 // ── Position Fetching ──
 
+// v2 returns 100 positions per page; follow the cursor so large portfolios
+// aren't truncated (20 pages = 2,000 positions, a safety cap).
+const MAX_POSITION_PAGES = 20;
+
 export async function fetchPositions(walletAddress) {
-  const wallet = encodeURIComponent(walletAddress);
   let positions = null;
 
-  // Try user param
+  // Data API v2: the default status filter returns OPEN rows, which include
+  // redeemable (won, not yet redeemed) positions — the same set v1 returned.
   try {
-    const res = await fetch(`${DATA_API}/positions?user=${wallet}`, { signal: withTimeout(null, TIMEOUT_DATA_API) });
-    if (res.ok) {
-      const data = await res.json();
-      if (Array.isArray(data) && data.length > 0) positions = data;
-      else if (data && typeof data === 'object' && !Array.isArray(data)) {
-        // Might be wrapped in an object
-        const arr = data.positions || data.data || data.results;
-        if (Array.isArray(arr) && arr.length > 0) positions = arr;
-      }
-      console.debug('[PortfolioEngine] positions?user= returned', positions?.length ?? 0, 'positions');
-    }
+    const res = await dataApiGet('/v2/positions', { user: walletAddress }, { maxPages: MAX_POSITION_PAGES });
+    if (res.ok && res.rows.length > 0) positions = res.rows.map((r) => toV1Row(r, 'position'));
+    if (!res.ok) console.warn(`[PortfolioEngine] /v2/positions ${res.status}${res.error ? `: ${res.error}` : ''}`);
+    else if (res.hasMore) console.warn(`[PortfolioEngine] positions truncated at ${MAX_POSITION_PAGES} pages`);
+    console.debug('[PortfolioEngine] /v2/positions returned', positions?.length ?? 0, 'positions');
   } catch (e) {
-    console.warn('[PortfolioEngine] positions?user= failed:', e.message);
+    console.warn('[PortfolioEngine] /v2/positions failed:', e.message);
   }
 
-  // Try address param as fallback
-  if (!positions) {
-    try {
-      const res = await fetch(`${DATA_API}/positions?address=${wallet}`, { signal: withTimeout(null, TIMEOUT_DATA_API) });
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data) && data.length > 0) positions = data;
-        else if (data && typeof data === 'object' && !Array.isArray(data)) {
-          const arr = data.positions || data.data || data.results;
-          if (Array.isArray(arr) && arr.length > 0) positions = arr;
-        }
-        console.debug('[PortfolioEngine] positions?address= returned', positions?.length ?? 0, 'positions');
-      }
-    } catch (e) {
-      console.warn('[PortfolioEngine] positions?address= failed:', e.message);
-    }
-  }
-
-  // Also try to fetch trade history for entry price data
+  // Also fetch trade history for entry price data
   let trades = null;
   try {
-    const res = await fetch(`${DATA_API}/trades?user=${wallet}`, { signal: withTimeout(null, TIMEOUT_DATA_API) });
-    if (res.ok) {
-      const data = await res.json();
-      if (Array.isArray(data)) trades = data;
-      else if (data && (data.trades || data.data || data.results)) {
-        trades = data.trades || data.data || data.results;
-      }
-      console.debug('[PortfolioEngine] trades returned', trades?.length ?? 0, 'trades');
-    }
+    const res = await dataApiGet('/v2/trades', { user: walletAddress, limit: 100 });
+    if (res.ok) trades = res.rows.map((r) => toV1Row(r, 'trade'));
+    console.debug('[PortfolioEngine] /v2/trades returned', trades?.length ?? 0, 'trades');
   } catch (e) {
     console.warn('[PortfolioEngine] trades fetch failed:', e.message);
   }

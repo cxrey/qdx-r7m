@@ -8,11 +8,9 @@
  */
 
 import { getCategoryPatterns } from './categoryPatterns';
-import { withTimeout, TIMEOUT_DATA_API } from './fetchUtils';
 import { CACHE_TTL_24H, CACHE_TTL_5M } from './engineConfig';
-import { throwIfRateLimited } from './clobErrorHandler';
 import { parseLeaderboard } from './schemas';
-import { DATA_API } from './apiConfig';
+import { dataApiGet, toV1Row } from './dataApi';
 
 const LEADERBOARD_CACHE_KEY = 'pm_leaderboard_cache';
 const LEADERBOARD_TTL = CACHE_TTL_24H;
@@ -24,13 +22,13 @@ const TRADE_FLOW_TTL = CACHE_TTL_5M;
 // ─── Data Fetching ──────────────────────────────────────────────────
 
 export async function fetchMarketTrades(conditionId) {
-  const url = `${DATA_API}/trades?conditionId=${encodeURIComponent(conditionId)}&limit=200`;
   try {
-    const res = await fetch(url, { signal: withTimeout(null, TIMEOUT_DATA_API) });
-    throwIfRateLimited(res);
-    if (!res.ok) return [];
-    const data = await res.json();
-    return Array.isArray(data) ? data : (data?.trades || data?.data || []);
+    const res = await dataApiGet('/v2/trades', { condition: conditionId, limit: 200 });
+    if (!res.ok) {
+      if (res.error) console.warn(`[TradeFlow] /v2/trades ${res.status}: ${res.error}`);
+      return [];
+    }
+    return res.rows.map((r) => toV1Row(r, 'trade'));
   } catch (e) {
     if (e?.status === 429 || e?.status === 403) throw e;
     return [];
@@ -38,16 +36,11 @@ export async function fetchMarketTrades(conditionId) {
 }
 
 export async function fetchMarketHolders(conditionId) {
-  const url = `${DATA_API}/holders?market=${encodeURIComponent(conditionId)}&limit=20`;
   try {
-    const res = await fetch(url, { signal: withTimeout(null, TIMEOUT_DATA_API) });
-    throwIfRateLimited(res);
-    if (!res.ok) return null;
-    const data = await res.json();
-    if (data && (Array.isArray(data) ? data.length > 0 : Object.keys(data).length > 0)) {
-      return data;
-    }
-    return null;
+    const res = await dataApiGet('/v2/holders', { condition: conditionId, limit: 20 });
+    if (!res.ok || res.rows.length === 0) return null;
+    // One group per outcome token: [{ token, holders: [...] }]
+    return res.rows.map((r) => toV1Row(r, 'holderGroup'));
   } catch (e) {
     if (e?.status === 429 || e?.status === 403) throw e;
     // Holders data not available — feature works without it
@@ -67,19 +60,15 @@ export async function fetchLeaderboard() {
     }
   } catch { /* ignore */ }
 
-  // Official endpoint: https://data-api.polymarket.com/v1/leaderboard
-  // Proxy strips /data-api prefix → request path needs /v1/leaderboard
-  // Params: timePeriod (not "window"), limit max 50, orderBy PNL|VOL
-  const url = `${DATA_API}/v1/leaderboard?timePeriod=ALL&orderBy=PNL&limit=50`;
-
+  // Data API v2: /v2/leaderboard. Params: timePeriod (not "window"),
+  // orderBy PNL|VOL, limit (cursor pagination; first page is enough here).
   try {
-    const res = await fetch(url, { signal: withTimeout(null, TIMEOUT_DATA_API) });
+    const res = await dataApiGet('/v2/leaderboard', { timePeriod: 'ALL', orderBy: 'PNL', limit: 50 });
     if (!res.ok) {
-      console.warn(`[TradeFlow] Leaderboard fetch failed: ${res.status}`);
+      console.warn(`[TradeFlow] Leaderboard fetch failed: ${res.status}${res.error ? ` — ${res.error}` : ''}`);
       return null;
     }
-    const data = await res.json();
-    const raw = Array.isArray(data) ? data : [];
+    const raw = res.rows.map((r) => toV1Row(r, 'leaderboard'));
     const list = raw.length > 0 ? parseLeaderboard(raw) : raw;
     if (list.length > 0) {
       try {
@@ -111,13 +100,12 @@ export async function fetchWalletActivity(walletAddress) {
   } catch { /* ignore */ }
 
   try {
-    const res = await fetch(`${DATA_API}/activity?user=${encodeURIComponent(walletAddress)}&type=TRADE&limit=100`, { signal: withTimeout(null, TIMEOUT_DATA_API) });
+    const res = await dataApiGet('/v2/activity', { user: walletAddress, type: 'TRADE', limit: 100 });
     if (!res.ok) {
-      console.warn(`[TradeFlow] /activity returned ${res.status} for ${walletAddress.slice(0, 10)}...`);
+      console.warn(`[TradeFlow] /v2/activity returned ${res.status} for ${walletAddress.slice(0, 10)}...`);
       return null;
     }
-    const data = await res.json();
-    const trades = Array.isArray(data) ? data : (data?.trades || data?.data || data?.activity || []);
+    const trades = res.rows.map((r) => toV1Row(r, 'activity'));
     // Cache
     try {
       localStorage.setItem(cacheKey, JSON.stringify({ data: trades, ts: Date.now() }));
