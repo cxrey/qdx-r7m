@@ -364,7 +364,7 @@ export default function MarketDetailPanel({ market, onBookData, onLivePriceUpdat
           <TradingCostsCard market={market} />
 
           {/* Fee at different prices */}
-          {market.feesEnabled && !market.feeFree && (
+          {!market.feeFree && (
             <FeePriceBandCard market={market} />
           )}
 
@@ -374,8 +374,11 @@ export default function MarketDetailPanel({ market, onBookData, onLivePriceUpdat
           {/* Resolution Analysis */}
           <ResolutionCard resolution={market.resolutionAnalysis} yesPrice={market.yesPrice} />
 
-          {/* Conjunction Analysis */}
-          <ConjunctionCard conjunction={market.conjunction} market={market} />
+          {/* Conjunction Analysis — only for multi-condition markets; SIMPLE
+              markets have no conditions to combine (and no card labels) */}
+          {market.conjunction?.isConjunction && (
+            <ConjunctionCard conjunction={market.conjunction} market={market} />
+          )}
 
           {/* Kelly Position Sizer */}
           <Suspense fallback={LazyFallback}>
@@ -413,14 +416,14 @@ const PRICE_BAND_POINTS = [0.20, 0.35, 0.50, 0.65, 0.80, 0.95];
 
 function FeePriceBandCard({ market }) {
   const rows = PRICE_BAND_POINTS.map(p => {
-    const feePP = computeFeePP(p, market.gammaCategory, true);
+    const feePP = computeFeePP(p, market.feeParams);
     const feeRate = feePP / (p * 100); // back to rate for display
     const isCurrent = market.yesPrice != null && Math.abs(p - market.yesPrice) < 0.075;
     return { price: p, feePP, feeRate, isCurrent };
   });
   // Find sweet spot: price range where feePP < 0.25pp
   const sweetSpot = PRICE_BAND_POINTS.filter(p =>
-    computeFeePP(p, market.gammaCategory, true) < 0.25
+    computeFeePP(p, market.feeParams) < 0.25
   );
   const sweetLabel = sweetSpot.length > 0
     ? `${(sweetSpot[0] * 100).toFixed(0)}-${(sweetSpot[sweetSpot.length - 1] * 100).toFixed(0)}¢`
@@ -461,7 +464,7 @@ function TradingCostsCard({ market }) {
     );
   }
 
-  const rt = computeRoundTripCostPP(market.yesPrice, market.spread, market.gammaCategory, market.feesEnabled);
+  const rt = computeRoundTripCostPP(market.yesPrice, market.spread, market.feeParams);
   const rawEdgePP = market.flb?.bestEdge != null ? market.flb.bestEdge * 100 : null;
   const netAfterCosts = rawEdgePP != null ? rawEdgePP - rt.totalCostPP : null;
 

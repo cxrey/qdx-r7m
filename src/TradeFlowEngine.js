@@ -12,8 +12,8 @@ import { withTimeout, TIMEOUT_DATA_API } from './fetchUtils';
 import { CACHE_TTL_24H, CACHE_TTL_5M } from './engineConfig';
 import { throwIfRateLimited } from './clobErrorHandler';
 import { parseLeaderboard } from './schemas';
+import { DATA_API } from './apiConfig';
 
-const DATA_API = '/data-api';
 const LEADERBOARD_CACHE_KEY = 'pm_leaderboard_cache';
 const LEADERBOARD_TTL = CACHE_TTL_24H;
 const WALLET_HISTORY_PREFIX = 'pm_wallet_hist_';

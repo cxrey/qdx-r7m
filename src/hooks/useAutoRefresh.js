@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { RefreshManager } from '../RefreshManager';
+import { mergePendingPrice } from '../utils/pendingPrices';
 
 const LS_KEY = 'polymarket-scanner-auto-refresh';
 
@@ -78,13 +79,7 @@ export function useAutoRefresh({ rawMarkets, setRawMarkets, baseRatesRef, refres
           }
 
           // Accumulate into pending ref — no state update, no Immer
-          const existing = pendingPriceUpdatesRef.current.get(marketId);
-          if (existing) {
-            if (update.yesPrice != null) existing.yesPrice = update.yesPrice;
-            if (update.noPrice != null) existing.noPrice = update.noPrice;
-          } else {
-            pendingPriceUpdatesRef.current.set(marketId, { ...update });
-          }
+          mergePendingPrice(pendingPriceUpdatesRef.current, marketId, update);
         }
 
         pricesDirtyRef.current = true;
@@ -139,7 +134,15 @@ export function useAutoRefresh({ rawMarkets, setRawMarkets, baseRatesRef, refres
       onResolution: (marketId) => {
         // Mark closed so the row stops looking tradeable; settled prices
         // (1/0) arrive via onPriceUpdate. The next Tier-3 crawl removes it.
-        setRawMarkets((prev) => prev.map((m) => (m.id === marketId ? { ...m, closed: true, active: false } : m)));
+        // Patch only the matching row; return prev untouched when the market
+        // isn't loaded so consumers keyed on rawMarkets don't recompute.
+        setRawMarkets((prev) => {
+          const idx = prev.findIndex((m) => m.id === marketId);
+          if (idx === -1 || prev[idx].closed) return prev;
+          const next = prev.slice();
+          next[idx] = { ...prev[idx], closed: true, active: false };
+          return next;
+        });
       },
 
       onStatusChange: ({ ws, message }) => {

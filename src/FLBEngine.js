@@ -1,4 +1,4 @@
-import { computeFeePP, computeMakerRebatePP } from './feeCalculator';
+import { computeFeePP, computeMakerRebatePP, isFeeFree } from './feeCalculator';
 
 // Calibration curve - additive adjustments based on prediction market literature
 const CORRECTION_CURVE = [
@@ -44,7 +44,8 @@ export function getAdjustedProbability(price, amplifier = 1.0) {
 }
 
 export function analyzeFLB(market) {
-  const { yesPrice, noPrice, spread, resolutionAnalysis, gammaCategory, feesEnabled, feeSchedule } = market;
+  // feeParams: from resolveFeeParams (processMarket); absent → treated as fee-free
+  const { yesPrice, noPrice, spread, resolutionAnalysis, feeParams } = market;
 
   if (yesPrice == null || noPrice == null) {
     return {
@@ -119,8 +120,8 @@ export function analyzeFLB(market) {
 
   // Fee-adjusted net edges (convert pp to decimal for consistency with edge units)
   const bestPrice = bestSide === 'YES' ? yesPrice : bestSide === 'NO' ? noPrice : null;
-  const takerFeePP = computeFeePP(bestPrice, gammaCategory, feesEnabled, feeSchedule);
-  const makerRebatePP = computeMakerRebatePP(bestPrice, gammaCategory, feesEnabled, feeSchedule);
+  const takerFeePP = computeFeePP(bestPrice, feeParams);
+  const makerRebatePP = computeMakerRebatePP(bestPrice, feeParams);
   const takerFeeDecimal = takerFeePP / 100;
   const makerRebateDecimal = makerRebatePP / 100;
   const netEdgeTaker = bestEdgeAfterSpread - takerFeeDecimal;
@@ -145,6 +146,6 @@ export function analyzeFLB(market) {
     netEdgeMaker,
     takerFeePP,
     makerRebatePP,
-    feeFree: takerFeePP === 0,
+    feeFree: isFeeFree(feeParams),
   };
 }

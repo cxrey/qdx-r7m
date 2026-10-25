@@ -8,7 +8,8 @@
  *   Subscribe: { operation: "subscribe", assets_ids: [...], custom_feature_enabled }
  *   Unsubscribe: { operation: "unsubscribe", assets_ids: [...] }
  *   Heartbeat: send text "PING" every 10s, expect text "PONG"
- *   Events: price_change, last_trade_price, book, tick_size_change — always;
+ *   Events: price_change, last_trade_price, book, tick_size_change — always
+ *           (we use price_change; trade prints are ignored);
  *           best_bid_ask, new_market, market_resolved — ONLY when
  *           custom_feature_enabled: true is sent (we rely on new_market for
  *           Tier-2 discovery and market_resolved for resolution callbacks).
@@ -113,7 +114,10 @@ export class WebSocketPriceStream {
       this._stopPing();
       this._subscribing = false;
       this._setStatus('disconnected');
-      if (!this._destroyed) {
+      // While paused (tab hidden) a close is either the intentional 5-min
+      // disconnect or a drop we don't need to repair yet — resume()
+      // reconnects when the tab becomes visible again.
+      if (!this._destroyed && !this._paused) {
         this._scheduleReconnect();
       }
     };
@@ -254,9 +258,9 @@ export class WebSocketPriceStream {
   }
 
   _handleMessage(raw) {
-    if (this._paused) return;
-
-    // Handle PONG
+    // PONG must be handled even while paused: the heartbeat keeps running
+    // when the tab is hidden, and dropping replies trips the pong timeout,
+    // forcing a reconnect + full re-subscribe every ~20s.
     if (typeof raw === 'string') {
       const trimmed = raw.trim();
       if (trimmed === 'PONG' || trimmed === 'pong') {
@@ -264,6 +268,8 @@ export class WebSocketPriceStream {
         return;
       }
     }
+
+    if (this._paused) return;
 
     let events;
     try {
@@ -280,9 +286,6 @@ export class WebSocketPriceStream {
         case 'price_change':
           this._handlePriceChange(evt);
           break;
-        case 'last_trade_price':
-          this._handleLastTradePrice(evt);
-          break;
         case 'best_bid_ask':
           this._emitQuote(evt.asset_id, evt.best_bid, evt.best_ask, evt.timestamp);
           break;
@@ -292,7 +295,10 @@ export class WebSocketPriceStream {
         case 'new_market':
           if (this._onNewMarket) this._onNewMarket(evt);
           break;
-        // book, tick_size_change — ignored for now
+        // book, tick_size_change, last_trade_price — ignored. Trade prints
+        // are a different measure than the bid/ask mid and would make the
+        // displayed price flip between the two; a trade that moves the
+        // touch also produces a price_change carrying the new best bid/ask.
       }
     }
   }
@@ -318,16 +324,6 @@ export class WebSocketPriceStream {
       bestBid,
       bestAsk,
       timestamp,
-    });
-  }
-
-  _handleLastTradePrice(evt) {
-    if (!evt.asset_id) return;
-    this._onPriceChange(evt.asset_id, {
-      price: parseFloat(evt.price),
-      bestBid: null,
-      bestAsk: null,
-      timestamp: evt.timestamp,
     });
   }
 

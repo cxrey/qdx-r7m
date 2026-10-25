@@ -11,9 +11,9 @@
 
 import { inferCategory } from './categoryPatterns';
 import { withTimeout, TIMEOUT_GAMMA_PAGE } from './fetchUtils';
-import { CACHE_TTL_24H, BASE_RATE_MAX_RESOLVED, BASE_RATE_MAX_PAGES, BASE_RATE_CONCURRENCY, BASE_RATE_MIN_DATA_POINTS } from './engineConfig';
+import { GAMMA_API } from './apiConfig';
+import { MS_PER_DAY, CACHE_TTL_24H, BASE_RATE_MAX_RESOLVED, BASE_RATE_MAX_PAGES, BASE_RATE_CONCURRENCY, BASE_RATE_MIN_DATA_POINTS } from './engineConfig';
 
-const GAMMA_API = '/gamma-api';
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ─── Cache helpers ───
@@ -226,7 +226,7 @@ export function computeBaseRates(resolvedMarkets) {
     if (m.createdAt && m.endDate) {
       const created = new Date(m.createdAt);
       const ended = new Date(m.endDate);
-      duration = Math.max(0, Math.ceil((ended - created) / (1000 * 60 * 60 * 24)));
+      duration = Math.max(0, Math.ceil((ended - created) / MS_PER_DAY));
     }
 
     const durBucket = durationBucket(duration);

@@ -49,7 +49,7 @@ export function saveKellySettings(settings) {
  * @param {string} side - 'YES' or 'NO'
  * @returns {Object} Kelly analysis result
  */
-export function calculateKelly(estProb, marketPrice, side = 'YES', feeOptions = {}) {
+export function calculateKelly(estProb, marketPrice, side = 'YES', feeParams = null) {
   // Validate inputs
   if (estProb < 0 || estProb > 1 || marketPrice <= 0 || marketPrice >= 1) {
     return { valid: false, reason: 'Invalid inputs' };
@@ -71,10 +71,8 @@ export function calculateKelly(estProb, marketPrice, side = 'YES', feeOptions = 
   // Edge = expected value per dollar
   const edge = (b * p) - q;
   // Fee adjustment: effectiveFeeRate is per-dollar like edge.
-  // feeSchedule (live per-market params) takes priority over the
-  // gammaCategory fallback table inside the fee calculator.
-  const { gammaCategory, feesEnabled, feeSchedule } = feeOptions;
-  const takerFeeRate = computeEffectiveFeeRate(marketPrice, gammaCategory, feesEnabled, feeSchedule);
+  // feeParams comes from resolveFeeParams (market.feeParams); null = no fees.
+  const takerFeeRate = computeEffectiveFeeRate(marketPrice, feeParams);
   const feeAdjustedEdge = edge - takerFeeRate;
   const edgePp = edge * 100;
 
@@ -192,10 +190,14 @@ function assessRobustness(gapPp, estProb) {
  * conservative on sizing.
  *
  * @param {Array<{name: string, estProb: number, marketPrice: number}>} outcomes
- * @param {Object} feeOptions - { gammaCategory, feesEnabled } passed to calculateKelly
+ * Each outcome may carry its own `feeParams` (outcomes of one event can sit
+ * in different fee categories); `defaultFeeParams` covers outcomes without.
+ *
+ * @param {Array<{name: string, estProb: number, marketPrice: number, feeParams?: Object}>} outcomes
+ * @param {Object} defaultFeeParams - fallback feeParams for outcomes without their own
  * @returns {Object} Multi-outcome Kelly result
  */
-export function calculateMultiOutcomeKelly(outcomes, feeOptions = {}) {
+export function calculateMultiOutcomeKelly(outcomes, defaultFeeParams = null) {
   if (!outcomes || outcomes.length < 2) {
     return { valid: false, reason: 'Need at least 2 outcomes' };
   }
@@ -215,7 +217,7 @@ export function calculateMultiOutcomeKelly(outcomes, feeOptions = {}) {
 
   // For each outcome, calculate independent Kelly as if it were binary
   const results = normalized.map((o) => {
-    const kelly = calculateKelly(o.estProb, o.marketPrice, 'YES', feeOptions);
+    const kelly = calculateKelly(o.estProb, o.marketPrice, 'YES', o.feeParams ?? defaultFeeParams);
     return {
       name: o.name,
       estProb: o.estProb,
@@ -260,10 +262,10 @@ export function calculateMultiOutcomeKelly(outcomes, feeOptions = {}) {
  * @param {number} centerProb - Your center estimate
  * @param {string} side - 'YES' or 'NO'
  * @param {Object} settings - Kelly settings
- * @param {Object} feeOptions - { gammaCategory, feesEnabled } passed to calculateKelly
+ * @param {Object} feeParams - market.feeParams, passed to calculateKelly
  * @returns {Array} Rows of sensitivity data
  */
-export function calculateSensitivityTable(marketPrice, centerProb, side = 'YES', settings = null, feeOptions = {}) {
+export function calculateSensitivityTable(marketPrice, centerProb, side = 'YES', settings = null, feeParams = null) {
   const s = settings || getKellySettings();
   const rows = [];
 
@@ -277,7 +279,7 @@ export function calculateSensitivityTable(marketPrice, centerProb, side = 'YES',
   }
 
   for (const prob of steps) {
-    const kelly = calculateKelly(prob, marketPrice, side, feeOptions);
+    const kelly = calculateKelly(prob, marketPrice, side, feeParams);
     const dollars = kelly.valid && !kelly.noEdge
       ? Math.max(0, kelly.fractionalKelly * s.bankroll)
       : 0;

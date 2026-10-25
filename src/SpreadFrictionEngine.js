@@ -276,9 +276,9 @@ export function calculateEdgeSurvival(market, spreadData) {
   if (!spreadData) return { edges: [], survivingEdges: 0, killedEdges: 0 };
 
   const halfSpread = spreadData.absoluteSpread / 2; // one-way cost
-  const { gammaCategory, feesEnabled, feeSchedule } = market;
+  const { feeParams } = market;
   // One-way taker fee (decimal, per share) at a given share price
-  const takerFee = (price) => computeFeePP(price, gammaCategory, feesEnabled, feeSchedule) / 100;
+  const takerFee = (price) => computeFeePP(price, feeParams) / 100;
   const edges = [];
 
   // FLB edge — one-way entry (half spread + taker fee), held to resolution.
@@ -316,9 +316,7 @@ export function calculateEdgeSurvival(market, spreadData) {
   // processMarket's thetaBreakEvenDays, but priced off the live book.
   if (market.theta?.bestTheta != null && Math.abs(market.theta.bestTheta) > 0 && market.daysLeft > 0) {
     const raw = Math.abs(market.theta.bestTheta) * market.daysLeft;
-    const roundTrip = computeRoundTripCostPP(
-      market.yesPrice, spreadData.absoluteSpread, gammaCategory, feesEnabled, feeSchedule,
-    ).totalCostPP / 100;
+    const roundTrip = computeRoundTripCostPP(market.yesPrice, spreadData.absoluteSpread, feeParams).totalCostPP / 100;
     const net = raw - roundTrip;
     edges.push({
       source: 'Theta (to expiry)',

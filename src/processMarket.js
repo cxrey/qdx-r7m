@@ -1,5 +1,6 @@
 import { analyzeConjunction, conjunctionEdgeBonus } from './ConjunctionEngine';
-import { computeEffectiveFeeRate, computeFeePP, computeRoundTripCostPP, isFeeFree, FEE_PARAM_SLUGS, FEETYPE_TO_FEE_SLUG, normalizeFeeSchedule } from './feeCalculator';
+import { computeEffectiveFeeRate, computeFeePP, computeRoundTripCostPP, isFeeFree, resolveFeeParams, FEE_PARAM_SLUGS, FEETYPE_TO_FEE_SLUG } from './feeCalculator';
+import { MS_PER_DAY } from './engineConfig';
 import { analyzeFLB } from './FLBEngine';
 import { analyzeTheta } from './ThetaEngine';
 import { analyzeResolution } from './ResolutionAnalyzer';
@@ -110,6 +111,20 @@ function extractFeeCategoryFromTags(tags) {
 const _loggedSlugs = new Set();
 let _feeEnabledSeen = false;
 
+/**
+ * Run one analysis engine, isolating failures: on error, log it, record the
+ * engine name in `failures`, and return `fallback` so the market still renders.
+ */
+function runEngine(name, failures, marketId, fn, fallback = null) {
+  try {
+    return fn();
+  } catch (e) {
+    console.warn(`[processMarket] ${name} failed for`, marketId, e.message);
+    failures.push(name);
+    return fallback;
+  }
+}
+
 /** Safely coerce to finite number or null. Rejects NaN/Infinity/empty strings from bad API data. */
 function safeNum(val) {
   if (val == null || val === '') return null;
@@ -138,7 +153,7 @@ export function processMarket(market) {
   let endDate = rawEndDate ? new Date(rawEndDate) : null;
   if (endDate && isNaN(endDate.getTime())) endDate = null;
   const now = new Date();
-  const daysLeft = endDate ? Math.max(0, Math.ceil((endDate - now) / (1000 * 60 * 60 * 24))) : null;
+  const daysLeft = endDate ? Math.max(0, Math.ceil((endDate - now) / MS_PER_DAY)) : null;
 
   // Full market lifetime (created → end) — the quantity BaseRateEngine
   // buckets resolved markets by. Distinct from daysLeft (time remaining).
@@ -146,7 +161,7 @@ export function processMarket(market) {
   let createdDate = rawCreatedAt ? new Date(rawCreatedAt) : null;
   if (createdDate && isNaN(createdDate.getTime())) createdDate = null;
   const durationDays = endDate && createdDate
-    ? Math.max(0, Math.ceil((endDate - createdDate) / (1000 * 60 * 60 * 24)))
+    ? Math.max(0, Math.ceil((endDate - createdDate) / MS_PER_DAY))
     : null;
 
   const volume = parseFloat(market.volume || 0);
@@ -170,6 +185,7 @@ export function processMarket(market) {
   }
 
   const question = market.question || market.title || 'Untitled';
+  const description = market.description || '';
   const slug = market.events?.[0]?.slug || market.slug || '';
   // Prefer Gamma's own categorization when mapped, fall back to regex
   const rawCategory = market.category || null;
@@ -180,66 +196,45 @@ export function processMarket(market) {
   }
   const category = mappedCategory || inferCategory(question, slug);
 
-  // ── Fee schedule + gammaCategory (fee slug) derivation ───────
+  // ── Fee params + gammaCategory (fee slug) derivation ─────────
   // The live per-market feeSchedule ({ rate, exponent, rebateRate }) is the
   // authoritative fee source — every fee-enabled Gamma market carries one.
   // gammaCategory (fee slug) is only the FALLBACK path for markets without
   // a schedule, derived with priority:
   //   market.feeType (live) > rawCategory > event tags > display-category.
+  // Both are resolved ONCE into feeParams, which every fee calculator takes.
   // Display category ('Crypto', 'Sports', ...) remains a separate concept
   // used for UI pills and filters.
+  const feesEnabled = market.feesEnabled ?? false;
+  if (feesEnabled && !_feeEnabledSeen) {
+    _feeEnabledSeen = true;
+    console.info('[processMarket] feesEnabled=true detected on', market.id, '— verify FEE_PARAMS against live API');
+  }
   const feeType = market.feeType || null;
-  const feeSchedule = normalizeFeeSchedule(market.feeSchedule);
   const feeTypeSlug = feeType ? (FEETYPE_TO_FEE_SLUG[feeType] || null) : null;
   const tagCategory = extractFeeCategoryFromTags(market.events?.[0]?.tags);
   const gammaCategory = feeTypeSlug || rawCategory || tagCategory || DISPLAY_TO_FEE_SLUG[category] || null;
+  const feeParams = resolveFeeParams({ gammaCategory, feesEnabled, feeSchedule: market.feeSchedule });
 
-  let resolutionAnalysis = null;
-  try {
-    resolutionAnalysis = analyzeResolution({ ...market, yesPrice, endDate: rawEndDate, end_date: rawEndDate, created_at: rawCreatedAt });
-  } catch (e) {
-    console.warn('[processMarket] Resolution analysis failed for', market.id, e.message);
-    _engineFailures.push('resolution');
-  }
+  const fail = _engineFailures;
+  const resolutionAnalysis = runEngine('resolution', fail, market.id, () =>
+    analyzeResolution({ ...market, yesPrice, endDate: rawEndDate, end_date: rawEndDate, created_at: rawCreatedAt }));
 
-  let flb = null;
-  try {
-    flb = analyzeFLB({ yesPrice, noPrice, spread, resolutionAnalysis, gammaCategory, feesEnabled: market.feesEnabled ?? false, feeSchedule });
-  } catch (e) {
-    console.warn('[processMarket] FLB analysis failed for', market.id, e.message);
-    _engineFailures.push('flb');
-  }
+  const flb = runEngine('flb', fail, market.id, () =>
+    analyzeFLB({ yesPrice, noPrice, spread, resolutionAnalysis, feeParams }));
 
-  let theta = null;
-  try {
-    theta = analyzeTheta({ yesPrice, noPrice, daysLeft, question, description: market.description || '', resolutionAnalysis });
-  } catch (e) {
-    console.warn('[processMarket] Theta analysis failed for', market.id, e.message);
-    _engineFailures.push('theta');
-  }
+  const theta = runEngine('theta', fail, market.id, () =>
+    analyzeTheta({ yesPrice, noPrice, daysLeft, question, description, resolutionAnalysis }));
 
-  let volumeEfficiency = null;
-  try {
-    volumeEfficiency = analyzeVolumeEfficiency({ yesPrice, noPrice, volume, volume24hr });
-  } catch (e) {
-    console.warn('[processMarket] Volume efficiency analysis failed for', market.id, e.message);
-    _engineFailures.push('volumeEfficiency');
-  }
+  const volumeEfficiency = runEngine('volumeEfficiency', fail, market.id, () =>
+    analyzeVolumeEfficiency({ yesPrice, noPrice, volume, volume24hr }));
 
   // Base rate is always null here — it's injected later by consumers (useMarkets,
   // useDirectLookup, RefreshManager) after the async resolved-market fetch completes.
   const baseRate = null;
 
-  let conjunction = null;
-  try {
-    conjunction = analyzeConjunction({
-      question, description: market.description || '', yesPrice, noPrice,
-      resolutionAnalysis,
-    });
-  } catch (e) {
-    console.warn('[processMarket] Conjunction analysis failed for', market.id, e.message);
-    _engineFailures.push('conjunction');
-  }
+  const conjunction = runEngine('conjunction', fail, market.id, () =>
+    analyzeConjunction({ question, description, yesPrice, noPrice, resolutionAnalysis }));
 
   // ── Gamma API field extraction (no new API calls) ────────────────────────
   const oneDayPriceChange = safeNum(market.oneDayPriceChange);
@@ -252,35 +247,23 @@ export function processMarket(market) {
   const volume1wk = safeNum(market.volume1wk);
   const volume1mo = safeNum(market.volume1mo);
   const acceptingOrders = typeof market.acceptingOrders === 'boolean' ? market.acceptingOrders : null;
-  const feesEnabled = market.feesEnabled ?? false;
-  if (feesEnabled && !_feeEnabledSeen) {
-    _feeEnabledSeen = true;
-    console.info('[processMarket] feesEnabled=true detected on', market.id, '— verify FEE_PARAMS against live API');
-  }
-  // gammaCategory already extracted above (before engine calls)
   const openInterest = safeNum(market.events?.[0]?.openInterest);
 
   // Fee calculations — computed before edgeScore so the fee penalty/bonus applies on first pass
-  const effectiveTakerFee = computeEffectiveFeeRate(yesPrice, gammaCategory, feesEnabled, feeSchedule);
-  const takerFeePP = computeFeePP(yesPrice, gammaCategory, feesEnabled, feeSchedule);
-  const feeFree = isFeeFree(gammaCategory, feeSchedule);
+  const effectiveTakerFee = computeEffectiveFeeRate(yesPrice, feeParams);
+  const takerFeePP = computeFeePP(yesPrice, feeParams);
+  const feeFree = isFeeFree(feeParams);
 
-  let edgeScore = 0;
-  try {
-    edgeScore = calculateEdgeScore({
-      volume, yesPrice, noPrice, daysLeft, spread, flb, theta,
-      resolutionAnalysis, volumeEfficiency, baseRate, conjunction,
-      takerFeePP, feeFree,
-    });
-  } catch (e) {
-    console.warn('[processMarket] Edge score calculation failed for', market.id, e.message);
-    _engineFailures.push('edgeScore');
-  }
+  const edgeScore = runEngine('edgeScore', fail, market.id, () => calculateEdgeScore({
+    volume, yesPrice, noPrice, daysLeft, spread, flb, theta,
+    resolutionAnalysis, volumeEfficiency, baseRate, conjunction,
+    takerFeePP, feeFree,
+  }), 0);
 
   // Theta break-even: how many days of theta needed to overcome round-trip costs
   let thetaBreakEvenDays = null;
   if (theta && spread != null) {
-    const roundTrip = computeRoundTripCostPP(yesPrice, spread, gammaCategory, feesEnabled, feeSchedule);
+    const roundTrip = computeRoundTripCostPP(yesPrice, spread, feeParams);
     const dailyThetaPP = Math.abs(theta.bestTheta) * 100;
     thetaBreakEvenDays = roundTrip.totalCostPP > 0 && dailyThetaPP > 0
       ? Math.ceil(roundTrip.totalCostPP / dailyThetaPP)
@@ -290,8 +273,8 @@ export function processMarket(market) {
   return {
     id: market.id,
     question,
-    slug: market.events?.[0]?.slug || market.slug || '',
-    description: market.description || '',
+    slug,
+    description,
     yesPrice,
     noPrice,
     volume,
@@ -328,7 +311,7 @@ export function processMarket(market) {
     feesEnabled,
     gammaCategory,
     feeType,
-    feeSchedule,
+    feeParams,
     openInterest,
     effectiveTakerFee,
     takerFeePP,

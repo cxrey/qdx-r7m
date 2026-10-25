@@ -37,6 +37,8 @@ export default function MultiOutcomeKelly({ outcomes: initialOutcomes }) {
       name: o.name || o.question || `Outcome ${o.index || ''}`,
       marketPrice: o.marketPrice || o.yesPrice || 0.5,
       estProb: o.marketPrice || o.yesPrice || (1 / initialOutcomes.length),
+      // Per-outcome fee context (processed markets carry feeParams)
+      feeParams: o.feeParams ?? null,
     }))
   );
 

@@ -1,5 +1,7 @@
 // Resolution Rule Analyzer — parses market resolution rules and flags structural mispricing
 
+import { MS_PER_DAY } from './engineConfig';
+
 // ─── Keyword Constants ───
 
 const DATA_DRIVEN_SOURCES = [
@@ -368,7 +370,7 @@ export function analyzeTemporalStructure(market) {
   const endDate = market.endDate ? new Date(market.endDate) : (market.end_date ? new Date(market.end_date) : null);
   const createdAt = market.createdAt ? new Date(market.createdAt) : (market.created_at ? new Date(market.created_at) : null);
   const now = new Date();
-  const daysRemaining = endDate ? Math.max(0, (endDate - now) / (1000 * 60 * 60 * 24)) : null;
+  const daysRemaining = endDate ? Math.max(0, (endDate - now) / MS_PER_DAY) : null;
   const yesPrice = market.yesPrice != null ? market.yesPrice : null;
 
   // A. Window Classification

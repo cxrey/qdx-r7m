@@ -74,8 +74,8 @@ describe('Fee pipeline integration', () => {
     // takerFeePP = 0.05 × 0.25 × 100 = 1.25 (sports schedule, not crypto's 1.75)
     expect(m.takerFeePP).toBeCloseTo(1.25, 4);
     expect(m.effectiveTakerFee).toBeCloseTo(0.025, 6);
-    // Normalized schedule + feeType are carried on the processed market
-    expect(m.feeSchedule).toEqual({ feeRate: 0.05, exponent: 1, makerRebatePct: 0.15 });
+    // Resolved fee params + feeType are carried on the processed market
+    expect(m.feeParams).toEqual({ feeRate: 0.05, exponent: 1, makerRebatePct: 0.15, enabled: true });
     expect(m.feeType).toBe('sports_fees_v2');
   });
 
@@ -110,10 +110,13 @@ describe('Fee pipeline integration', () => {
     expect(m.feeFree).toBe(true);
   });
 
-  it('feesEnabled=false produces zero fee fields', () => {
+  it('feesEnabled=false produces zero fee fields and a consistent fee-free flag', () => {
     const m = processMarket(makeRawMarket({ feesEnabled: false }));
     expect(m.effectiveTakerFee).toBe(0);
     expect(m.takerFeePP).toBe(0);
+    // market.feeFree and flb.feeFree share one definition (isFeeFree)
+    expect(m.feeFree).toBe(true);
+    expect(m.flb.feeFree).toBe(true);
   });
 
   it('FLB result includes fee-adjusted net edges', () => {

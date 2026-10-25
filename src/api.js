@@ -3,8 +3,7 @@ import { withTimeout, TIMEOUT_GAMMA_PAGE } from './fetchUtils';
 import { throwIfRateLimited } from './clobErrorHandler';
 import { parseGammaMarkets, parseOrderBook } from './schemas';
 
-const GAMMA_API = '/gamma-api';
-const CLOB_API = '/clob-api';
+import { GAMMA_API, CLOB_API } from './apiConfig';
 
 const PAGE_SIZE = 100;
 const CONCURRENCY = 5;

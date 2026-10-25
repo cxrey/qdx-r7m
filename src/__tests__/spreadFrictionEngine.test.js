@@ -8,6 +8,7 @@ import {
   calculateEdgeSurvival,
   estimateSpreadFromPrices,
 } from '../SpreadFrictionEngine.js';
+import { resolveFeeParams } from '../feeCalculator';
 
 // ─── Helpers ──────────────────────────────────────────────────────
 
@@ -356,7 +357,7 @@ describe('calculateEdgeSurvival', () => {
 
   it('base rate edge subtracts the fee at the suggested side price', () => {
     const market = {
-      yesPrice: 0.5, noPrice: 0.5, gammaCategory: 'crypto', feesEnabled: true,
+      yesPrice: 0.5, noPrice: 0.5, feeParams: resolveFeeParams({ gammaCategory: 'crypto', feesEnabled: true }),
       baseRate: { absGapCents: 4, gapType: 'NARRATIVE_DISCOUNT' },
     };
     const result = calculateEdgeSurvival(market, { absoluteSpread: 0.02 });
@@ -378,7 +379,7 @@ describe('calculateEdgeSurvival', () => {
   it('theta round trip includes entry and exit fees', () => {
     // 0.05 raw − (0.02 spread + 2 × 0.0175 crypto fee) = −0.005 → killed
     const market = {
-      yesPrice: 0.5, daysLeft: 10, gammaCategory: 'crypto', feesEnabled: true,
+      yesPrice: 0.5, daysLeft: 10, feeParams: resolveFeeParams({ gammaCategory: 'crypto', feesEnabled: true }),
       theta: { bestTheta: 0.005, bestSide: 'NO' },
     };
     const result = calculateEdgeSurvival(market, { absoluteSpread: 0.02 });

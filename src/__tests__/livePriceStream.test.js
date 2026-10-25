@@ -166,3 +166,84 @@ describe('RefreshManager — live price mapping', () => {
     expect(onToast).toHaveBeenCalledWith({ type: 'info', message: 'Market resolved: No' });
   });
 });
+
+describe('WebSocketPriceStream — trade prints and heartbeat', () => {
+  it('ignores last_trade_price (a different measure than the bid/ask mid)', () => {
+    const { stream, onPriceChange } = makeStream();
+    stream._handleMessage(JSON.stringify({ event_type: 'last_trade_price', asset_id: YES, price: '0.42', size: '10', side: 'BUY' }));
+    expect(onPriceChange).not.toHaveBeenCalled();
+  });
+
+  it('handles PONG while paused (tab hidden) so the pong timeout is cleared', () => {
+    const { stream } = makeStream();
+    stream._pongTimer = setTimeout(() => {}, 10_000);
+    stream.pause();
+    stream._handleMessage('PONG');
+    expect(stream._pongTimer).toBeNull();
+    clearTimeout(stream._pauseDisconnectTimer);
+  });
+
+  it('still drops price events while paused', () => {
+    const { stream, onPriceChange } = makeStream();
+    stream.pause();
+    stream._handleMessage(JSON.stringify({ event_type: 'best_bid_ask', asset_id: YES, best_bid: '0.4', best_ask: '0.5' }));
+    expect(onPriceChange).not.toHaveBeenCalled();
+    clearTimeout(stream._pauseDisconnectTimer);
+  });
+});
+
+describe('RefreshManager — resolution ordering and background fetches', () => {
+  async function managerWithBatcher() {
+    const { PriceUpdateBatcher } = await import('../PriceUpdateBatcher');
+    const onPriceUpdate = vi.fn();
+    const mgr = new RefreshManager({ onPriceUpdate, onResolution: vi.fn(), onToast: vi.fn() });
+    mgr.rebuildAssetIndex([{ id: 'm1', clobTokenIds: [YES, NO] }]);
+    mgr._batcher = new PriceUpdateBatcher((b) => mgr._flushPriceUpdates(b)); // not started: flush manually
+    mgr._startWebSocket();
+    return { mgr, onPriceUpdate, stream: wsInstances.at(-1) };
+  }
+
+  it('settlement replaces a quote already queued in the batcher', async () => {
+    const { mgr, onPriceUpdate, stream } = await managerWithBatcher();
+    stream.opts.onPriceChange(YES, { price: 0.97 });            // queued pre-resolution quote
+    stream.opts.onResolution(YES, { winningOutcome: 'Yes', assetIds: [YES, NO] });
+    mgr._batcher._flush();
+    expect(onPriceUpdate).toHaveBeenCalledTimes(1);
+    expect(onPriceUpdate.mock.calls[0][0].get('m1')).toEqual({ yesPrice: 1, noPrice: 0 });
+  });
+
+  it('ignores quotes for resolved assets', async () => {
+    const { mgr, onPriceUpdate, stream } = await managerWithBatcher();
+    stream.opts.onResolution(YES, { winningOutcome: 'Yes', assetIds: [YES, NO] });
+    mgr._batcher._flush();
+    stream.opts.onPriceChange(YES, { price: 0.5 });
+    stream.opts.onPriceChange(NO, { price: 0.5 });
+    mgr._batcher._flush();
+    expect(onPriceUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it('background fetches carry a signal that stop() aborts', () => {
+    const fetchSpy = vi.fn(() => new Promise(() => {}));
+    vi.stubGlobal('fetch', fetchSpy);
+    const mgr = new RefreshManager({});
+    mgr._bgController = new AbortController();
+    mgr._bgFetch('/gamma-api/events?limit=1');
+    const { signal } = fetchSpy.mock.calls[0][1];
+    expect(signal.aborted).toBe(false);
+    mgr._bgController.abort();
+    expect(signal.aborted).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  it('background fetches time out even without a stop()', () => {
+    vi.useFakeTimers();
+    const fetchSpy = vi.fn(() => new Promise(() => {}));
+    vi.stubGlobal('fetch', fetchSpy);
+    new RefreshManager({})._bgFetch('/gamma-api/events?limit=1');
+    const { signal } = fetchSpy.mock.calls[0][1];
+    vi.advanceTimersByTime(10_001);
+    expect(signal.aborted).toBe(true);
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+});

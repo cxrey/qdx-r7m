@@ -13,6 +13,7 @@ import { usePortfolio } from './hooks/usePortfolio';
 import { PortfolioProvider } from './contexts/PortfolioContext';
 import { useExecutionStyle } from './contexts/ExecutionContext';
 import { ALL_CATEGORIES } from './processMarket';
+import { mergePendingPrice } from './utils/pendingPrices';
 import { fetchLeaderboard, buildLeaderboardIndex } from './TradeFlowEngine';
 import { filterAndSort } from './utils/filterAndSort';
 import { produce } from 'immer';
@@ -59,13 +60,7 @@ function App() {
 
   // Callback for live price updates from order book / price history (detail panel)
   const handleLivePriceUpdate = useCallback((marketId, yesPrice, noPrice) => {
-    const existing = pendingPriceUpdatesRef.current.get(marketId);
-    if (existing) {
-      if (yesPrice != null) existing.yesPrice = yesPrice;
-      if (noPrice != null) existing.noPrice = noPrice;
-    } else {
-      pendingPriceUpdatesRef.current.set(marketId, { yesPrice, noPrice });
-    }
+    mergePendingPrice(pendingPriceUpdatesRef.current, marketId, { yesPrice, noPrice });
     pricesDirtyRef.current = true;
   }, [pendingPriceUpdatesRef, pricesDirtyRef]);
 
@@ -83,15 +78,17 @@ function App() {
 
   // ── marketsVersion: immediate bumps for structural changes ────
 
-  // Bump marketsVersion once per render commit, resetting dirty flag and skip counter.
+  // Bump marketsVersion once per render commit and reset the skip counter.
   // Deduped by versionBumpedRef so multiple effects in the same commit don't double-bump.
+  // Pending live prices (and their dirty flag) are deliberately left alone:
+  // they are newer than the structural change and the throttle applies them
+  // on its next tick. Clearing them here silently dropped WS updates —
+  // including resolution settlements, which never re-arrive.
   const bumpVersion = useCallback(() => {
     if (versionBumpedRef.current) return;
     versionBumpedRef.current = true;
     setMarketsVersion(v => v + 1);
-    pricesDirtyRef.current = false;
     skipCountRef.current = 0;
-    pendingPriceUpdatesRef.current.clear();
   }, []);
 
   // Immediate re-filter when markets are added or removed
