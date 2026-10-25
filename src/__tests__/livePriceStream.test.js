@@ -11,9 +11,15 @@ const wsInstances = [];
 vi.mock('../WebSocketPriceStream', async (importOriginal) => {
   const actual = await importOriginal();
   class MockStream {
-    constructor(opts) { this.opts = opts; wsInstances.push(this); }
+    constructor(opts) {
+      this.opts = opts;
+      this.subscribedAssets = new Set();
+      this.unsubscribed = [];
+      wsInstances.push(this);
+    }
     connect() {}
-    subscribe() {}
+    subscribe(ids) { ids.forEach((id) => this.subscribedAssets.add(id)); }
+    unsubscribe(ids) { ids.forEach((id) => this.subscribedAssets.delete(id)); this.unsubscribed.push(...ids); }
   }
   return { ...actual, RealWebSocketPriceStream: actual.WebSocketPriceStream, WebSocketPriceStream: MockStream };
 });
@@ -245,5 +251,34 @@ describe('RefreshManager — resolution ordering and background fetches', () => 
     expect(signal.aborted).toBe(true);
     vi.unstubAllGlobals();
     vi.useRealTimers();
+  });
+});
+
+describe('RefreshManager — asset index rebuild', () => {
+  it('unsubscribes assets that dropped out of the catalog', () => {
+    const mgr = new RefreshManager({});
+    mgr.rebuildAssetIndex([{ id: 'm1', clobTokenIds: [YES, NO] }, { id: 'm2', clobTokenIds: ['y2', 'n2'] }]);
+    mgr._startWebSocket();
+    const stream = wsInstances.at(-1);
+    expect([...stream.subscribedAssets].sort()).toEqual([NO, YES, 'n2', 'y2'].sort());
+
+    // Tier 3 refresh: m1 resolved and was removed, m3 is new
+    mgr.rebuildAssetIndex([{ id: 'm2', clobTokenIds: ['y2', 'n2'] }, { id: 'm3', clobTokenIds: ['y3', 'n3'] }]);
+    expect(stream.unsubscribed.sort()).toEqual([NO, YES].sort());
+    expect([...stream.subscribedAssets].sort()).toEqual(['n2', 'n3', 'y2', 'y3']);
+  });
+
+  it('frees WS capacity: dropped assets are removed before new ones subscribe', () => {
+    const mgr = new RefreshManager({});
+    mgr.rebuildAssetIndex([{ id: 'm1', clobTokenIds: [YES, NO] }]);
+    mgr._startWebSocket();
+    const stream = wsInstances.at(-1);
+    const order = [];
+    const unsub = stream.unsubscribe.bind(stream);
+    const sub = stream.subscribe.bind(stream);
+    stream.unsubscribe = (ids) => { order.push('unsubscribe'); unsub(ids); };
+    stream.subscribe = (ids) => { order.push('subscribe'); sub(ids); };
+    mgr.rebuildAssetIndex([{ id: 'm3', clobTokenIds: ['y3', 'n3'] }]);
+    expect(order).toEqual(['unsubscribe', 'subscribe']);
   });
 });

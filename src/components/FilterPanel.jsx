@@ -63,14 +63,11 @@ export default function FilterPanel({ filters, setFilters, categories, hasPortfo
   const update = (key, val) => setFilters((f) => ({ ...f, [key]: val }));
 
   const hasActiveFilters = useMemo(() => {
-    return Object.keys(DEFAULT_FILTERS).some(key => {
-      if (key === 'search') return false; // search is handled separately
-      return !filtersEqual(filters[key], DEFAULT_FILTERS[key]);
-    });
+    return Object.keys(DEFAULT_FILTERS).some(key => !filtersEqual(filters[key], DEFAULT_FILTERS[key]));
   }, [filters]);
 
   const handleReset = useCallback(() => {
-    setFilters(prev => ({ ...DEFAULT_FILTERS, search: prev.search }));
+    setFilters(DEFAULT_FILTERS); // search text is separate state in App, so it's kept
   }, [setFilters]);
 
   const toggleCategory = useCallback((cat) => {

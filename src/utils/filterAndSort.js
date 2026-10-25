@@ -32,6 +32,13 @@ export function filterAndSort({ markets, filters, searchLower, lookupState, port
   const minEdge = filters.minEstEdge > 0 ? filters.minEstEdge / 100 : 0;
   const brAllowed = filters.baseRateConfidence === 'HIGH' ? ['HIGH'] : filters.baseRateConfidence === 'MEDIUM' ? ['HIGH', 'MEDIUM'] : null;
   const hasSearch = !isLookupActive && searchLower.length > 0;
+  // One case-insensitive regex per run instead of lowercasing every
+  // question/description per market (several MB of garbage per pass).
+  // 'u' gives Unicode case folding; only regex syntax chars are escaped
+  // (escaping anything else is a SyntaxError in 'u' mode).
+  const searchRe = hasSearch
+    ? new RegExp(searchLower.replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&'), 'iu')
+    : null;
 
   // Pre-convert filter arrays to Sets for O(1) lookups in the hot loop
   const categorySet = hasCategories ? new Set(filters.categories) : null;
@@ -105,13 +112,7 @@ export function filterAndSort({ markets, filters, searchLower, lookupState, port
       if (filters.hideHeld && portfolio.hasPortfolio && portfolio.isMarketHeld(m.id)) continue;
 
       // MOST EXPENSIVE: string matching (last)
-      if (hasSearch) {
-        const qLower = m.question.toLowerCase();
-        if (!qLower.includes(searchLower)) {
-          const dLower = m.description.toLowerCase();
-          if (!dLower.includes(searchLower)) continue;
-        }
-      }
+      if (hasSearch && !searchRe.test(m.question) && !searchRe.test(m.description)) continue;
     }
 
     result.push(m);

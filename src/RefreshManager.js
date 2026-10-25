@@ -192,10 +192,19 @@ export class RefreshManager {
     this._assetToMarket.clear();
     this._indexMarketAssets(markets);
 
-    // Subscribe WS to all asset IDs
+    // Forget resolved-asset markers for assets no longer in the catalog
+    for (const id of this._resolvedAssets) {
+      if (!this._assetToMarket.has(id)) this._resolvedAssets.delete(id);
+    }
+
     if (this._ws && !this._usePolling) {
-      const allAssets = [...this._assetToMarket.keys()];
-      this._ws.subscribe(allAssets);
+      // Unsubscribe assets that dropped out of the catalog FIRST: they would
+      // otherwise keep streaming and keep occupying MAX_WS_ASSETS slots, so
+      // newly listed markets would eventually be refused a subscription.
+      const dropped = [...this._ws.subscribedAssets].filter((id) => !this._assetToMarket.has(id));
+      if (dropped.length > 0) this._ws.unsubscribe(dropped);
+
+      this._ws.subscribe([...this._assetToMarket.keys()]);
     }
   }
 

@@ -252,6 +252,10 @@ const MarketRow = memo(function MarketRow({ market, expanded, onToggle, detailWi
   const noPriceCellRef = useRef(null);
   const flashTimerRef = useRef(null);
 
+  // priceFlash is 'up:<seq>' / 'down:<seq>' — the sequence number makes two
+  // consecutive same-direction moves distinct, so each one re-fires the
+  // animation. The row removes its own classes after the animation, so the
+  // parent never has to render again just to clear a flash.
   useEffect(() => {
     if (!priceFlash) return;
 
@@ -266,7 +270,7 @@ const MarketRow = memo(function MarketRow({ market, expanded, onToggle, detailWi
     const upClass = 'price-flash-up';
     const downClass = 'price-flash-down';
 
-    if (priceFlash === 'up') {
+    if (priceFlash.startsWith('up')) {
       void yesCell.offsetWidth; // force reflow
       yesCell.classList.add(upClass);
       noCell.classList.add(downClass);
@@ -281,11 +285,13 @@ const MarketRow = memo(function MarketRow({ market, expanded, onToggle, detailWi
       noCell.classList.remove('price-flash-up', 'price-flash-down');
       flashTimerRef.current = null;
     }, 1000);
-
-    return () => {
-      if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
-    };
+    // No cleanup here: priceFlash returning to null on the next tick must
+    // not cancel the removal timer mid-animation. Unmount is handled below.
   }, [priceFlash]);
+
+  useEffect(() => () => {
+    if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+  }, []);
 
   const polymarketUrl = market.slug
     ? `https://polymarket.com/event/${encodeURIComponent(market.slug)}`

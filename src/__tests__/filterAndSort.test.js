@@ -398,6 +398,23 @@ describe('filterAndSort', () => {
     expect(result[0].id).toBe('a');
   });
 
+  it('treats regex special characters in the query literally', () => {
+    const markets = [
+      mkMarket({ id: 'a', question: 'Will the S&P 500 (SPX) close up?' }),
+      mkMarket({ id: 'b', question: 'Will SPX close up?' }),
+      mkMarket({ id: 'c', question: 'Odds a.b vs axb', description: '' }),
+    ];
+    expect(run({ markets, searchLower: 's&p 500 (spx)' }).map((m) => m.id)).toEqual(['a']);
+    // '.' must not act as a wildcard: 'a.b' matches only the literal text
+    expect(run({ markets, searchLower: 'a.b' }).map((m) => m.id)).toEqual(['c']);
+    expect(run({ markets, searchLower: 'a?b' })).toHaveLength(0);
+  });
+
+  it('matches non-ASCII text case-insensitively', () => {
+    const markets = [mkMarket({ id: 'a', question: 'Will MÜNCHEN win?' })];
+    expect(run({ markets, searchLower: 'münchen' })).toHaveLength(1);
+  });
+
   it('search is ignored when lookup is active', () => {
     const markets = [mkMarket({ id: 'a', question: 'No match here' })];
     const result = run({

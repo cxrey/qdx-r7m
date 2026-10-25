@@ -204,6 +204,11 @@ export class WebSocketPriceStream {
     return this._subscribedAssets.size;
   }
 
+  /** Asset IDs currently subscribed (or queued to be). Read-only view. */
+  get subscribedAssets() {
+    return this._subscribedAssets;
+  }
+
   // ── Private ───────────────────────────────────────────────────
 
   _send(data) {
