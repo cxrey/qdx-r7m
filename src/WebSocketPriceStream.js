@@ -8,7 +8,8 @@
  *   Subscribe: { operation: "subscribe", assets_ids: [...], custom_feature_enabled }
  *   Unsubscribe: { operation: "unsubscribe", assets_ids: [...] }
  *   Heartbeat: send text "PING" every 10s, expect text "PONG"
- *   Events: price_change, last_trade_price, book, tick_size_change — always;
+ *   Events: price_change, last_trade_price, book, tick_size_change — always
+ *           (we use price_change; trade prints are ignored);
  *           best_bid_ask, new_market, market_resolved — ONLY when
  *           custom_feature_enabled: true is sent (we rely on new_market for
  *           Tier-2 discovery and market_resolved for resolution callbacks).
@@ -32,7 +33,7 @@ export class WebSocketPriceStream {
   /**
    * @param {object} opts
    * @param {function} opts.onPriceChange  — (assetId, {price, bestBid, bestAsk, timestamp}) => void
-   * @param {function} opts.onResolution   — (assetId, {price, timestamp}) => void
+   * @param {function} opts.onResolution   — (winningAssetId, {winningOutcome, assetIds, timestamp}) => void
    * @param {function} opts.onNewMarket    — (data) => void
    * @param {function} opts.onStatusChange — ('connecting'|'connected'|'disconnected'|'error') => void
    */
@@ -113,7 +114,10 @@ export class WebSocketPriceStream {
       this._stopPing();
       this._subscribing = false;
       this._setStatus('disconnected');
-      if (!this._destroyed) {
+      // While paused (tab hidden) a close is either the intentional 5-min
+      // disconnect or a drop we don't need to repair yet — resume()
+      // reconnects when the tab becomes visible again.
+      if (!this._destroyed && !this._paused) {
         this._scheduleReconnect();
       }
     };
@@ -200,6 +204,11 @@ export class WebSocketPriceStream {
     return this._subscribedAssets.size;
   }
 
+  /** Asset IDs currently subscribed (or queued to be). Read-only view. */
+  get subscribedAssets() {
+    return this._subscribedAssets;
+  }
+
   // ── Private ───────────────────────────────────────────────────
 
   _send(data) {
@@ -254,9 +263,9 @@ export class WebSocketPriceStream {
   }
 
   _handleMessage(raw) {
-    if (this._paused) return;
-
-    // Handle PONG
+    // PONG must be handled even while paused: the heartbeat keeps running
+    // when the tab is hidden, and dropping replies trips the pong timeout,
+    // forcing a reconnect + full re-subscribe every ~20s.
     if (typeof raw === 'string') {
       const trimmed = raw.trim();
       if (trimmed === 'PONG' || trimmed === 'pong') {
@@ -264,6 +273,8 @@ export class WebSocketPriceStream {
         return;
       }
     }
+
+    if (this._paused) return;
 
     let events;
     try {
@@ -280,8 +291,8 @@ export class WebSocketPriceStream {
         case 'price_change':
           this._handlePriceChange(evt);
           break;
-        case 'last_trade_price':
-          this._handleLastTradePrice(evt);
+        case 'best_bid_ask':
+          this._emitQuote(evt.asset_id, evt.best_bid, evt.best_ask, evt.timestamp);
           break;
         case 'market_resolved':
           this._handleResolution(evt);
@@ -289,40 +300,53 @@ export class WebSocketPriceStream {
         case 'new_market':
           if (this._onNewMarket) this._onNewMarket(evt);
           break;
-        // book, best_bid_ask, tick_size_change — ignored for now
+        // book, tick_size_change, last_trade_price — ignored. Trade prints
+        // are a different measure than the bid/ask mid and would make the
+        // displayed price flip between the two; a trade that moves the
+        // touch also produces a price_change carrying the new best bid/ask.
       }
     }
   }
 
   _handlePriceChange(evt) {
     if (!evt.price_changes || !Array.isArray(evt.price_changes)) return;
-    const ts = evt.timestamp;
-
+    // NOTE: pc.price is the order-book LEVEL whose size changed (e.g. a
+    // resting bid deep in the book), not the market price. The market price
+    // is the mid of best_bid/best_ask, which each entry also carries.
     for (const pc of evt.price_changes) {
-      if (!pc.asset_id) continue;
-      this._onPriceChange(pc.asset_id, {
-        price: parseFloat(pc.price),
-        bestBid: pc.best_bid ? parseFloat(pc.best_bid) : null,
-        bestAsk: pc.best_ask ? parseFloat(pc.best_ask) : null,
-        timestamp: ts,
-      });
+      this._emitQuote(pc.asset_id, pc.best_bid, pc.best_ask, evt.timestamp);
     }
   }
 
-  _handleLastTradePrice(evt) {
-    if (!evt.asset_id) return;
-    this._onPriceChange(evt.asset_id, {
-      price: parseFloat(evt.price),
-      bestBid: null,
-      bestAsk: null,
-      timestamp: evt.timestamp,
+  /**
+   * Emit a mid-price update from a best bid/ask pair; skip if either is
+   * missing/invalid.
+   *
+   * One-sided books are skipped DELIBERATELY: an empty bid side arrives as
+   * best_bid 0 and an empty ask side as best_ask 1, and there is no
+   * meaningful mid between them — the market keeps its last good price until
+   * a two-sided quote returns. Don't fall back to price_changes[].price: that
+   * is the order-book level that changed, not the market price.
+   */
+  _emitQuote(assetId, rawBid, rawAsk, timestamp) {
+    if (!assetId) return;
+    const bestBid = parseFloat(rawBid);
+    const bestAsk = parseFloat(rawAsk);
+    if (!isFinite(bestBid) || !isFinite(bestAsk) || bestBid <= 0 || bestAsk >= 1 || bestAsk < bestBid) return;
+    this._onPriceChange(assetId, {
+      price: (bestBid + bestAsk) / 2,
+      bestBid,
+      bestAsk,
+      timestamp,
     });
   }
 
   _handleResolution(evt) {
-    if (!evt.asset_id) return;
-    this._onResolution(evt.asset_id, {
-      price: parseFloat(evt.price),
+    // Payload: { winning_asset_id, winning_outcome, assets_ids: [...], market }
+    if (!evt.winning_asset_id) return;
+    this._onResolution(evt.winning_asset_id, {
+      winningOutcome: evt.winning_outcome ?? null,
+      assetIds: Array.isArray(evt.assets_ids) ? evt.assets_ids : [],
       timestamp: evt.timestamp,
     });
   }

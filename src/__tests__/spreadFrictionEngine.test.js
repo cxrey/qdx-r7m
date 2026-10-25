@@ -8,6 +8,8 @@ import {
   calculateEdgeSurvival,
   estimateSpreadFromPrices,
 } from '../SpreadFrictionEngine.js';
+import { resolveFeeParams } from '../feeCalculator';
+import { calculateTheta } from '../ThetaEngine';
 
 // ─── Helpers ──────────────────────────────────────────────────────
 
@@ -339,16 +341,70 @@ describe('calculateEdgeSurvival', () => {
     expect(result.edges[0].side).toBe('NO');
   });
 
-  it('theta edge uses absolute value', () => {
-    const market = { theta: { bestTheta: -0.05, bestSide: 'NO' } };
-    const spread = { absoluteSpread: 0.02 };
-    const result = calculateEdgeSurvival(market, spread);
-    expect(result.edges[0].rawEdge).toBeCloseTo(0.05, 4);
+  it('FLB edge subtracts the taker fee on top of half spread', () => {
+    // 0.03 raw − 0.01 half spread − 0.0175 fee (crypto @50¢) = 0.0025
+    const market = { flb: { bestEdge: 0.03, bestSide: 'YES', takerFeePP: 1.75 } };
+    const result = calculateEdgeSurvival(market, { absoluteSpread: 0.02 });
+    expect(result.edges[0].netEdge).toBeCloseTo(0.0025, 6);
     expect(result.edges[0].survives).toBe(true);
+
+    // Same edge with a 2.5pp fee is killed
+    const killed = calculateEdgeSurvival(
+      { flb: { bestEdge: 0.03, bestSide: 'YES', takerFeePP: 2.5 } },
+      { absoluteSpread: 0.02 },
+    );
+    expect(killed.edges[0].survives).toBe(false);
+  });
+
+  it('base rate edge subtracts the fee at the suggested side price', () => {
+    const market = {
+      yesPrice: 0.5, noPrice: 0.5, feeParams: resolveFeeParams({ gammaCategory: 'crypto', feesEnabled: true }),
+      baseRate: { absGapCents: 4, gapType: 'NARRATIVE_DISCOUNT' },
+    };
+    const result = calculateEdgeSurvival(market, { absoluteSpread: 0.02 });
+    // 0.04 − 0.01 − 0.0175 = 0.0125
+    expect(result.edges[0].side).toBe('YES');
+    expect(result.edges[0].netEdge).toBeCloseTo(0.0125, 6);
+  });
+
+  it('theta edge accumulates over days left vs a full round trip', () => {
+    // fee-free: |−0.005| × 10 days = 0.05 raw vs 0.02 full spread → 0.03 net
+    const market = { yesPrice: 0.5, daysLeft: 10, theta: { bestTheta: -0.005, bestSide: 'NO' } };
+    const result = calculateEdgeSurvival(market, { absoluteSpread: 0.02 });
+    expect(result.edges[0].source).toBe('Theta (to expiry)');
+    expect(result.edges[0].rawEdge).toBeCloseTo(0.05, 6);
+    expect(result.edges[0].netEdge).toBeCloseTo(0.03, 6);
+    expect(result.edges[0].survives).toBe(true);
+  });
+
+  it('theta round trip includes entry and exit fees', () => {
+    // 0.05 raw − (0.02 spread + 2 × 0.0175 crypto fee) = −0.005 → killed
+    const market = {
+      yesPrice: 0.5, daysLeft: 10, feeParams: resolveFeeParams({ gammaCategory: 'crypto', feesEnabled: true }),
+      theta: { bestTheta: 0.005, bestSide: 'NO' },
+    };
+    const result = calculateEdgeSurvival(market, { absoluteSpread: 0.02 });
+    expect(result.edges[0].netEdge).toBeCloseTo(-0.005, 6);
+    expect(result.edges[0].survives).toBe(false);
+  });
+
+  it('theta-to-expiry is a lower bound on the hazard-model decay', () => {
+    // Daily decrement grows toward expiry, so today's theta × daysLeft must
+    // undercount the true cumulative decay (which telescopes to yesPrice).
+    for (const [p, d] of [[0.5, 30], [0.2, 90], [0.8, 10]]) {
+      const theta = calculateTheta(p, d, 'STANDARD');
+      expect(Math.abs(theta.dailyYesTheta) * d).toBeLessThan(p);
+    }
+  });
+
+  it('skips theta when daysLeft is unknown', () => {
+    const result = calculateEdgeSurvival({ theta: { bestTheta: 0.01 } }, { absoluteSpread: 0.02 });
+    expect(result.edges).toEqual([]);
   });
 
   it('counts multiple edges correctly', () => {
     const market = {
+      yesPrice: 0.5, noPrice: 0.5, daysLeft: 1,
       flb: { bestEdge: 0.10 },
       baseRate: { absGapCents: 5, gapType: 'VALUE' },
       theta: { bestTheta: 0.01 },
@@ -356,9 +412,9 @@ describe('calculateEdgeSurvival', () => {
     const spread = { absoluteSpread: 0.06 }; // halfSpread = 0.03
     const result = calculateEdgeSurvival(market, spread);
     expect(result.edges.length).toBe(3);
-    // FLB: 0.10 - 0.03 = 0.07 survives
-    // BaseRate: 0.05 - 0.03 = 0.02 survives
-    // Theta: 0.01 - 0.03 = -0.02 killed
+    // FLB: 0.10 − 0.03 = 0.07 survives
+    // BaseRate: 0.05 − 0.03 = 0.02 survives
+    // Theta: 0.01 × 1 day − 0.06 round trip = −0.05 killed
     expect(result.survivingEdges).toBe(2);
     expect(result.killedEdges).toBe(1);
   });

@@ -1,5 +1,6 @@
-import { useState, useCallback, useRef, useEffect, memo, lazy, Suspense } from 'react';
+import { useState, useCallback, useRef, memo, lazy, Suspense } from 'react';
 import { usePortfolioContext } from '../contexts/PortfolioContext';
+import { usePriceFlash } from '../hooks/usePriceFlash';
 import { useExecutionStyle } from '../contexts/ExecutionContext';
 const MarketDetailPanel = lazy(() => import('./MarketDetailPanel'));
 import { RulesCell } from './ResolutionCard';
@@ -247,45 +248,8 @@ const MarketRow = memo(function MarketRow({ market, expanded, onToggle, detailWi
   const [showAddPopover, setShowAddPopover] = useState(false);
   const addBtnRef = useRef(null);
 
-  // Price flash animation via direct DOM manipulation
-  const yesPriceCellRef = useRef(null);
-  const noPriceCellRef = useRef(null);
-  const flashTimerRef = useRef(null);
-
-  useEffect(() => {
-    if (!priceFlash) return;
-
-    const yesCell = yesPriceCellRef.current;
-    const noCell = noPriceCellRef.current;
-    if (!yesCell || !noCell) return;
-
-    if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
-    yesCell.classList.remove('price-flash-up', 'price-flash-down');
-    noCell.classList.remove('price-flash-up', 'price-flash-down');
-
-    const upClass = 'price-flash-up';
-    const downClass = 'price-flash-down';
-
-    if (priceFlash === 'up') {
-      void yesCell.offsetWidth; // force reflow
-      yesCell.classList.add(upClass);
-      noCell.classList.add(downClass);
-    } else {
-      void yesCell.offsetWidth;
-      yesCell.classList.add(downClass);
-      noCell.classList.add(upClass);
-    }
-
-    flashTimerRef.current = setTimeout(() => {
-      yesCell.classList.remove('price-flash-up', 'price-flash-down');
-      noCell.classList.remove('price-flash-up', 'price-flash-down');
-      flashTimerRef.current = null;
-    }, 1000);
-
-    return () => {
-      if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
-    };
-  }, [priceFlash]);
+  // Price flash animation via direct DOM class toggling (see usePriceFlash)
+  const { yesCellRef: yesPriceCellRef, noCellRef: noPriceCellRef } = usePriceFlash(priceFlash);
 
   const polymarketUrl = market.slug
     ? `https://polymarket.com/event/${encodeURIComponent(market.slug)}`

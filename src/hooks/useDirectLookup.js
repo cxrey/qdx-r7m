@@ -8,6 +8,10 @@ import {
 } from '../api';
 import { processMarket, enrichWithBaseRate } from '../processMarket';
 
+// Shared empty result: clearing state with a fresh [] each time would change
+// fetchedMarkets' identity and force an extra filterAndSort in App.
+const NO_MARKETS = [];
+
 /**
  * Hook that manages direct market lookup by URL/slug/ID.
  *
@@ -19,7 +23,7 @@ export function useDirectLookup(rawMarkets, baseRatesRef) {
   // Detection result from the last input
   const [detection, setDetection] = useState(null);
   // Fetched markets from API (not found in loaded data)
-  const [fetchedMarkets, setFetchedMarkets] = useState([]);
+  const [fetchedMarkets, setFetchedMarkets] = useState(NO_MARKETS);
   // The ID of a market found in loaded data
   const [foundInLoadedId, setFoundInLoadedId] = useState(null);
   // Loading state
@@ -30,6 +34,20 @@ export function useDirectLookup(rawMarkets, baseRatesRef) {
   const abortRef = useRef(null);
   const debounceRef = useRef(null);
 
+  // Read markets through a ref: listing rawMarkets as a dependency gave
+  // searchLoaded/runLookup a new identity on every price tick, which re-ran
+  // App's lookup effect ~once per second and kept aborting in-flight fetches.
+  const marketsRef = useRef(rawMarkets);
+  marketsRef.current = rawMarkets;
+
+  // The last immediate (paste) lookup: { value, marketsLoaded }. When the
+  // debounced search catches up to the pasted text ~300ms later, App calls
+  // runLookup again with the same value — without this, that echo aborted
+  // the in-flight paste fetch and restarted it after a further 500ms.
+  // Markets finishing loading is NOT an echo: a link pasted mid-load must be
+  // re-checked against the loaded set, so loaded-state is part of the key.
+  const lastImmediateRef = useRef(null);
+
   /**
    * Search loaded markets for a match.
    */
@@ -37,7 +55,7 @@ export function useDirectLookup(rawMarkets, baseRatesRef) {
     (det) => {
       const { type, extracted } = det;
 
-      for (const m of rawMarkets) {
+      for (const m of marketsRef.current) {
         // Slug matching
         if (
           type === 'EVENT_URL' ||
@@ -79,7 +97,7 @@ export function useDirectLookup(rawMarkets, baseRatesRef) {
 
       return null;
     },
-    [rawMarkets]
+    []
   );
 
   /**
@@ -167,6 +185,15 @@ export function useDirectLookup(rawMarkets, baseRatesRef) {
    */
   const runLookup = useCallback(
     (inputValue, immediate = false) => {
+      const marketsLoaded = marketsRef.current.length > 0;
+      if (immediate) {
+        lastImmediateRef.current = { value: inputValue, marketsLoaded };
+      } else {
+        const last = lastImmediateRef.current;
+        if (last && last.value === inputValue && last.marketsLoaded === marketsLoaded) return;
+        lastImmediateRef.current = null;
+      }
+
       // Cancel any in-flight request
       if (abortRef.current) {
         abortRef.current.abort();
@@ -180,7 +207,7 @@ export function useDirectLookup(rawMarkets, baseRatesRef) {
       // Clear state if input is empty
       if (!inputValue || !inputValue.trim()) {
         setDetection(null);
-        setFetchedMarkets([]);
+        setFetchedMarkets(NO_MARKETS);
         setFoundInLoadedId(null);
         setLookupLoading(false);
         setLookupError(null);
@@ -192,7 +219,7 @@ export function useDirectLookup(rawMarkets, baseRatesRef) {
       // Not a link — clear lookup state, let normal search handle it
       if (det.type === 'TEXT') {
         setDetection(null);
-        setFetchedMarkets([]);
+        setFetchedMarkets(NO_MARKETS);
         setFoundInLoadedId(null);
         setLookupLoading(false);
         setLookupError(null);
@@ -206,7 +233,7 @@ export function useDirectLookup(rawMarkets, baseRatesRef) {
       const found = searchLoaded(det);
       if (found) {
         setFoundInLoadedId(found.id);
-        setFetchedMarkets([]);
+        setFetchedMarkets(NO_MARKETS);
         setLookupLoading(false);
         return;
       }
@@ -218,7 +245,7 @@ export function useDirectLookup(rawMarkets, baseRatesRef) {
         const controller = new AbortController();
         abortRef.current = controller;
         setLookupLoading(true);
-        setFetchedMarkets([]);
+        setFetchedMarkets(NO_MARKETS);
 
         try {
           const result = await fetchFromApi(det, controller.signal);
@@ -229,7 +256,7 @@ export function useDirectLookup(rawMarkets, baseRatesRef) {
             setFetchedMarkets(processed);
             setLookupError(null);
           } else {
-            setFetchedMarkets([]);
+            setFetchedMarkets(NO_MARKETS);
             setLookupError(
               'No market found for this link. It may have been removed or the URL may be incorrect.'
             );
@@ -267,8 +294,9 @@ export function useDirectLookup(rawMarkets, baseRatesRef) {
       clearTimeout(debounceRef.current);
       debounceRef.current = null;
     }
+    lastImmediateRef.current = null;
     setDetection(null);
-    setFetchedMarkets([]);
+    setFetchedMarkets(NO_MARKETS);
     setFoundInLoadedId(null);
     setLookupLoading(false);
     setLookupError(null);

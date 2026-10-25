@@ -7,10 +7,15 @@ import {
   getFeeParams,
   isFeeFree,
   normalizeFeeSchedule,
+  resolveFeeParams,
   FEE_PARAM_SLUGS,
   FEETYPE_TO_FEE_SLUG,
 } from '../feeCalculator';
 import { TAG_SLUG_TO_FEE_SLUG, DISPLAY_TO_FEE_SLUG } from '../processMarket';
+
+/** Shorthand: resolved fee params for a category (fees enabled by default). */
+const fp = (gammaCategory, feesEnabled = true, feeSchedule = null) =>
+  resolveFeeParams({ gammaCategory, feesEnabled, feeSchedule });
 
 describe('getFeeParams', () => {
   it('returns params for known slug', () => {
@@ -43,17 +48,25 @@ describe('getFeeParams', () => {
     expect(getFeeParams('Crypto').feeRate).toBe(0.07);
   });
 
+});
+
+describe('resolveFeeParams', () => {
   it('prefers a live feeSchedule over the category table', () => {
     // Live schedule says 0.03 even though the crypto table entry says 0.07
-    const p = getFeeParams('crypto', { rate: 0.03, exponent: 1, rebateRate: 0.10 });
-    expect(p.feeRate).toBe(0.03);
-    expect(p.makerRebatePct).toBe(0.10);
+    const p = fp('crypto', true, { rate: 0.03, exponent: 1, rebateRate: 0.10 });
+    expect(p).toEqual({ feeRate: 0.03, exponent: 1, makerRebatePct: 0.10, enabled: true });
   });
 
   it('falls back to the table when the feeSchedule is malformed', () => {
-    expect(getFeeParams('crypto', { rate: 'bogus' }).feeRate).toBe(0.07);
-    expect(getFeeParams('crypto', {}).feeRate).toBe(0.07);
-    expect(getFeeParams('crypto', null).feeRate).toBe(0.07);
+    expect(fp('crypto', true, { rate: 'bogus' }).feeRate).toBe(0.07);
+    expect(fp('crypto', true, {}).feeRate).toBe(0.07);
+    expect(fp('crypto', true, null).feeRate).toBe(0.07);
+  });
+
+  it('carries the feesEnabled flag', () => {
+    expect(fp('crypto').enabled).toBe(true);
+    expect(fp('crypto', false).enabled).toBe(false);
+    expect(resolveFeeParams().enabled).toBe(false);
   });
 });
 
@@ -63,9 +76,8 @@ describe('normalizeFeeSchedule', () => {
     expect(n).toEqual({ feeRate: 0.05, exponent: 1, makerRebatePct: 0.15 });
   });
 
-  it('passes through an already-normalized shape', () => {
-    const n = normalizeFeeSchedule({ feeRate: 0.04, exponent: 1, makerRebatePct: 0.25 });
-    expect(n).toEqual({ feeRate: 0.04, exponent: 1, makerRebatePct: 0.25 });
+  it('rejects the already-normalized internal shape (raw Gamma shape only)', () => {
+    expect(normalizeFeeSchedule({ feeRate: 0.04, exponent: 1, makerRebatePct: 0.25 })).toBeNull();
   });
 
   it('defaults missing exponent to 1 and missing rebate to 0', () => {
@@ -84,71 +96,82 @@ describe('normalizeFeeSchedule', () => {
 
 describe('isFeeFree', () => {
   it('returns true for world-politics', () => {
-    expect(isFeeFree('world-politics')).toBe(true);
+    expect(isFeeFree(fp('world-politics'))).toBe(true);
   });
 
   it('returns false for crypto', () => {
-    expect(isFeeFree('crypto')).toBe(false);
+    expect(isFeeFree(fp('crypto'))).toBe(false);
+  });
+
+  it('returns true when fees are disabled, even in a fee category', () => {
+    // Single definition: disabled fees ⇒ fee-free (previously market.feeFree
+    // ignored feesEnabled and disagreed with flb.feeFree)
+    expect(isFeeFree(fp('crypto', false))).toBe(true);
+  });
+
+  it('returns true for missing params', () => {
+    expect(isFeeFree(null)).toBe(true);
+    expect(isFeeFree(undefined)).toBe(true);
   });
 
   it('respects a live zero-rate schedule', () => {
-    expect(isFeeFree('crypto', { rate: 0, exponent: 1, rebateRate: 0 })).toBe(true);
+    expect(isFeeFree(fp('crypto', true, { rate: 0, exponent: 1, rebateRate: 0 }))).toBe(true);
   });
 
   it('returns false for unknown slug (uses default)', () => {
     const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    expect(isFeeFree('some-new-category')).toBe(false);
+    expect(isFeeFree(fp('some-new-category'))).toBe(false);
     spy.mockRestore();
   });
 });
 
 describe('computeEffectiveFeeRate', () => {
   it('returns 0 when feesEnabled is false', () => {
-    expect(computeEffectiveFeeRate(0.50, 'crypto', false)).toBe(0);
+    expect(computeEffectiveFeeRate(0.50, fp('crypto', false))).toBe(0);
   });
 
   it('returns 0 for null/undefined price', () => {
-    expect(computeEffectiveFeeRate(null, 'crypto', true)).toBe(0);
-    expect(computeEffectiveFeeRate(undefined, 'crypto', true)).toBe(0);
+    expect(computeEffectiveFeeRate(null, fp('crypto'))).toBe(0);
+    expect(computeEffectiveFeeRate(undefined, fp('crypto'))).toBe(0);
   });
 
   it('returns 0 for price <= 0 or >= 1', () => {
-    expect(computeEffectiveFeeRate(0, 'crypto', true)).toBe(0);
-    expect(computeEffectiveFeeRate(-0.5, 'crypto', true)).toBe(0);
-    expect(computeEffectiveFeeRate(1, 'crypto', true)).toBe(0);
-    expect(computeEffectiveFeeRate(1.5, 'crypto', true)).toBe(0);
+    expect(computeEffectiveFeeRate(0, fp('crypto'))).toBe(0);
+    expect(computeEffectiveFeeRate(-0.5, fp('crypto'))).toBe(0);
+    expect(computeEffectiveFeeRate(1, fp('crypto'))).toBe(0);
+    expect(computeEffectiveFeeRate(1.5, fp('crypto'))).toBe(0);
   });
 
   it('returns 0 for fee-free category', () => {
-    expect(computeEffectiveFeeRate(0.50, 'world-politics', true)).toBe(0);
+    expect(computeEffectiveFeeRate(0.50, fp('world-politics'))).toBe(0);
   });
 
   // effectiveFeeRate = feePerShare / price = feeRate × (p(1−p))^exp / p
   // Crypto at p=0.50: 0.07 × 0.25 / 0.50 = 0.035 (3.5% of trade value)
   it('computes 3.5% of trade value for crypto at p=0.50', () => {
-    expect(computeEffectiveFeeRate(0.50, 'crypto', true)).toBeCloseTo(0.035, 6);
+    expect(computeEffectiveFeeRate(0.50, fp('crypto'))).toBeCloseTo(0.035, 6);
   });
 
   // Sports at p=0.50: 0.05 × 0.25 / 0.50 = 0.025
   it('computes 2.5% of trade value for sports at p=0.50', () => {
-    expect(computeEffectiveFeeRate(0.50, 'sports', true)).toBeCloseTo(0.025, 6);
+    expect(computeEffectiveFeeRate(0.50, fp('sports'))).toBeCloseTo(0.025, 6);
   });
 
   // Crypto at p=0.20: 0.07 × 0.16 / 0.20 = 0.056
   it('computes correct rate for crypto at p=0.20', () => {
-    expect(computeEffectiveFeeRate(0.20, 'crypto', true)).toBeCloseTo(0.056, 6);
+    expect(computeEffectiveFeeRate(0.20, fp('crypto'))).toBeCloseTo(0.056, 6);
   });
 
   // For exp=1 the rate simplifies to feeRate × (1−p): approaches feeRate as
   // p→0 (cheap longshots pay ~full rate on their stake) and 0 as p→1.
   it('approaches feeRate as p→0 and zero as p→1', () => {
-    expect(computeEffectiveFeeRate(0.01, 'crypto', true)).toBeCloseTo(0.07 * 0.99, 6);
-    expect(computeEffectiveFeeRate(0.99, 'crypto', true)).toBeCloseTo(0.07 * 0.01, 6);
+    expect(computeEffectiveFeeRate(0.01, fp('crypto'))).toBeCloseTo(0.07 * 0.99, 6);
+    expect(computeEffectiveFeeRate(0.99, fp('crypto'))).toBeCloseTo(0.07 * 0.01, 6);
   });
 
   it('applies a live feeSchedule exponent', () => {
     // exp 2 at p=0.50: perShare = 0.20 × 0.25² = 0.0125 → rate = 0.0125/0.5 = 0.025
-    const rate = computeEffectiveFeeRate(0.50, 'other', true, { rate: 0.20, exponent: 2, rebateRate: 0.25 });
+    const rate = computeEffectiveFeeRate(0.50, fp('other', true, { rate: 0.20, exponent: 2, rebateRate: 0.25 }));
     expect(rate).toBeCloseTo(0.025, 6);
   });
 });
@@ -158,7 +181,7 @@ describe('computeFeePP', () => {
   // Pinned to the documented worked example (docs.polymarket.com/trading/fees):
   // 100 crypto shares at 50¢ → $1.75 total → 1.75¢/share.
   it('matches the docs worked example: crypto at 50¢ = 1.75¢/share ($1.75 per 100 shares)', () => {
-    const feePP = computeFeePP(0.50, 'crypto', true);
+    const feePP = computeFeePP(0.50, fp('crypto'));
     expect(feePP).toBeCloseTo(1.75, 6);
     const totalFor100Shares = (feePP / 100) * 100; // $/share × 100 shares
     expect(totalFor100Shares).toBeCloseTo(1.75, 6);
@@ -167,40 +190,40 @@ describe('computeFeePP', () => {
   // Cross-check via effectiveFeeRate: $50 notional × 3.5% = $1.75
   it('is consistent with effectiveFeeRate on the docs example', () => {
     const notional = 100 * 0.50;
-    const viaRate = notional * computeEffectiveFeeRate(0.50, 'crypto', true);
+    const viaRate = notional * computeEffectiveFeeRate(0.50, fp('crypto'));
     expect(viaRate).toBeCloseTo(1.75, 6);
   });
 
   // Sports at p=0.50: 0.05 × 0.25 × 100 = 1.25pp (docs: $1.25 per 100 shares)
   it('computes 1.25pp for sports at p=0.50', () => {
-    expect(computeFeePP(0.50, 'sports', true)).toBeCloseTo(1.25, 6);
+    expect(computeFeePP(0.50, fp('sports'))).toBeCloseTo(1.25, 6);
   });
 
   // Finance at p=0.50: 0.04 × 0.25 × 100 = 1.0pp (docs: $1.00 per 100 shares)
   it('computes 1.0pp for business (finance) at p=0.50', () => {
-    expect(computeFeePP(0.50, 'business', true)).toBeCloseTo(1.0, 6);
+    expect(computeFeePP(0.50, fp('business'))).toBeCloseTo(1.0, 6);
   });
 
   // Crypto at p=0.20: 0.07 × 0.16 × 100 = 1.12pp
   it('computes 1.12pp for crypto at p=0.20', () => {
-    expect(computeFeePP(0.20, 'crypto', true)).toBeCloseTo(1.12, 6);
+    expect(computeFeePP(0.20, fp('crypto'))).toBeCloseTo(1.12, 6);
   });
 
   it('is symmetric around p=0.50', () => {
-    expect(computeFeePP(0.30, 'crypto', true)).toBeCloseTo(computeFeePP(0.70, 'crypto', true), 10);
+    expect(computeFeePP(0.30, fp('crypto'))).toBeCloseTo(computeFeePP(0.70, fp('crypto')), 10);
   });
 
   it('returns 0 for world-politics (fee-free)', () => {
-    expect(computeFeePP(0.50, 'world-politics', true)).toBe(0);
+    expect(computeFeePP(0.50, fp('world-politics'))).toBe(0);
   });
 
   it('returns 0 when feesEnabled is false', () => {
-    expect(computeFeePP(0.50, 'crypto', false)).toBe(0);
+    expect(computeFeePP(0.50, fp('crypto', false))).toBe(0);
   });
 
   it('uses a live feeSchedule over the table', () => {
     // Live sports schedule at 0.05 vs a hypothetical stale table
-    const feePP = computeFeePP(0.50, 'sports', true, { rate: 0.03, exponent: 1, rebateRate: 0.25 });
+    const feePP = computeFeePP(0.50, fp('sports', true, { rate: 0.03, exponent: 1, rebateRate: 0.25 }));
     expect(feePP).toBeCloseTo(0.75, 6); // 0.03 × 0.25 × 100
   });
 });
@@ -208,39 +231,39 @@ describe('computeFeePP', () => {
 describe('computeMakerRebatePP', () => {
   // Business (finance) has 25% rebate
   it('returns 25% of feePP for business at p=0.50', () => {
-    const feePP = computeFeePP(0.50, 'business', true);
-    const rebate = computeMakerRebatePP(0.50, 'business', true);
+    const feePP = computeFeePP(0.50, fp('business'));
+    const rebate = computeMakerRebatePP(0.50, fp('business'));
     expect(rebate).toBeCloseTo(feePP * 0.25, 6);
   });
 
   // Crypto has 20% rebate
   it('returns 20% of feePP for crypto at p=0.50', () => {
-    const feePP = computeFeePP(0.50, 'crypto', true);
-    const rebate = computeMakerRebatePP(0.50, 'crypto', true);
+    const feePP = computeFeePP(0.50, fp('crypto'));
+    const rebate = computeMakerRebatePP(0.50, fp('crypto'));
     expect(rebate).toBeCloseTo(feePP * 0.20, 6);
   });
 
   // Sports rebate dropped to 15% in the July 2026 schedule
   it('returns 15% of feePP for sports at p=0.50', () => {
-    const feePP = computeFeePP(0.50, 'sports', true);
-    const rebate = computeMakerRebatePP(0.50, 'sports', true);
+    const feePP = computeFeePP(0.50, fp('sports'));
+    const rebate = computeMakerRebatePP(0.50, fp('sports'));
     expect(rebate).toBeCloseTo(feePP * 0.15, 6);
   });
 
   it('uses the live feeSchedule rebateRate', () => {
-    const rebate = computeMakerRebatePP(0.50, 'sports', true, { rate: 0.05, exponent: 1, rebateRate: 0.15 });
+    const rebate = computeMakerRebatePP(0.50, fp('sports', true, { rate: 0.05, exponent: 1, rebateRate: 0.15 }));
     expect(rebate).toBeCloseTo(1.25 * 0.15, 6);
   });
 
   it('returns 0 for fee-free category', () => {
-    expect(computeMakerRebatePP(0.50, 'world-politics', true)).toBe(0);
+    expect(computeMakerRebatePP(0.50, fp('world-politics'))).toBe(0);
   });
 });
 
 describe('computeRoundTripCostPP', () => {
   // 2¢ spread + crypto at 50¢: entry/exit fee 1.75pp each
   it('computes correct round-trip with 2¢ spread + crypto at 50¢', () => {
-    const rt = computeRoundTripCostPP(0.50, 0.02, 'crypto', true);
+    const rt = computeRoundTripCostPP(0.50, 0.02, fp('crypto'));
     expect(rt.entryFeePP).toBeCloseTo(1.75, 4);
     expect(rt.exitFeePP).toBeCloseTo(1.75, 4);
     expect(rt.roundTripFeePP).toBeCloseTo(3.5, 4);
@@ -251,7 +274,7 @@ describe('computeRoundTripCostPP', () => {
   });
 
   it('uses full spread, not half spread', () => {
-    const rt = computeRoundTripCostPP(0.50, 0.04, 'world-politics', true);
+    const rt = computeRoundTripCostPP(0.50, 0.04, fp('world-politics'));
     // Fee-free, so only spread cost
     expect(rt.roundTripFeePP).toBe(0);
     expect(rt.spreadCostPP).toBeCloseTo(4.0, 4); // 0.04 × 100
@@ -259,13 +282,13 @@ describe('computeRoundTripCostPP', () => {
   });
 
   it('handles null spread', () => {
-    const rt = computeRoundTripCostPP(0.50, null, 'crypto', true);
+    const rt = computeRoundTripCostPP(0.50, null, fp('crypto'));
     expect(rt.spreadCostPP).toBe(0);
     expect(rt.totalCostPP).toBeCloseTo(3.5, 4); // just fees
   });
 
   it('returns all zeros for fee-free with null spread', () => {
-    const rt = computeRoundTripCostPP(0.50, null, 'world-politics', true);
+    const rt = computeRoundTripCostPP(0.50, null, fp('world-politics'));
     expect(rt.totalCostPP).toBe(0);
   });
 });
@@ -313,7 +336,7 @@ describe('per-share fees at p=0.50 (regression guard vs docs fee table)', () => 
 
   for (const [category, expected, formula] of cases) {
     it(`${category}: ${formula} = ${expected}pp`, () => {
-      expect(computeFeePP(0.50, category, true)).toBeCloseTo(expected, 6);
+      expect(computeFeePP(0.50, fp(category))).toBeCloseTo(expected, 6);
     });
   }
 });

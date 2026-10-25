@@ -14,6 +14,8 @@ import { fetchAllMarkets, flattenEventsToMarkets } from './api';
 import { processMarket, enrichWithBaseRate } from './processMarket';
 import { processAllInWorker } from './workerManager';
 import { handleRateLimit, getBackoffMultiplier, onBackoffChange, isClobRateLimited } from './ApiHealthManager';
+import { withTimeout, TIMEOUT_GAMMA_PAGE } from './fetchUtils';
+import { GAMMA_API } from './apiConfig';
 
 const TIER2_INTERVAL = 60 * 1000;            // 60 sec (3 requests per cycle)
 const TIER2_COOLDOWN = 30 * 1000;            // min gap between Tier 2 runs (must be < TIER2_INTERVAL)
@@ -21,7 +23,6 @@ const TIER3_INTERVAL = 10 * 60 * 1000;      // 10 min (parallel fetch burst)
 const POLLING_FALLBACK_INTERVAL = 30_000;    // 30s polling if WS fails
 const NEW_MARKET_PAGES = 3;                  // check first 3 pages for new markets
 const PAGE_SIZE = 100;
-const GAMMA_API = '/gamma-api';
 
 export class RefreshManager {
   /**
@@ -43,6 +44,11 @@ export class RefreshManager {
 
     // Build asset→market index for WS price mapping
     this._assetToMarket = new Map(); // assetId → { marketId, side: 'yes'|'no' }
+    // Assets of markets settled via market_resolved — later quotes are ignored
+    this._resolvedAssets = new Set();
+
+    // Aborts in-flight Tier 2 / polling requests on stop()
+    this._bgController = null;
 
     // Backoff multiplier listener (managed by ApiHealthManager)
     this._unsubBackoff = null;
@@ -78,6 +84,7 @@ export class RefreshManager {
   start() {
     if (this._enabled || this._destroyed) return;
     this._enabled = true;
+    this._bgController = new AbortController();
 
     // Set up batcher
     this._batcher = new PriceUpdateBatcher((batch) => this._flushPriceUpdates(batch));
@@ -119,6 +126,8 @@ export class RefreshManager {
   stop() {
     if (!this._enabled) return;
     this._enabled = false;
+    this._bgController?.abort();
+    this._bgController = null;
 
     // Stop WebSocket
     if (this._ws) {
@@ -181,18 +190,43 @@ export class RefreshManager {
   /** Rebuild the asset→market index from current markets. */
   rebuildAssetIndex(markets) {
     this._assetToMarket.clear();
-    for (const m of markets) {
-      if (m.clobTokenIds && m.clobTokenIds.length >= 2) {
-        this._assetToMarket.set(m.clobTokenIds[0], { marketId: m.id, side: 'yes' });
-        this._assetToMarket.set(m.clobTokenIds[1], { marketId: m.id, side: 'no' });
-      }
+    this._indexMarketAssets(markets);
+
+    // Forget resolved-asset markers for assets no longer in the catalog
+    for (const id of this._resolvedAssets) {
+      if (!this._assetToMarket.has(id)) this._resolvedAssets.delete(id);
     }
 
-    // Subscribe WS to all asset IDs
     if (this._ws && !this._usePolling) {
-      const allAssets = [...this._assetToMarket.keys()];
-      this._ws.subscribe(allAssets);
+      // Unsubscribe assets that dropped out of the catalog FIRST: they would
+      // otherwise keep streaming and keep occupying MAX_WS_ASSETS slots, so
+      // newly listed markets would eventually be refused a subscription.
+      const dropped = [...this._ws.subscribedAssets].filter((id) => !this._assetToMarket.has(id));
+      if (dropped.length > 0) this._ws.unsubscribe(dropped);
+
+      this._ws.subscribe([...this._assetToMarket.keys()]);
     }
+  }
+
+  /**
+   * Add each market's YES/NO token → market mapping to the asset index.
+   * @returns {string[]} the asset ids that were indexed
+   */
+  _indexMarketAssets(markets) {
+    const assetIds = [];
+    for (const m of markets) {
+      if (m.clobTokenIds?.length >= 2) {
+        this._assetToMarket.set(m.clobTokenIds[0], { marketId: m.id, side: 'yes' });
+        this._assetToMarket.set(m.clobTokenIds[1], { marketId: m.id, side: 'no' });
+        assetIds.push(m.clobTokenIds[0], m.clobTokenIds[1]);
+      }
+    }
+    return assetIds;
+  }
+
+  /** Background Gamma fetch with a timeout, cancelled by stop(). */
+  _bgFetch(url) {
+    return fetch(url, { signal: withTimeout(this._bgController?.signal, TIMEOUT_GAMMA_PAGE) });
   }
 
   /** Called after manual refresh to reset Tier 3 timer */
@@ -221,16 +255,30 @@ export class RefreshManager {
   _startWebSocket() {
     this._ws = new WebSocketPriceStream({
       onPriceChange: (assetId, update) => {
+        if (this._resolvedAssets.has(assetId)) return;
         if (this._batcher) {
           this._batcher.enqueue(assetId, update);
         }
       },
-      onResolution: (assetId, data) => {
-        const mapping = this._assetToMarket.get(assetId);
-        if (mapping) {
-          this._opts.onResolution?.(mapping.marketId);
-          this._opts.onToast?.({ type: 'info', message: `Market resolved (price=${data.price})` });
+      onResolution: (winningAssetId, data) => {
+        const mapping = this._assetToMarket.get(winningAssetId);
+        if (!mapping) return;
+        // Settle prices: winning token → 1, losing token → 0. Enqueued through
+        // the batcher (not sent directly) so it REPLACES any quote already
+        // queued for these assets instead of being overwritten by it on the
+        // next flush; later quotes for these assets are dropped above.
+        const settle = new Map([[winningAssetId, { price: 1 }]]);
+        for (const id of data.assetIds) {
+          if (id !== winningAssetId) settle.set(id, { price: 0 });
         }
+        for (const [id, update] of settle) {
+          this._resolvedAssets.add(id);
+          if (this._batcher) this._batcher.enqueue(id, update);
+        }
+        if (!this._batcher) this._flushPriceUpdates(settle);
+        this._opts.onResolution?.(mapping.marketId);
+        const outcome = data.winningOutcome || (mapping.side === 'yes' ? 'Yes' : 'No');
+        this._opts.onToast?.({ type: 'info', message: `Market resolved: ${outcome}` });
       },
       onNewMarket: () => {
         // WS new_market event — trigger an immediate Tier 2 check
@@ -292,7 +340,7 @@ export class RefreshManager {
       const updates = new Map();
       for (let page = 0; page < 3; page++) {
         const url = `${GAMMA_API}/markets?limit=100&offset=${page * 100}&active=true&closed=false&order=volume&ascending=false`;
-        const res = await fetch(url);
+        const res = await this._bgFetch(url);
         if (res.status === 429 || res.status === 403) {
           this._handleRateLimit(res.status);
           this._opts.onToast?.({ type: 'warn', message: `Gamma API ${res.status === 403 ? 'forbidden' : 'rate limited'} during polling` });
@@ -318,7 +366,7 @@ export class RefreshManager {
         this._opts.onPriceUpdate?.(updates);
       }
     } catch (err) {
-      console.warn('[RefreshManager] Polling error:', err.message);
+      if (err.name !== 'AbortError') console.warn('[RefreshManager] Polling error:', err.message);
     }
   }
 
@@ -382,7 +430,7 @@ export class RefreshManager {
       for (let page = 0; page < NEW_MARKET_PAGES; page++) {
         // Fetch from /events to get event-level tags for fee category resolution
         const url = `${GAMMA_API}/events?limit=${PAGE_SIZE}&offset=${page * PAGE_SIZE}&active=true&closed=false&order=createdAt&ascending=false&volume_num_min=100`;
-        const res = await fetch(url);
+        const res = await this._bgFetch(url);
 
         if (res.status === 429 || res.status === 403) {
           this._handleRateLimit(res.status);
@@ -415,14 +463,7 @@ export class RefreshManager {
         this._opts.onToast?.({ type: 'info', message: `${newMarkets.length} new market${newMarkets.length > 1 ? 's' : ''} discovered` });
 
         // Subscribe to new market assets
-        const newAssets = [];
-        for (const m of newMarkets) {
-          if (m.clobTokenIds?.length >= 2) {
-            this._assetToMarket.set(m.clobTokenIds[0], { marketId: m.id, side: 'yes' });
-            this._assetToMarket.set(m.clobTokenIds[1], { marketId: m.id, side: 'no' });
-            newAssets.push(m.clobTokenIds[0], m.clobTokenIds[1]);
-          }
-        }
+        const newAssets = this._indexMarketAssets(newMarkets);
         if (newAssets.length > 0 && this._ws && !this._usePolling) {
           this._ws.subscribe(newAssets);
         }
@@ -484,12 +525,9 @@ export class RefreshManager {
           }
         }
 
+        // Removed (possibly resolved) markets drop out with the new array —
+        // no per-id onResolution call needed.
         this._opts.onFullRefresh?.(processed);
-
-        // Notify about removed (possibly resolved) markets
-        for (const id of diff.removed) {
-          this._opts.onResolution?.(id);
-        }
 
         // Rebuild asset index
         this.rebuildAssetIndex(processed);
@@ -520,23 +558,24 @@ export class RefreshManager {
   _flushPriceUpdates(batch) {
     // batch: Map<assetId, {price, bestBid, bestAsk, timestamp}>
     // Convert to Map<marketId, {yesPrice, noPrice}>
+    // YES and NO are complementary tokens: derive one from the other so the
+    // pair can't drift apart. When both sides update in one batch, the
+    // YES-token quote wins.
     const marketUpdates = new Map();
 
     for (const [assetId, update] of batch) {
       const mapping = this._assetToMarket.get(assetId);
-      if (!mapping) continue;
+      if (!mapping || !isFinite(update.price)) continue;
 
       const { marketId, side } = mapping;
-      if (!marketUpdates.has(marketId)) {
-        marketUpdates.set(marketId, {});
-      }
-      const entry = marketUpdates.get(marketId);
+      const existing = marketUpdates.get(marketId);
       if (side === 'yes') {
-        entry.yesPrice = update.price;
-      } else {
-        entry.noPrice = update.price;
+        marketUpdates.set(marketId, { yesPrice: update.price, noPrice: 1 - update.price, _fromYes: true });
+      } else if (!existing?._fromYes) {
+        marketUpdates.set(marketId, { yesPrice: 1 - update.price, noPrice: update.price });
       }
     }
+    for (const entry of marketUpdates.values()) delete entry._fromYes;
 
     if (marketUpdates.size > 0) {
       this._opts.onPriceUpdate?.(marketUpdates);

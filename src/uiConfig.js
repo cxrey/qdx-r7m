@@ -37,5 +37,4 @@ export const PREFETCH_LRU_CAP = 20;        // max entries in prefetch cache
 
 // ── Throttle tuning ──────────────────────────────────────────────
 export const PRICE_THROTTLE_MS = 1000;          // interval between price-tick filterAndSort checks
-export const MAX_FILTER_SORT_SKIPS = 10;        // max consecutive skips (10 × 1s = 10s max staleness)
 export const THROTTLE_LOG_EVERY = 60;           // cycles between skip-ratio logs (60 × 1s = 60s)

@@ -1,5 +1,4 @@
 export const DEFAULT_FILTERS = {
-  search: '',
   volumeRange: [0, 50_000_000],
   yesPriceRange: [0, 100],
   noPriceRange: [0, 100],

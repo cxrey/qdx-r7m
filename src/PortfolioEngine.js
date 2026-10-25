@@ -4,8 +4,7 @@
  */
 
 import { withTimeout, TIMEOUT_DATA_API } from './fetchUtils';
-
-const DATA_API = '/data-api';
+import { DATA_API } from './apiConfig';
 
 // ── localStorage keys (grouped at top for visibility) ──
 const MANUAL_KEY = 'polymarket-portfolio-manual';

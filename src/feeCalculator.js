@@ -15,6 +15,8 @@
  * Fee parameters come from the live per-market feeSchedule when available —
  * every fee-enabled Gamma market carries { rate, exponent, rebateRate,
  * takerOnly } — with FEE_PARAMS as the fallback for markets without one.
+ * resolveFeeParams() combines both (plus feesEnabled) into one feeParams
+ * object, resolved once in processMarket and passed to every calculator.
  */
 
 // Fallback fee parameters by Gamma category slug.
@@ -71,36 +73,23 @@ export const FEETYPE_TO_FEE_SLUG = {
 };
 
 /**
- * Normalize a live Gamma feeSchedule object ({ rate, exponent, rebateRate })
- * to our internal param shape. Returns null when absent or malformed so
- * callers fall back to the category table.
+ * Normalize a raw Gamma feeSchedule ({ rate, exponent, rebateRate }) to our
+ * internal param shape. Returns null when absent or malformed so callers
+ * fall back to the category table.
  */
 export function normalizeFeeSchedule(feeSchedule) {
   if (!feeSchedule || typeof feeSchedule !== 'object') return null;
-  // Accept an already-normalized object (processed markets store this shape)
-  if (feeSchedule.feeRate != null && feeSchedule.rate == null) {
-    const feeRate = Number(feeSchedule.feeRate);
-    if (!isFinite(feeRate) || feeRate < 0) return null;
-    return {
-      feeRate,
-      exponent: isFinite(Number(feeSchedule.exponent)) ? Number(feeSchedule.exponent) : 1,
-      makerRebatePct: isFinite(Number(feeSchedule.makerRebatePct)) ? Number(feeSchedule.makerRebatePct) : 0,
-    };
-  }
   const rate = Number(feeSchedule.rate);
-  if (!isFinite(rate) || rate < 0) return null;
+  if (feeSchedule.rate == null || !isFinite(rate) || rate < 0) return null;
   const exponent = isFinite(Number(feeSchedule.exponent)) ? Number(feeSchedule.exponent) : 1;
   const rebate = isFinite(Number(feeSchedule.rebateRate)) ? Number(feeSchedule.rebateRate) : 0;
   return { feeRate: rate, exponent, makerRebatePct: rebate };
 }
 
 /**
- * Get fee parameters. The live per-market feeSchedule wins when present;
- * otherwise the category fallback table (default for unmapped slugs).
+ * Fallback-table fee parameters for a category slug (default for unmapped).
  */
-export function getFeeParams(gammaCategory, feeSchedule) {
-  const live = normalizeFeeSchedule(feeSchedule);
-  if (live) return live;
+export function getFeeParams(gammaCategory) {
   if (!gammaCategory) return FEE_PARAMS['_default'];
   const key = gammaCategory.toLowerCase();
   const params = FEE_PARAMS[key];
@@ -112,27 +101,36 @@ export function getFeeParams(gammaCategory, feeSchedule) {
 }
 
 /**
- * Check if a market is fee-free.
+ * Resolve a market's fee context ONCE into the object every calculator
+ * takes: { feeRate, exponent, makerRebatePct, enabled }.
+ * The live per-market feeSchedule wins over the category table; `enabled`
+ * carries the market's feesEnabled flag.
  */
-export function isFeeFree(gammaCategory, feeSchedule) {
-  const params = getFeeParams(gammaCategory, feeSchedule);
-  return !params || params.feeRate === 0;
+export function resolveFeeParams({ gammaCategory = null, feesEnabled = false, feeSchedule = null } = {}) {
+  const params = normalizeFeeSchedule(feeSchedule) || getFeeParams(gammaCategory);
+  return { ...params, enabled: Boolean(feesEnabled) };
+}
+
+/**
+ * A market is fee-free when fees are disabled OR its rate is zero.
+ * Single definition used by processMarket, FLB, and the UI.
+ */
+export function isFeeFree(feeParams) {
+  return !feeParams?.enabled || !(feeParams.feeRate > 0);
 }
 
 /** Per-share fee in dollars: feeRate × (p(1−p))^exponent. Internal helper. */
-function feePerShare(price, gammaCategory, feesEnabled, feeSchedule) {
-  if (!feesEnabled || price == null || price <= 0 || price >= 1) return 0;
-  const params = getFeeParams(gammaCategory, feeSchedule);
-  if (!params || params.feeRate === 0) return 0;
-  return params.feeRate * Math.pow(price * (1 - price), params.exponent);
+function feePerShare(price, feeParams) {
+  if (isFeeFree(feeParams) || price == null || price <= 0 || price >= 1) return 0;
+  return feeParams.feeRate * Math.pow(price * (1 - price), feeParams.exponent);
 }
 
 /**
  * Fee as a fraction of trade value (for display and Kelly's per-dollar edge).
  * = feePerShare / price. e.g. 0.035 → fees eat 3.5% of the dollars staked.
  */
-export function computeEffectiveFeeRate(price, gammaCategory, feesEnabled, feeSchedule) {
-  const perShare = feePerShare(price, gammaCategory, feesEnabled, feeSchedule);
+export function computeEffectiveFeeRate(price, feeParams) {
+  const perShare = feePerShare(price, feeParams);
   return perShare > 0 ? perShare / price : 0;
 }
 
@@ -144,17 +142,15 @@ export function computeEffectiveFeeRate(price, gammaCategory, feesEnabled, feeSc
  * Pinned to the docs' worked example: crypto at 50¢ → 0.07 × 0.25 × 100
  * = 1.75¢/share ($1.75 per 100 shares).
  */
-export function computeFeePP(price, gammaCategory, feesEnabled, feeSchedule) {
-  return feePerShare(price, gammaCategory, feesEnabled, feeSchedule) * 100;
+export function computeFeePP(price, feeParams) {
+  return feePerShare(price, feeParams) * 100;
 }
 
 /**
  * Maker rebate in probability points.
  */
-export function computeMakerRebatePP(price, gammaCategory, feesEnabled, feeSchedule) {
-  const feePP = computeFeePP(price, gammaCategory, feesEnabled, feeSchedule);
-  const params = getFeeParams(gammaCategory, feeSchedule);
-  return feePP * (params?.makerRebatePct || 0);
+export function computeMakerRebatePP(price, feeParams) {
+  return computeFeePP(price, feeParams) * (feeParams?.makerRebatePct || 0);
 }
 
 /**
@@ -165,13 +161,11 @@ export function computeMakerRebatePP(price, gammaCategory, feesEnabled, feeSched
  *
  * @param {number} price — share price (0-1)
  * @param {number} spread — bid-ask spread in decimal (e.g., 0.02 for 2¢)
- * @param {string} gammaCategory — fee category slug (fallback path)
- * @param {boolean} feesEnabled
- * @param {object} [feeSchedule] — live per-market schedule (authoritative)
+ * @param {object} feeParams — from resolveFeeParams
  * @returns {{ entryFeePP, exitFeePP, roundTripFeePP, spreadCostPP, totalCostPP }}
  */
-export function computeRoundTripCostPP(price, spread, gammaCategory, feesEnabled, feeSchedule) {
-  const entryFeePP = computeFeePP(price, gammaCategory, feesEnabled, feeSchedule);
+export function computeRoundTripCostPP(price, spread, feeParams) {
+  const entryFeePP = computeFeePP(price, feeParams);
   const exitFeePP = entryFeePP;
   const spreadCostPP = spread != null ? spread * 100 : 0;
   return {

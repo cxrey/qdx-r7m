@@ -395,28 +395,19 @@ export default function KellyCalculator({ market, portfolio }) {
   // Convert slider value to YES probability for the engine
   const estProb = side === 'YES' ? sideProb : (1 - sideProb);
 
-  // Fee context — without this, calculateKelly treats every market as
-  // fee-free and oversizes bets on fee-enabled categories. feeSchedule is
-  // the live per-market schedule (authoritative); gammaCategory is the
-  // fallback table key.
-  const feeOptions = useMemo(
-    () => ({
-      gammaCategory: market.gammaCategory,
-      feesEnabled: market.feesEnabled ?? false,
-      feeSchedule: market.feeSchedule ?? null,
-    }),
-    [market.gammaCategory, market.feesEnabled, market.feeSchedule]
-  );
+  // Fee context resolved once in processMarket — without it, calculateKelly
+  // treats every market as fee-free and oversizes bets on fee-enabled categories.
+  const feeParams = market.feeParams ?? null;
 
   // Core calculations
   const kelly = useMemo(
-    () => calculateKelly(estProb, marketPrice, side, feeOptions),
-    [estProb, marketPrice, side, feeOptions]
+    () => calculateKelly(estProb, marketPrice, side, feeParams),
+    [estProb, marketPrice, side, feeParams]
   );
 
   const sensitivity = useMemo(
-    () => calculateSensitivityTable(marketPrice, estProb, side, settings, feeOptions),
-    [marketPrice, estProb, side, settings, feeOptions]
+    () => calculateSensitivityTable(marketPrice, estProb, side, settings, feeParams),
+    [marketPrice, estProb, side, settings, feeParams]
   );
 
   const betDollars = kelly.valid && !kelly.noEdge

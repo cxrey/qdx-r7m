@@ -5,8 +5,11 @@
  * Engine-internal constants remain in their respective files.
  */
 
+// ─── Time ──────────────────────────────────────────────────────────
+export const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
 // ─── Cache TTLs ────────────────────────────────────────────────────
-export const CACHE_TTL_24H = 24 * 60 * 60 * 1000;
+export const CACHE_TTL_24H = MS_PER_DAY;
 export const CACHE_TTL_5M = 5 * 60 * 1000;
 export const CACHE_TTL_POSITIONS = 5 * 60 * 1000;
 

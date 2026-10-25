@@ -162,10 +162,7 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, filt
   // old sort is a different market than row N in the new sort.
   // NOTE: markets.length is intentionally excluded — count changes are handled
   // by react-window's rowCount prop without remounting (preserves scroll position).
-  const listKey = useMemo(() => {
-    const { search, ...filtersWithoutSearch } = filters;
-    return JSON.stringify(filtersWithoutSearch);
-  }, [filters]);
+  const listKey = useMemo(() => JSON.stringify(filters), [filters]);
 
   // Dynamic row height measurement via ResizeObserver.
   // - defaultRowHeight: 44px (normal collapsed row)

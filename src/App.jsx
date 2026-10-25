@@ -13,16 +13,25 @@ import { usePortfolio } from './hooks/usePortfolio';
 import { PortfolioProvider } from './contexts/PortfolioContext';
 import { useExecutionStyle } from './contexts/ExecutionContext';
 import { ALL_CATEGORIES } from './processMarket';
+import { mergePendingPrice } from './utils/pendingPrices';
+import { buildIndexMap, diffPriceSnapshot, shouldRefilter } from './utils/priceSnapshot';
 import { fetchLeaderboard, buildLeaderboardIndex } from './TradeFlowEngine';
 import { filterAndSort } from './utils/filterAndSort';
 import { produce } from 'immer';
 import ErrorBoundary from './components/ErrorBoundary';
-import { MAX_FILTER_SORT_SKIPS, PRICE_THROTTLE_MS, THROTTLE_LOG_EVERY } from './uiConfig';
+import { PRICE_THROTTLE_MS, THROTTLE_LOG_EVERY } from './uiConfig';
 import { DEFAULT_FILTERS } from './filterDefaults';
+
+const NO_FLASHES = {};
+const isEmpty = (obj) => Object.keys(obj).length === 0;
 
 function App() {
   const { rawMarkets, setRawMarkets, loading, error, progress, lastFetch, baseRatesLoading, gammaRateLimited, refresh, baseRatesRef } = useMarkets();
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
+  // Search box text lives outside `filters`: only the debounced value affects
+  // results, so keystrokes must not change `filters` (which would re-run
+  // filterAndSort and collapse the expanded row on every key).
+  const [searchInput, setSearchInput] = useState('');
   const { executionStyle } = useExecutionStyle();
 
   // Ref always points to latest markets array without triggering re-renders
@@ -39,7 +48,13 @@ function App() {
   // subsequent effects in the same commit skip.
   const versionBumpedRef = useRef(false);
   versionBumpedRef.current = false;
-  const skipCountRef = useRef(0);
+  // rawMarkets array the last filterAndSort ran on — the throttle re-filters
+  // whenever the current array differs (every writer produces a new array).
+  const lastFilteredSourceRef = useRef(null);
+  // Live price flashes: {marketId: 'up:<seq>'|'down:<seq>'}, replaced each
+  // throttle tick so they render together with the price they describe.
+  const [priceFlashes, setPriceFlashes] = useState(NO_FLASHES);
+  const flashSeqRef = useRef(0);
   const totalCyclesRef = useRef(0);
   const skippedCyclesRef = useRef(0);
   const [activeTab, setActiveTab] = useState('scanner'); // 'scanner' | 'portfolio'
@@ -48,24 +63,18 @@ function App() {
   // Auto-refresh system
   const {
     autoRefreshEnabled, toggleAutoRefresh, wsStatus,
-    toasts, removeToast, priceFlashes, handleManualRefresh,
+    toasts, removeToast, handleManualRefresh,
     pricesDirtyRef, pendingPriceUpdatesRef,
   } = useAutoRefresh({ rawMarkets, setRawMarkets, baseRatesRef, refresh });
 
-  const debouncedSearch = useDebounce(filters.search, 300);
+  const debouncedSearch = useDebounce(searchInput, 300);
 
   // Portfolio hook
   const portfolio = usePortfolio(rawMarkets);
 
   // Callback for live price updates from order book / price history (detail panel)
   const handleLivePriceUpdate = useCallback((marketId, yesPrice, noPrice) => {
-    const existing = pendingPriceUpdatesRef.current.get(marketId);
-    if (existing) {
-      if (yesPrice != null) existing.yesPrice = yesPrice;
-      if (noPrice != null) existing.noPrice = noPrice;
-    } else {
-      pendingPriceUpdatesRef.current.set(marketId, { yesPrice, noPrice });
-    }
+    mergePendingPrice(pendingPriceUpdatesRef.current, marketId, { yesPrice, noPrice });
     pricesDirtyRef.current = true;
   }, [pendingPriceUpdatesRef, pricesDirtyRef]);
 
@@ -83,15 +92,16 @@ function App() {
 
   // ── marketsVersion: immediate bumps for structural changes ────
 
-  // Bump marketsVersion once per render commit, resetting dirty flag and skip counter.
+  // Bump marketsVersion once per render commit, for structural changes.
   // Deduped by versionBumpedRef so multiple effects in the same commit don't double-bump.
+  // Pending live prices (and their dirty flag) are deliberately left alone:
+  // they are newer than the structural change and the throttle applies them
+  // on its next tick. Clearing them here silently dropped WS updates —
+  // including resolution settlements, which never re-arrive.
   const bumpVersion = useCallback(() => {
     if (versionBumpedRef.current) return;
     versionBumpedRef.current = true;
     setMarketsVersion(v => v + 1);
-    pricesDirtyRef.current = false;
-    skipCountRef.current = 0;
-    pendingPriceUpdatesRef.current.clear();
   }, []);
 
   // Immediate re-filter when markets are added or removed
@@ -137,24 +147,27 @@ function App() {
         skippedCyclesRef.current = 0;
       }
 
-      // Only run filterAndSort if prices changed or max-skip reached
-      if (pricesDirtyRef.current || skipCountRef.current >= MAX_FILTER_SORT_SKIPS) {
-        // Snapshot pending updates and clear ref BEFORE calling setRawMarkets.
-        // React 18 automatic batching defers the updater function — if we clear
-        // the ref after setRawMarkets, the updater sees an empty map.
-        const snapshot = pendingPriceUpdatesRef.current;
-        const hadUpdates = snapshot.size > 0;
-        if (hadUpdates) {
-          pendingPriceUpdatesRef.current = new Map();
-        }
+      // Snapshot pending updates and clear the ref BEFORE calling
+      // setRawMarkets — React batches the updater, so clearing afterwards
+      // would hand it an empty map.
+      const snapshot = pendingPriceUpdatesRef.current;
+      pendingPriceUpdatesRef.current = new Map();
+      pricesDirtyRef.current = false;
 
-        if (hadUpdates) {
+      const base = rawMarketsRef.current;
+      let priceChanged = false;
+      if (snapshot.size > 0) {
+        const baseIdx = buildIndexMap(base);
+        // Flashes are computed against the displayed prices and committed in
+        // the same render as the new prices (one render per tick, and the
+        // cell flashes on the new value, not the old one).
+        const diff = diffPriceSnapshot(base, snapshot, ++flashSeqRef.current, baseIdx);
+        priceChanged = diff.priceChanged;
+        const { flashes } = diff;
+
+        if (priceChanged) {
           setRawMarkets(prev => {
-            const idxMap = new Map();
-            for (let i = 0; i < prev.length; i++) {
-              idxMap.set(prev[i].id, i);
-            }
-
+            const idxMap = prev === base ? baseIdx : buildIndexMap(prev);
             let changed = false;
             const next = produce(prev, draft => {
               for (const [marketId, update] of snapshot) {
@@ -169,23 +182,18 @@ function App() {
                 m.noPrice = newNo;
               }
             });
-
             return changed ? next : prev;
           });
-
-          // Always bump version when we had pending updates.
-          // Since the updater runs asynchronously (React 18 batching), we can't
-          // know here whether `changed` was true. The useMemo downstream is cheap
-          // when the actual data hasn't changed.
-          setMarketsVersion(v => v + 1);
-        } else if (skipCountRef.current >= MAX_FILTER_SORT_SKIPS) {
-          setMarketsVersion(v => v + 1);
         }
+        setPriceFlashes(prev => (isEmpty(flashes) && isEmpty(prev) ? prev : flashes));
+      }
 
-        pricesDirtyRef.current = false;
-        skipCountRef.current = 0;
+      // Re-filter only when there is something new: prices just applied, or
+      // the markets array changed since the last filterAndSort (Tier 3
+      // replace, resolution patch, enrichment). Idle data costs nothing.
+      if (shouldRefilter(priceChanged, base, lastFilteredSourceRef.current)) {
+        setMarketsVersion(v => v + 1);
       } else {
-        skipCountRef.current++;
         skippedCyclesRef.current++;
       }
     }, PRICE_THROTTLE_MS);
@@ -205,30 +213,34 @@ function App() {
     isLookupActive, runLookup, clearLookup,
   } = lookup;
 
-  // Run lookup when debounced search changes (for typed input)
+  // Run lookup when debounced search changes (for typed input), and once
+  // more when markets first load — a link pasted during the initial load
+  // can then be matched against the loaded set. runLookup reads markets
+  // through a ref, so price ticks don't re-trigger this effect.
+  const marketsLoaded = rawMarkets.length > 0;
   useEffect(() => {
     if (debouncedSearch) {
       runLookup(debouncedSearch, false);
     } else {
       clearLookup();
     }
-  }, [debouncedSearch, runLookup, clearLookup]);
+  }, [debouncedSearch, runLookup, clearLookup, marketsLoaded]);
 
   const handleSearchChange = useCallback((e) => {
-    setFilters((f) => ({ ...f, search: e.target.value }));
+    setSearchInput(e.target.value);
   }, []);
 
   const handleSearchPaste = useCallback((e) => {
     e.preventDefault();
     const pasted = (e.clipboardData || window.clipboardData).getData('text');
     const cleaned = pasted.trim().replace(/^["']+|["']+$/g, '');
-    setFilters((f) => ({ ...f, search: cleaned }));
+    setSearchInput(cleaned);
     runLookup(cleaned, true);
   }, [runLookup]);
 
   const handleClearSearch = useCallback(() => {
     clearLookup();
-    setFilters((f) => ({ ...f, search: '' }));
+    setSearchInput('');
   }, [clearLookup]);
 
   // Pre-compute lowercase search text once
@@ -236,6 +248,7 @@ function App() {
 
   // Consolidated single-pass filter + sort (extracted to pure utility)
   const filteredMarkets = useMemo(() => {
+    lastFilteredSourceRef.current = rawMarketsRef.current;
     return filterAndSort({
       markets: rawMarketsRef.current,
       filters,
@@ -292,12 +305,12 @@ function App() {
           <input
             type="text"
             placeholder="Search markets or paste a Polymarket link..."
-            value={filters.search}
+            value={searchInput}
             onChange={handleSearchChange}
             onPaste={handleSearchPaste}
             className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-1.5 pr-8 text-sm text-gray-100 placeholder-gray-500 focus:outline-none focus:border-emerald-500"
           />
-          {filters.search && (
+          {searchInput && (
             <button
               onClick={handleClearSearch}
               className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300 text-sm leading-none"
