@@ -3,11 +3,14 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { renderHook, waitFor } from '@testing-library/react';
 
 vi.mock('../api', () => ({ fetchMarketById: vi.fn() }));
+vi.mock('../dataApi', async (importOriginal) => ({ ...(await importOriginal()), dataApiGet: vi.fn() }));
 
 import { fetchMarketById } from '../api';
+import { dataApiGet } from '../dataApi';
 import { usePortfolio } from '../hooks/usePortfolio';
 
 const MANUAL_KEY = 'polymarket-portfolio-manual';
+const WALLET_KEY = 'polymarket-portfolio-wallet';
 
 // Manual positions save a copy of their market (with its price) when added
 const manual = (marketId, snapshotYes, extra = {}) => ({
@@ -23,8 +26,69 @@ const positionFor = (result, id) => result.current.allPositions.find((p) => Stri
 beforeEach(() => {
   localStorage.clear();
   fetchMarketById.mockReset();
+  dataApiGet.mockReset();
 });
 afterEach(() => { vi.restoreAllMocks(); });
+
+describe('usePortfolio — positions follow live price ticks', () => {
+  // A price tick replaces only the changed market's object (Immer); the
+  // array keeps its length and order.
+  const tick = (markets, id, yesPrice) => markets.map((m) => (m.id === id ? { ...m, yesPrice, noPrice: 1 - yesPrice } : m));
+
+  it('a manual position follows a price tick on its loaded market', async () => {
+    localStorage.setItem(MANUAL_KEY, JSON.stringify([manual('live', 0.3)]));
+    const before = [loaded('live', 0.6), loaded('other', 0.5)];
+    const { result, rerender } = renderHook(({ markets }) => usePortfolio(markets), { initialProps: { markets: before } });
+    expect(positionFor(result, 'live').currentPrice).toBe(0.6);
+
+    rerender({ markets: tick(before, 'live', 0.7) });
+    const pos = positionFor(result, 'live');
+    expect(pos.currentPrice).toBe(0.7);
+    expect(pos.currentValue).toBeCloseTo(70);
+    expect(pos.unrealizedPnl).toBeCloseTo(30);
+  });
+
+  it('a wallet position follows a price tick, not just the 5-minute wallet refresh', async () => {
+    localStorage.setItem(WALLET_KEY, '0x' + '1'.repeat(40));
+    dataApiGet.mockResolvedValue({ ok: true, hasMore: false, rows: [{ token_id: 'live-yes', condition_id: 'c-live', current_size: 10, avg_price: 0.5 }] });
+    const live = { ...loaded('live', 0.6), conditionId: 'c-live', clobTokenIds: ['live-yes', 'live-no'] };
+    const before = [live, loaded('other', 0.5)];
+    const { result, rerender } = renderHook(({ markets }) => usePortfolio(markets), { initialProps: { markets: before } });
+    await waitFor(() => expect(result.current.walletPositions).toHaveLength(1));
+    const walletPos = () => result.current.allPositions.find((p) => p.source === 'wallet');
+    expect(walletPos().currentPrice).toBe(0.6);
+
+    rerender({ markets: tick(before, 'live', 0.8) });
+    expect(walletPos().currentPrice).toBe(0.8);
+    expect(walletPos().currentValue).toBeCloseTo(8);
+    expect(walletPos().unrealizedPnl).toBeCloseTo(3);
+    expect(dataApiGet).toHaveBeenCalledTimes(1); // re-priced locally, no extra request
+  });
+
+  it('a tick on a market nobody holds leaves the portfolio untouched (no re-render work)', () => {
+    localStorage.setItem(MANUAL_KEY, JSON.stringify([manual('live', 0.3)]));
+    const before = [loaded('live', 0.6), loaded('other', 0.5)];
+    const { result, rerender } = renderHook(({ markets }) => usePortfolio(markets), { initialProps: { markets: before } });
+    const portfolioBefore = result.current;
+
+    rerender({ markets: tick(before, 'other', 0.9) });
+    expect(result.current.allPositions).toBe(portfolioBefore.allPositions);
+    expect(result.current).toBe(portfolioBefore);
+  });
+
+  it('price ticks do not re-trigger lookups for unloaded markets', async () => {
+    localStorage.setItem(MANUAL_KEY, JSON.stringify([manual('under-floor', 0.2)]));
+    fetchMarketById.mockResolvedValue(gamma('under-floor', '["0.25", "0.75"]', false));
+    const before = [loaded('a', 0.5)];
+    const { result, rerender } = renderHook(({ markets }) => usePortfolio(markets), { initialProps: { markets: before } });
+    await waitFor(() => expect(positionFor(result, 'under-floor').currentPrice).toBe(0.25));
+
+    rerender({ markets: tick(before, 'a', 0.55) });
+    rerender({ markets: tick(before, 'a', 0.6) });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(fetchMarketById).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe('usePortfolio — manual positions in markets the catalog does not hold', () => {
   it('prices a resolved market from a direct lookup, not the copy saved when it was added', async () => {
