@@ -93,7 +93,8 @@ export async function fetchResolvedMarkets(signal) {
   let hitRateLimit = false;
   let pageCount = 0;
 
-  // Parallel-batch pattern (mirrors fetchAllMarkets in api.js)
+  // Parallel offset batches. NOTE: Gamma 422s offset > 2000, so this stops at
+  // ~2,100 resolved markets (fetchAllMarkets moved to /events/keyset for that reason).
   let consecutiveEmpty = 0; // tracks across batches to detect end-of-data
   while (!done && !hitRateLimit && markets.length < MAX_RESOLVED && pageOffset < MAX_RESOLVED_PAGES) {
     if (signal?.aborted) break;
