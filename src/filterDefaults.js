@@ -1,5 +1,12 @@
+import { CATALOG_MIN_VOLUME } from './engineConfig';
+
+export const VOLUME_FILTER_MAX = 50_000_000;
+
 export const DEFAULT_FILTERS = {
-  volumeRange: [0, 50_000_000],
+  // Starts at the catalog floor, so by default only markets that individually
+  // clear it are shown. Lower-volume markets inside qualifying events are
+  // loaded too and appear when the slider is lowered (its minimum is $0).
+  volumeRange: [CATALOG_MIN_VOLUME, VOLUME_FILTER_MAX],
   yesPriceRange: [0, 100],
   noPriceRange: [0, 100],
   daysLeftRange: [0, 365],

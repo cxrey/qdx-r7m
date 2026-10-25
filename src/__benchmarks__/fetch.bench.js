@@ -22,16 +22,25 @@ const results = [];
 // ── Setup mock fetch ────────────────────────────────────────────
 const PAGE_SIZE = 100;
 
+// Mimics /events/keyset: serves `markets` (one event each) as a cursor chain on
+// the lowest volume band only; the other bands fetchAllMarkets crawls are empty.
+// The cursor is the next start index, so `marketsAt(start)` can build pages lazily.
+function keysetPage(url, totalMarkets, marketsAt) {
+  if (!url.includes('volume_min=100&')) return { events: [], next_cursor: null };
+  const cursorMatch = url.match(/after_cursor=(\d+)/);
+  const start = cursorMatch ? parseInt(cursorMatch[1]) : 0;
+  const end = Math.min(start + PAGE_SIZE, totalMarkets);
+  const events = marketsAt(start, end).map((m, i) => ({ id: `evt-${start + i}`, active: true, markets: [m] }));
+  return { events, next_cursor: end < totalMarkets ? String(end) : null };
+}
+
 function createMockFetch(totalMarkets) {
   const markets = generateMarkets(totalMarkets);
   let callCount = 0;
 
   const mockFetch = async (url) => {
     callCount++;
-    // Parse offset from URL
-    const offsetMatch = url.match(/offset=(\d+)/);
-    const offset = offsetMatch ? parseInt(offsetMatch[1]) : 0;
-    const page = markets.slice(offset, offset + PAGE_SIZE);
+    const page = keysetPage(url, totalMarkets, (start, end) => markets.slice(start, end));
 
     return {
       ok: true,
@@ -84,9 +93,7 @@ try {
     maxConcurrency = Math.max(maxConcurrency, inFlight);
     await new Promise(r => setTimeout(r, 2)); // Minimal async delay
     inFlight--;
-    const offsetMatch = url.match(/offset=(\d+)/);
-    const offset = offsetMatch ? parseInt(offsetMatch[1]) : 0;
-    const page = generateMarkets(Math.min(PAGE_SIZE, Math.max(0, 2000 - offset)), 42);
+    const page = keysetPage(url, 2000, (start, end) => generateMarkets(end - start, 42));
     return { ok: true, status: 200, json: async () => page };
   };
 

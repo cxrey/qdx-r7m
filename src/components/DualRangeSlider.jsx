@@ -30,6 +30,21 @@ export function createScaleMapper(min, max, useLogScale) {
   };
 }
 
+const SUFFIX_MULTIPLIER = { k: 1e3, m: 1e6, b: 1e9 };
+
+/**
+ * Parse a slider box's text into a number. Keeps digits, '.', '-' and a
+ * trailing K/M/B suffix (case-insensitive), ignoring symbols like $ ¢ , and
+ * spaces. Returns NaN when nothing numeric is left.
+ */
+// eslint-disable-next-line react-refresh/only-export-components -- pure helper co-located with its only consumer; tested directly
+export function parseSliderValue(text) {
+  const cleaned = String(text).replace(/[^0-9.kmb-]/gi, '');
+  const match = cleaned.match(/^(-?\d*\.?\d+)([kmb])?$/i);
+  if (!match) return NaN;
+  return Number(match[1]) * (SUFFIX_MULTIPLIER[match[2]?.toLowerCase()] ?? 1);
+}
+
 /**
  * Smart rounding based on magnitude.
  */
@@ -48,7 +63,7 @@ export function smartRound(val, min, max) {
 }
 
 export default function DualRangeSlider({
-  label, min, max, value, onChange, displayFormat, logScale,
+  label, min, max, value, onChange, displayFormat, logScale, hint,
 }) {
   const [lo, hi] = value;
   const useLog = logScale || (max - min > 100_000);
@@ -63,10 +78,10 @@ export default function DualRangeSlider({
     return displayFormat ? displayFormat(v) : String(v);
   }
 
+  // Accepts what the boxes display: "$15K", "1.5M", "50¢", "365". A K/M/B
+  // suffix scales the number — previously "$20K" was read as 20.
   function parseRaw(text) {
-    const cleaned = text.replace(/[^0-9.-]/g, '');
-    if (cleaned === '' || cleaned === '-') return NaN;
-    return Number(cleaned);
+    return parseSliderValue(text);
   }
 
   function clampVal(v) {
@@ -250,6 +265,7 @@ export default function DualRangeSlider({
           onChange={onMaxSlider} onMouseUp={handleDragEnd} onTouchEnd={handleDragEnd}
           className="w-full relative" style={{ marginTop: '12px' }} />
       </div>
+      {hint && <p className="mt-1 text-[10px] leading-snug text-gray-500">{hint}</p>}
     </div>
   );
 }

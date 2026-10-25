@@ -10,11 +10,12 @@ vi.mock('../fetchUtils', () => ({
 // Use real truncateSlugNumerics — it's a pure function with no dependencies
 
 import {
-  fetchAllMarkets, fetchOrderBook, fetchPriceHistory,
+  fetchAllMarkets, fetchCatalog, fetchOrderBook, fetchPriceHistory,
   fetchMarketById, fetchMarketBySlug,
   fetchMarketByConditionId, fetchMarketByTokenId,
 } from '../api';
 import { withTimeout } from '../fetchUtils';
+import { CATALOG_MIN_VOLUME } from '../engineConfig';
 
 let mockFetch;
 
@@ -136,41 +137,123 @@ describe('fetchPriceHistory', () => {
 // ── fetchAllMarkets ────────────────────────────────────────────────
 
 describe('fetchAllMarkets', () => {
-  // Helper: make an events page with n events, each containing marketsPerEvent markets.
-  // Returns the shape of a /events API response: array of event objects with nested markets.
-  function makeEventsPage(nEvents, startEventId = 0, marketsPerEvent = 1) {
+  // volume_min of each band, in the order fetchAllMarkets lists them (highest volume first)
+  const BAND_MINS = ['250000', '80000', '40000', '22000', '15000'];
+
+  // Helper: make n events, each containing marketsPerEvent markets — the shape
+  // of the `events` array in a /events/keyset response.
+  function makeEvents(nEvents, startEventId = 0, marketsPerEvent = 1) {
     return Array.from({ length: nEvents }, (_, i) => {
       const eventId = startEventId + i;
       return {
         id: `evt-${eventId}`,
         slug: `event-${eventId}`,
+        active: true,
         tags: [{ slug: 'crypto', label: 'Crypto' }],
         markets: Array.from({ length: marketsPerEvent }, (_, j) => ({
           id: `m-${eventId}-${j}`,
           question: `Market ${eventId}-${j}`,
+          volume: '20000', // above the $15K catalog floor
         })),
       };
     });
   }
 
-  it('fetches from /events endpoint (not /markets)', async () => {
-    mockFetch.mockResolvedValue(new Response(JSON.stringify([]), { status: 200 }));
+  function keysetResponse(events, nextCursor = null) {
+    return new Response(JSON.stringify({ events, next_cursor: nextCursor }), { status: 200 });
+  }
+
+  const params = (url) => new URL(url, 'http://localhost').searchParams;
+
+  // Helper: fake /events/keyset server. `bands` maps volume_min → array of pages
+  // (each an events array); bands not listed are empty. Cursors are opaque
+  // strings "<volume_min>/<page index>", so cursor propagation is checked for real.
+  function keysetServer(bands) {
+    return async (url) => {
+      const p = params(url);
+      const pages = bands[p.get('volume_min')] || [[]];
+      const cursor = p.get('after_cursor');
+      const idx = cursor ? Number(cursor.split('/')[1]) : 0;
+      const next = idx + 1 < pages.length ? `${p.get('volume_min')}/${idx + 1}` : null;
+      return keysetResponse(pages[idx] ?? [], next);
+    };
+  }
+
+  it('fetches from /events/keyset with the catalog filters and no offset', async () => {
+    mockFetch.mockImplementation(keysetServer({}));
     await fetchAllMarkets(vi.fn());
     const url = mockFetch.mock.calls[0][0];
-    expect(url).toContain('/events?');
-    expect(url).not.toContain('/markets?');
+    expect(url).toContain('/gamma-api/events/keyset?');
+    const p = params(url);
+    expect(p.get('limit')).toBe('100');
+    expect(p.get('closed')).toBe('false');
+    expect(p.get('order')).toBe('volume');
+    expect(p.get('ascending')).toBe('false');
+    expect(p.has('offset')).toBe(false); // keyset rejects offset with 422
+    expect(p.has('after_cursor')).toBe(false); // first page of a chain has no cursor
+  });
+
+  it('starts one cursor chain per volume band, covering volume ≥ the catalog floor without gaps', async () => {
+    mockFetch.mockImplementation(keysetServer({}));
+    await fetchAllMarkets(vi.fn());
+    expect(mockFetch).toHaveBeenCalledTimes(BAND_MINS.length);
+    const bands = mockFetch.mock.calls.map(([url]) => {
+      const p = params(url);
+      return [Number(p.get('volume_min')), p.has('volume_max') ? Number(p.get('volume_max')) : Infinity];
+    }).sort((a, b) => b[0] - a[0]);
+    expect(bands[0][1]).toBe(Infinity); // top band is open-ended
+    expect(bands[bands.length - 1][0]).toBe(CATALOG_MIN_VOLUME);
+    for (let i = 1; i < bands.length; i++) {
+      expect(bands[i][1]).toBe(bands[i - 1][0]); // each band's max is the next band's min
+    }
+  });
+
+  it('passes each next_cursor as after_cursor (URL-encoded) to the same band', async () => {
+    const cursor = 'abc+/=';
+    mockFetch.mockImplementation(async (url) => {
+      const p = params(url);
+      if (p.get('volume_min') !== '40000') return keysetResponse([]);
+      if (!p.has('after_cursor')) return keysetResponse(makeEvents(100, 0), cursor);
+      return keysetResponse(makeEvents(30, 100));
+    });
+    const result = await fetchAllMarkets(vi.fn());
+    expect(result.length).toBe(130);
+    const followUps = mockFetch.mock.calls.map(([url]) => url).filter((url) => url.includes('after_cursor='));
+    expect(followUps).toHaveLength(1);
+    expect(followUps[0]).toContain(`after_cursor=${encodeURIComponent(cursor)}`);
+    expect(params(followUps[0]).get('volume_min')).toBe('40000');
+  });
+
+  it('follows each band to the end of its cursor chain and stops', async () => {
+    mockFetch.mockImplementation(keysetServer({
+      250000: [makeEvents(100, 0), makeEvents(100, 100), makeEvents(20, 200)],
+      15000: [makeEvents(100, 1000), makeEvents(5, 1100)],
+    }));
+    const result = await fetchAllMarkets(vi.fn());
+    // 3 pages + 2 pages + 1 empty page for each of the 3 other bands
+    expect(mockFetch).toHaveBeenCalledTimes(8);
+    expect(result.length).toBe(325);
+  });
+
+  it('stops a band on an empty page even if a cursor is returned', async () => {
+    mockFetch.mockImplementation(async () => keysetResponse([], 'still-a-cursor'));
+    const result = await fetchAllMarkets(vi.fn());
+    expect(mockFetch).toHaveBeenCalledTimes(BAND_MINS.length);
+    expect(result).toEqual([]);
+  });
+
+  it('returns markets in descending band order', async () => {
+    mockFetch.mockImplementation(keysetServer({
+      15000: [makeEvents(1, 400)],
+      80000: [makeEvents(1, 100)],
+      250000: [makeEvents(1, 0)],
+    }));
+    const result = await fetchAllMarkets(vi.fn());
+    expect(result.map((m) => m.id)).toEqual(['m-0-0', 'm-100-0', 'm-400-0']);
   });
 
   it('flattens nested markets from events and injects parent event data', async () => {
-    let callCount = 0;
-    mockFetch.mockImplementation(async () => {
-      callCount++;
-      if (callCount === 1) {
-        // 1 event with 3 nested markets
-        return new Response(JSON.stringify(makeEventsPage(1, 0, 3)), { status: 200 });
-      }
-      return new Response(JSON.stringify([]), { status: 200 });
-    });
+    mockFetch.mockImplementation(keysetServer({ 250000: [makeEvents(1, 0, 3)] }));
     const result = await fetchAllMarkets(vi.fn());
     expect(result.length).toBe(3);
     // Each market should have events[0] injected with parent event data (tags, slug)
@@ -180,237 +263,280 @@ describe('fetchAllMarkets', () => {
     expect(result[0].events[0].markets).toBeUndefined();
   });
 
-  it('fetches in batches of 5 (CONCURRENCY)', async () => {
-    let callCount = 0;
-    mockFetch.mockImplementation(async () => {
-      callCount++;
-      if (callCount <= 5) {
-        return new Response(JSON.stringify(makeEventsPage(100, (callCount - 1) * 100)), { status: 200 });
-      }
-      // Second batch: return empty to signal done
-      return new Response(JSON.stringify([]), { status: 200 });
-    });
-    await fetchAllMarkets(vi.fn());
-    expect(callCount).toBe(10); // 2 batches of 5
+  it('dedupes an event returned by two bands (boundary / volume moved mid-crawl)', async () => {
+    mockFetch.mockImplementation(keysetServer({
+      250000: [makeEvents(2, 0)],
+      80000: [makeEvents(2, 1)], // evt-1 overlaps
+    }));
+    const result = await fetchAllMarkets(vi.fn());
+    expect(result.map((m) => m.id)).toEqual(['m-0-0', 'm-1-0', 'm-2-0']);
   });
 
-  it('calls onProgress with cumulative market count after each batch', async () => {
+  it('drops events marked inactive (keyset has no active filter)', async () => {
+    const events = makeEvents(2, 0);
+    events[1].active = false;
+    mockFetch.mockImplementation(keysetServer({ 250000: [events] }));
+    const result = await fetchAllMarkets(vi.fn());
+    expect(result.map((m) => m.id)).toEqual(['m-0-0']);
+  });
+
+  it('calls onProgress with the cumulative market count across bands', async () => {
     const onProgress = vi.fn();
-    let callCount = 0;
-    mockFetch.mockImplementation(async () => {
-      callCount++;
-      if (callCount <= 5) {
-        // 100 events × 1 market each = 100 markets per page
-        return new Response(JSON.stringify(makeEventsPage(100, (callCount - 1) * 100)), { status: 200 });
-      }
-      return new Response(JSON.stringify([]), { status: 200 });
-    });
+    mockFetch.mockImplementation(keysetServer({
+      250000: [makeEvents(100, 0), makeEvents(100, 100)],
+      22000: [makeEvents(50, 500, 2)],
+    }));
     await fetchAllMarkets(onProgress);
-    expect(onProgress).toHaveBeenCalledWith(500); // 5 pages × 100 markets
-  });
-
-  it('stops when a 200 page returns empty array', async () => {
-    let callCount = 0;
-    mockFetch.mockImplementation(async () => {
-      callCount++;
-      if (callCount === 1) return new Response(JSON.stringify(makeEventsPage(100)), { status: 200 });
-      return new Response(JSON.stringify([]), { status: 200 });
-    });
-    const result = await fetchAllMarkets(vi.fn());
-    expect(result.length).toBe(100);
-  });
-
-  it('stops when a page returns fewer events than reference', async () => {
-    let callCount = 0;
-    mockFetch.mockImplementation(async () => {
-      callCount++;
-      if (callCount === 1) return new Response(JSON.stringify(makeEventsPage(100, 0)), { status: 200 });
-      if (callCount === 2) return new Response(JSON.stringify(makeEventsPage(100, 100)), { status: 200 });
-      if (callCount === 3) return new Response(JSON.stringify(makeEventsPage(50, 200)), { status: 200 }); // partial
-      if (callCount === 4) return new Response(JSON.stringify(makeEventsPage(100, 300)), { status: 200 });
-      if (callCount === 5) return new Response(JSON.stringify(makeEventsPage(100, 400)), { status: 200 });
-      return new Response(JSON.stringify([]), { status: 200 });
-    });
-    const result = await fetchAllMarkets(vi.fn());
-    // Should collect all from first batch (partial event page triggers done flag)
-    expect(result.length).toBe(450);
-  });
-
-  it('collects data from ALL pages in batch even when one returns 429', async () => {
-    let callCount = 0;
-    mockFetch.mockImplementation(async () => {
-      callCount++;
-      if (callCount === 3) return new Response(JSON.stringify([]), { status: 429 });
-      if (callCount <= 5) {
-        return new Response(JSON.stringify(makeEventsPage(100, (callCount - 1) * 100)), { status: 200 });
-      }
-      return new Response(JSON.stringify([]), { status: 200 });
-    });
-    const result = await fetchAllMarkets(vi.fn());
-    // Pages 1,2,4,5 succeeded (400 markets); page 3 was 429
-    expect(result.length).toBe(400);
-  });
-
-  it('stops fetching new batches after 429', async () => {
-    let callCount = 0;
-    mockFetch.mockImplementation(async () => {
-      callCount++;
-      if (callCount === 3) return new Response(JSON.stringify([]), { status: 429 });
-      return new Response(JSON.stringify(makeEventsPage(100, (callCount - 1) * 100)), { status: 200 });
-    });
-    await fetchAllMarkets(vi.fn());
-    // Only the first batch of 5 should run — no second batch
-    expect(callCount).toBe(5);
-  });
-
-  it('stops when signal is aborted', async () => {
-    const controller = new AbortController();
-    let callCount = 0;
-    mockFetch.mockImplementation(async () => {
-      callCount++;
-      if (callCount === 3) controller.abort();
-      if (callCount <= 5) {
-        return new Response(JSON.stringify(makeEventsPage(100, (callCount - 1) * 100)), { status: 200 });
-      }
-      return new Response(JSON.stringify([]), { status: 200 });
-    });
-    // withTimeout returns the callerSignal — so the AbortError propagates
-    // But fetchAllMarkets catches AbortError and breaks
-    const result = await fetchAllMarkets(vi.fn(), controller.signal);
-    // All 5 concurrent pages complete before abort check; loop breaks before batch 2
-    expect(result.length).toBe(500);
-  });
-
-  it('returns empty array when first page is empty', async () => {
-    mockFetch.mockResolvedValue(new Response(JSON.stringify([]), { status: 200 }));
-    const result = await fetchAllMarkets(vi.fn());
-    expect(result).toEqual([]);
-  });
-
-  it('handles mixed success/failure in a batch', async () => {
-    let callCount = 0;
-    mockFetch.mockImplementation(async () => {
-      callCount++;
-      if (callCount === 2) return new Response('Server Error', { status: 500 });
-      if (callCount === 4) throw new TypeError('network');
-      if (callCount <= 5) {
-        return new Response(JSON.stringify(makeEventsPage(100, (callCount - 1) * 100)), { status: 200 });
-      }
-      return new Response(JSON.stringify([]), { status: 200 });
-    });
-    const result = await fetchAllMarkets(vi.fn());
-    // Pages 1,3,5 succeed (300 markets); page 2 is 500, page 4 throws TypeError
-    expect(result.length).toBe(300);
-  });
-
-  it('handles network TypeError in a batch page', async () => {
-    let callCount = 0;
-    mockFetch.mockImplementation(async () => {
-      callCount++;
-      if (callCount === 2) throw new TypeError('fetch failed');
-      if (callCount <= 5) {
-        return new Response(JSON.stringify(makeEventsPage(100, (callCount - 1) * 100)), { status: 200 });
-      }
-      return new Response(JSON.stringify([]), { status: 200 });
-    });
-    const result = await fetchAllMarkets(vi.fn());
-    // Pages 1,3,4,5 succeed (400 markets); page 2 throws TypeError (0 markets)
-    expect(result.length).toBe(400);
+    const counts = onProgress.mock.calls.map(([n]) => n);
+    expect(counts).toEqual([...counts].sort((a, b) => a - b)); // monotonic
+    expect(counts[counts.length - 1]).toBe(300); // 200 + 50 events × 2 markets
   });
 
   it('does NOT call onProgress when no data collected', async () => {
     const onProgress = vi.fn();
-    mockFetch.mockResolvedValue(new Response(JSON.stringify([]), { status: 200 }));
+    mockFetch.mockImplementation(keysetServer({}));
     await fetchAllMarkets(onProgress);
     expect(onProgress).not.toHaveBeenCalled();
   });
 
-  it('URL includes required query params', async () => {
-    mockFetch.mockResolvedValue(new Response(JSON.stringify([]), { status: 200 }));
-    await fetchAllMarkets(vi.fn());
-    const url = mockFetch.mock.calls[0][0];
-    expect(url).toContain('/events?');
-    expect(url).toContain('active=true');
-    expect(url).toContain('closed=false');
-    expect(url).toContain('volume_num_min=100');
-    expect(url).toContain('limit=100');
+  it('accepts a null onProgress (Tier 3 background refresh)', async () => {
+    mockFetch.mockImplementation(keysetServer({ 250000: [makeEvents(3, 0)] }));
+    const result = await fetchAllMarkets(null);
+    expect(result.length).toBe(3);
   });
 
-  it('uses correct offset progression across pages', async () => {
-    let callCount = 0;
-    mockFetch.mockImplementation(async () => {
-      callCount++;
-      if (callCount <= 5) {
-        return new Response(JSON.stringify(makeEventsPage(100, (callCount - 1) * 100)), { status: 200 });
-      }
-      return new Response(JSON.stringify([]), { status: 200 });
+  it('on 429 stops every band and keeps what was already fetched', async () => {
+    const server = keysetServer({
+      250000: [makeEvents(100, 0), makeEvents(100, 100), makeEvents(100, 200)],
+      80000: [makeEvents(100, 1000), makeEvents(100, 1100)],
     });
-    await fetchAllMarkets(vi.fn());
-    // First batch: offsets 0, 100, 200, 300, 400
-    expect(mockFetch.mock.calls[0][0]).toContain('offset=0');
-    expect(mockFetch.mock.calls[1][0]).toContain('offset=100');
-    expect(mockFetch.mock.calls[2][0]).toContain('offset=200');
-    expect(mockFetch.mock.calls[3][0]).toContain('offset=300');
-    expect(mockFetch.mock.calls[4][0]).toContain('offset=400');
-  });
-
-  it('returns empty array without throwing on AbortError mid-batch', async () => {
-    let callCount = 0;
-    mockFetch.mockImplementation(async () => {
-      callCount++;
-      if (callCount === 3) {
-        throw new DOMException('Aborted', 'AbortError');
-      }
-      return new Response(JSON.stringify(makeEventsPage(100, (callCount - 1) * 100)), { status: 200 });
+    mockFetch.mockImplementation(async (url) => {
+      // The 15000 band's second page is rate limited
+      if (params(url).get('after_cursor') === '80000/1') return new Response('', { status: 429 });
+      return server(url);
     });
-    // Promise.all rejects on AbortError → catch breaks → no results collected
     const result = await fetchAllMarkets(vi.fn());
+    // Round 1: 5 first pages; round 2: 50000/1 and 15000/1 (429). No round 3.
+    expect(mockFetch).toHaveBeenCalledTimes(7);
+    expect(mockFetch.mock.calls.some(([url]) => url.includes('after_cursor=250000%2F2'))).toBe(false);
+    // 50000 band pages 0 and 1, 15000 band page 0
+    expect(result.length).toBe(300);
+    // 429 is never retried
+    expect(mockFetch.mock.calls.filter(([url]) => url.includes('after_cursor=80000%2F1'))).toHaveLength(1);
+  });
+
+  it('stops on caller abort and returns the pages fetched before it', async () => {
+    const controller = new AbortController();
+    const server = keysetServer({
+      250000: [makeEvents(100, 0), makeEvents(100, 100), makeEvents(100, 200)],
+      80000: [makeEvents(100, 1000), makeEvents(100, 1100)],
+    });
+    mockFetch.mockImplementation(async (url, init) => {
+      if (init?.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      const res = await server(url);
+      if (params(url).get('after_cursor') === '250000/1') controller.abort();
+      return res;
+    });
+    const result = await fetchAllMarkets(vi.fn(), controller.signal);
+    // No band starts a page after the abort
+    const afterAbort = mockFetch.mock.calls.findIndex(([url]) => url.includes('after_cursor=250000%2F1'));
+    expect(mockFetch.mock.calls.length).toBeLessThanOrEqual(afterAbort + 2);
+    expect(mockFetch.mock.calls.some(([url]) => url.includes('after_cursor=250000%2F2'))).toBe(false);
+    // Round 1 pages (50000/0 and 15000/0) survive; nothing is thrown
+    expect(result.map((m) => m.id)).toContain('m-0-0');
+    expect(result.map((m) => m.id)).toContain('m-1000-0');
+  });
+
+  it('returns without fetching when the signal is already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    mockFetch.mockImplementation(keysetServer({ 250000: [makeEvents(1, 0)] }));
+    const result = await fetchAllMarkets(vi.fn(), controller.signal);
+    expect(mockFetch).not.toHaveBeenCalled();
     expect(result).toEqual([]);
   });
 
-  it('caps at MAX_PAGES (200) and does not loop forever', async () => {
-    let callCount = 0;
-    mockFetch.mockImplementation(async () => {
-      callCount++;
-      // Always return a full page — never triggers empty-page stop
-      return new Response(JSON.stringify(makeEventsPage(100, (callCount - 1) * 100)), { status: 200 });
+  it('retries a timed-out page once (timeout abort is not a caller abort)', async () => {
+    const server = keysetServer({ 250000: [makeEvents(100, 0), makeEvents(10, 100)] });
+    let timedOut = false;
+    mockFetch.mockImplementation(async (url) => {
+      if (!timedOut && params(url).get('after_cursor') === '250000/1') {
+        timedOut = true;
+        throw new DOMException('signal timed out', 'AbortError');
+      }
+      return server(url);
+    });
+    const result = await fetchAllMarkets(vi.fn(), new AbortController().signal);
+    expect(result.length).toBe(110);
+    expect(mockFetch.mock.calls.filter(([url]) => url.includes('after_cursor=250000%2F1'))).toHaveLength(2);
+  });
+
+  it('retries a 5xx / network failure once, then ends only that band', async () => {
+    const server = keysetServer({
+      250000: [makeEvents(100, 0), makeEvents(100, 100)],
+      15000: [makeEvents(100, 1000), makeEvents(100, 1100)],
+    });
+    mockFetch.mockImplementation(async (url) => {
+      const cursor = params(url).get('after_cursor');
+      if (cursor === '250000/1') return new Response('Server Error', { status: 500 });
+      if (cursor === '15000/1' && !mockFetch.mock.calls.slice(0, -1).some(([u]) => u === url)) {
+        throw new TypeError('fetch failed'); // first attempt only
+      }
+      return server(url);
     });
     const result = await fetchAllMarkets(vi.fn());
-    // MAX_PAGES=200, CONCURRENCY=5 → 40 iterations × 5 = 200 fetch calls
-    // Key assertion: it stops, not loops forever
-    expect(callCount).toBe(200);
+    expect(mockFetch.mock.calls.filter(([url]) => url.includes('after_cursor=250000%2F1'))).toHaveLength(2);
+    // 50000 band: page 0 only; 100 band: both pages after the retry
+    expect(result.length).toBe(300);
+  });
+
+  it('ends a band on a 4xx without retrying, other bands continue', async () => {
+    const server = keysetServer({
+      250000: [makeEvents(100, 0), makeEvents(100, 100)],
+      15000: [makeEvents(100, 1000), makeEvents(100, 1100)],
+    });
+    mockFetch.mockImplementation(async (url) => {
+      if (params(url).get('after_cursor') === '250000/1') {
+        return new Response('{"type":"validation error"}', { status: 422 });
+      }
+      return server(url);
+    });
+    const result = await fetchAllMarkets(vi.fn());
+    expect(mockFetch.mock.calls.filter(([url]) => url.includes('after_cursor=250000%2F1'))).toHaveLength(1);
+    expect(result.length).toBe(300);
+  });
+
+  it('caps at MAX_PAGES (200) total across bands and does not loop forever', async () => {
+    let eventId = 0;
+    mockFetch.mockImplementation(async (url) => {
+      // Always a full page with a cursor — never triggers end-of-band
+      const events = makeEvents(100, eventId);
+      eventId += 100;
+      return keysetResponse(events, `${params(url).get('volume_min')}/1`);
+    });
+    const result = await fetchAllMarkets(vi.fn());
+    expect(mockFetch).toHaveBeenCalledTimes(200);
     expect(result.length).toBe(20_000);
   });
 
+  // ── Completeness (Tier 3 must not treat an incomplete crawl as authoritative) ──
+
+  it('fetchCatalog reports complete when every band reaches the end of its chain', async () => {
+    mockFetch.mockImplementation(keysetServer({ 250000: [makeEvents(100, 0), makeEvents(5, 100)], 15000: [makeEvents(3, 900)] }));
+    const { markets, complete } = await fetchCatalog(vi.fn());
+    expect(complete).toBe(true);
+    expect(markets).toHaveLength(108);
+  });
+
+  it('fetchCatalog reports incomplete when a band ends on a failed page', async () => {
+    const server = keysetServer({ 250000: [makeEvents(100, 0), makeEvents(100, 100)] });
+    mockFetch.mockImplementation(async (url) => (params(url).get('after_cursor') === '250000/1'
+      ? new Response('{"type":"validation error"}', { status: 422 })
+      : server(url)));
+    const { markets, complete } = await fetchCatalog(vi.fn());
+    expect(complete).toBe(false);
+    expect(markets).toHaveLength(100); // what it did reach is still returned
+  });
+
+  it('fetchCatalog reports incomplete when rate limited', async () => {
+    const server = keysetServer({ 250000: [makeEvents(100, 0), makeEvents(100, 100)] });
+    mockFetch.mockImplementation(async (url) => (params(url).get('after_cursor') === '250000/1'
+      ? new Response('Too Many Requests', { status: 429 })
+      : server(url)));
+    expect((await fetchCatalog(vi.fn())).complete).toBe(false);
+  });
+
+  it('fetchCatalog reports incomplete when the page cap stops a band', async () => {
+    mockFetch.mockImplementation(async (url) => keysetResponse(makeEvents(1, Math.random() * 1e9 | 0), `${params(url).get('volume_min')}/1`));
+    expect((await fetchCatalog(vi.fn())).complete).toBe(false);
+  });
+
+  it('fetchAllMarkets still returns the markets array (unchanged contract)', async () => {
+    mockFetch.mockImplementation(keysetServer({ 250000: [makeEvents(4, 0)] }));
+    const markets = await fetchAllMarkets(vi.fn());
+    expect(Array.isArray(markets)).toBe(true);
+    expect(markets).toHaveLength(4);
+  });
+
+  it('progress never overshoots the final total (duplicates and inactive events excluded)', async () => {
+    const onProgress = vi.fn();
+    const shared = makeEvents(10, 0);                       // returned by two bands
+    const inactive = makeEvents(5, 500).map((e) => ({ ...e, active: false }));
+    mockFetch.mockImplementation(keysetServer({ 250000: [shared], 80000: [shared], 15000: [inactive] }));
+    const markets = await fetchAllMarkets(onProgress);
+    const last = onProgress.mock.calls.at(-1)[0];
+    expect(markets).toHaveLength(10);
+    expect(last).toBe(10);
+    expect(Math.max(...onProgress.mock.calls.map(([n]) => n))).toBe(10);
+  });
+
+  it('pauses before retrying a failed page instead of retrying instantly', async () => {
+    vi.useFakeTimers();
+    try {
+      const server = keysetServer({ 250000: [makeEvents(2, 0)] });
+      let failed = false;
+      mockFetch.mockImplementation(async (url) => {
+        if (!failed && params(url).get('volume_min') === '250000') { failed = true; return new Response('err', { status: 503 }); }
+        return server(url);
+      });
+      const done = fetchAllMarkets(vi.fn());
+      await vi.advanceTimersByTimeAsync(500);
+      const callsAt500 = mockFetch.mock.calls.filter(([u]) => params(u).get('volume_min') === '250000').length;
+      await vi.advanceTimersByTimeAsync(600);
+      const markets = await done;
+      expect(callsAt500).toBe(1);                  // retry not sent yet at 500ms
+      expect(markets).toHaveLength(2);             // retried after the pause and succeeded
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // ── Catalog volume floor ──
+
+  it('the floor is event-level: every market in a qualifying event is loaded, whatever its own volume', async () => {
+    const event = {
+      id: 'evt-mixed', slug: 'mixed', active: true,
+      markets: [
+        { id: 'big', question: 'Big', volume: '250000' },
+        { id: 'small', question: 'Small', volume: '1200' },
+        { id: 'none', question: 'No volume yet' },
+      ],
+    };
+    mockFetch.mockImplementation(keysetServer({ 250000: [[event]] }));
+    const markets = await fetchAllMarkets(vi.fn());
+    expect(markets.map((m) => m.id)).toEqual(['big', 'small', 'none']);
+  });
+
+  it('never requests events below the floor (bottom band starts at CATALOG_MIN_VOLUME)', async () => {
+    mockFetch.mockImplementation(keysetServer({}));
+    await fetchAllMarkets(vi.fn());
+    const mins = mockFetch.mock.calls.map(([url]) => Number(params(url).get('volume_min')));
+    expect(Math.min(...mins)).toBe(CATALOG_MIN_VOLUME);
+  });
+
   it('handles events with multiple markets (fan-out)', async () => {
-    let callCount = 0;
-    mockFetch.mockImplementation(async () => {
-      callCount++;
-      if (callCount === 1) {
-        // 10 events × 5 markets each = 50 markets
-        return new Response(JSON.stringify(makeEventsPage(10, 0, 5)), { status: 200 });
-      }
-      return new Response(JSON.stringify([]), { status: 200 });
-    });
+    mockFetch.mockImplementation(keysetServer({ 250000: [makeEvents(10, 0, 5)] }));
     const result = await fetchAllMarkets(vi.fn());
     expect(result.length).toBe(50);
   });
 
   it('skips events with no markets array', async () => {
-    let callCount = 0;
-    mockFetch.mockImplementation(async () => {
-      callCount++;
-      if (callCount === 1) {
-        return new Response(JSON.stringify([
-          { id: 'evt-1', slug: 'no-markets' }, // missing markets array
-          { id: 'evt-2', slug: 'with-markets', markets: [{ id: 'm-1' }] },
-        ]), { status: 200 });
-      }
-      return new Response(JSON.stringify([]), { status: 200 });
-    });
+    mockFetch.mockImplementation(keysetServer({
+      250000: [[
+        { id: 'evt-1', slug: 'no-markets' }, // missing markets array
+        { id: 'evt-2', slug: 'with-markets', markets: [{ id: 'm-1', volume: '20000' }] },
+      ]],
+    }));
     const result = await fetchAllMarkets(vi.fn());
     expect(result.length).toBe(1);
     expect(result[0].id).toBe('m-1');
+  });
+
+  it('treats a response without an events array as an empty page', async () => {
+    mockFetch.mockImplementation(async () => new Response(JSON.stringify([]), { status: 200 }));
+    const result = await fetchAllMarkets(vi.fn());
+    expect(mockFetch).toHaveBeenCalledTimes(BAND_MINS.length);
+    expect(result).toEqual([]);
   });
 });
 

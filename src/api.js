@@ -4,13 +4,36 @@ import { throwIfRateLimited } from './clobErrorHandler';
 import { parseGammaMarkets, parseOrderBook } from './schemas';
 
 import { GAMMA_API, CLOB_API } from './apiConfig';
+import { CATALOG_MIN_VOLUME } from './engineConfig';
 
 const PAGE_SIZE = 100;
-const CONCURRENCY = 5;
-const MAX_PAGES = 200; // Safety cap: 200 pages × 100 events/page = 20K events max (markets are nested per event, so more markets)
+const MAX_PAGES = 200; // Safety cap across all bands: 200 pages × 100 events/page = 20K events max (markets are nested per event, so more markets)
+const PAGE_ATTEMPTS = 2; // One retry for a timed-out / 5xx / network-failed page — a cursor chain can't skip a page
+const RETRY_DELAY_MS = 1_000; // Pause before that retry, so a struggling server isn't hit again instantly
+
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Gamma's offset pagination rejects offset > 2000 with 422 ("use /events/keyset
+// for deeper pagination"), which capped the catalog at ~2,100 events. The crawl
+// uses /events/keyset cursors instead. A cursor chain is strictly sequential, so
+// to keep the parallelism of the old 5-way offset batches, the catalog is split
+// into volume bands with one cursor chain each. Edges are rough quantiles of
+// active events at or above the catalog floor (Oct 2026); uneven bands only
+// cost wall-clock time, never coverage. Bands are listed in descending volume,
+// so concatenating them preserves the global order=volume desc ordering. The
+// bottom band starts at CATALOG_MIN_VOLUME: events below it (by TOTAL event
+// volume) are not loaded; all markets inside qualifying events are.
+const VOLUME_BANDS = [
+  [250_000, null],
+  [80_000, 250_000],
+  [40_000, 80_000],
+  [22_000, 40_000],
+  [CATALOG_MIN_VOLUME, 22_000],
+];
+
 
 // ── Request-level timeouts ──────────────────────────────────────
-// Prevents hung fetches from blocking concurrent batches indefinitely.
+// Prevents hung fetches from blocking a band's cursor chain indefinitely.
 // TIMEOUT_GAMMA_PAGE (10s) imported from fetchUtils.js
 const TIMEOUT_ORDER_BOOK = 5_000;    // 5s per order book request
 const TIMEOUT_PRICE_HISTORY = 8_000; // 8s per price history request
@@ -34,107 +57,118 @@ export function flattenEventsToMarkets(events) {
   return markets;
 }
 
-export async function fetchAllMarkets(onProgress, signal) {
-  const startTime = Date.now();
-  let allRaw = [];
-  let pageOffset = 0;
-  let done = false;
-  let hitRateLimit = false;
+/**
+ * Follow one volume band's keyset cursor chain to the end.
+ * Pushes each page's events into `events` (so partial results survive a stop)
+ * and shares the page budget / rate-limit flag with the other bands via `crawl`.
+ *
+ * @returns {Promise<boolean>} true only if the band reached the natural end of
+ *   its cursor chain. false means it stopped early (failed page, rate limit,
+ *   page cap, abort), so its markets are an incomplete set.
+ * Throws only on caller abort.
+ */
+async function crawlVolumeBand([volumeMin, volumeMax], events, crawl, signal) {
+  let cursor = null;
+  while (crawl.pages < MAX_PAGES && !crawl.rateLimited) {
+    if (signal?.aborted) return false;
+    crawl.pages++;
 
-  while (!done && !hitRateLimit && pageOffset < MAX_PAGES) {
-    if (signal?.aborted) break;
+    let url = `${GAMMA_API}/events/keyset?limit=${PAGE_SIZE}&closed=false&order=volume&ascending=false&volume_min=${volumeMin}`;
+    if (volumeMax != null) url += `&volume_max=${volumeMax}`;
+    if (cursor) url += `&after_cursor=${encodeURIComponent(cursor)}`;
 
-    // Build a batch of CONCURRENCY page fetches.
-    // Fetches from /events (not /markets) to get event-level tags for fee category resolution.
-    // Each event contains nested markets which are flattened after fetch.
-    const batch = [];
-    for (let i = 0; i < CONCURRENCY && (pageOffset + i) < MAX_PAGES; i++) {
-      const offset = (pageOffset + i) * PAGE_SIZE;
-      const url = `${GAMMA_API}/events?limit=${PAGE_SIZE}&offset=${offset}&active=true&closed=false&order=volume&ascending=false&volume_num_min=100`;
-      batch.push(
-        fetch(url, { signal: withTimeout(signal, TIMEOUT_GAMMA_PAGE) })
-          .then(async (res) => {
-            if (res.status === 429) return { status: 429, events: [], eventCount: 0, marketCount: 0 };
-            if (!res.ok) return { status: res.status, events: [], eventCount: 0, marketCount: 0 };
-            const data = await res.json();
-            const events = Array.isArray(data) ? data : [];
-            const markets = flattenEventsToMarkets(events);
-            return { status: 200, events, markets, eventCount: events.length, marketCount: markets.length };
-          })
-          .catch((err) => {
-            if (err.name === 'AbortError') throw err;
-            console.warn(`[fetchAllMarkets] Page ${pageOffset + i} failed:`, err.message);
-            return { status: 0, events: [], eventCount: 0, marketCount: 0 };
-          })
-      );
-    }
-
-    // Wait for all pages in the batch to complete
-    let results;
-    try {
-      results = await Promise.all(batch);
-    } catch (err) {
-      if (err.name === 'AbortError') break;
-      throw err;
-    }
-
-    // Collect ALL successful data from the batch first, then check for stop conditions.
-    // Do NOT break early on 429 — pages after the 429 in the batch may have succeeded
-    // (all requests were already in flight). Collect everything, then stop before next batch.
-    for (let i = 0; i < results.length; i++) {
-      const result = results[i];
-
-      if (result.status === 429) {
-        hitRateLimit = true;
-        // Don't break — keep collecting data from remaining successful pages in this batch
-      }
-
-      if (result.markets?.length > 0) {
-        allRaw.push(...result.markets);
-      }
-
-      if (result.eventCount === 0 && result.status === 200) {
-        // Empty 200 response = no more events at this offset
-        done = true;
-      }
-    }
-
-    // Check if any page in the batch returned fewer events than the reference page.
-    // End-of-data detection is based on event count (pagination unit), not market count.
-    if (!done && !hitRateLimit && results.length > 0) {
-      const refPage = results.find((r) => r.status === 200 && r.eventCount > 0);
-      if (!refPage) {
-        // No successful non-empty page in this batch — stop
-        done = true;
-      } else {
-        for (let i = 0; i < results.length; i++) {
-          if (results[i] !== refPage && results[i].eventCount < refPage.eventCount && results[i].status === 200) {
-            done = true;
-            break;
-          }
+    let data = null;
+    for (let attempt = 1; attempt <= PAGE_ATTEMPTS && data == null; attempt++) {
+      if (attempt > 1) await delay(RETRY_DELAY_MS);
+      if (signal?.aborted) return false;
+      try {
+        const res = await fetch(url, { signal: withTimeout(signal, TIMEOUT_GAMMA_PAGE) });
+        if (res.status === 429) {
+          crawl.rateLimited = true;
+          return false;
         }
+        if (!res.ok) {
+          console.warn(`[fetchAllMarkets] Band ≥${volumeMin} page failed: HTTP ${res.status}`);
+          // A 4xx (e.g. a rejected cursor) won't change on retry — end this band
+          if (res.status < 500) return false;
+          continue;
+        }
+        data = await res.json();
+      } catch (err) {
+        // A caller abort ends the whole crawl; a withTimeout abort is just a failed page
+        if (signal?.aborted) throw err;
+        console.warn(`[fetchAllMarkets] Band ≥${volumeMin} page failed:`, err.message);
       }
     }
+    if (data == null) return false; // retries exhausted
 
-    if (hitRateLimit) {
-      console.warn('[fetchAllMarkets] Rate limited — using', allRaw.length, 'markets fetched so far');
+    const page = Array.isArray(data.events) ? data.events : [];
+    events.push(...page);
+    // Progress counts unique, active events only — the same filter applied to
+    // the final result — so the loading counter never overshoots the total.
+    for (const e of page) {
+      if (e.active === false || crawl.countedEvents.has(e.id)) continue;
+      crawl.countedEvents.add(e.id);
+      crawl.marketCount += Array.isArray(e.markets) ? e.markets.length : 0;
     }
+    if (crawl.onProgress && crawl.marketCount > 0) crawl.onProgress(crawl.marketCount);
 
-    pageOffset += CONCURRENCY;
+    cursor = data.next_cursor;
+    if (!cursor || page.length === 0) return true; // natural end of band
+  }
+  return false; // page cap or rate limit stopped the band
+}
 
-    // Report progress after each batch
-    if (onProgress && allRaw.length > 0) {
-      onProgress(allRaw.length);
-    }
+/**
+ * Crawl the active catalog and report whether the crawl was complete.
+ *
+ * @returns {Promise<{ markets: object[], complete: boolean }>}
+ *   complete is false when any band stopped early. Callers that REPLACE
+ *   their market set (Tier 3) must not treat markets missing from an
+ *   incomplete crawl as removed — a single failed page ends its whole band.
+ */
+export async function fetchCatalog(onProgress, signal) {
+  const startTime = Date.now();
+  // Fetches from /events (not /markets) to get event-level tags for fee category resolution.
+  // Each event contains nested markets which are flattened after fetch.
+  const crawl = { pages: 0, marketCount: 0, countedEvents: new Set(), rateLimited: false, onProgress };
+  const bandEvents = VOLUME_BANDS.map(() => []);
+
+  // allSettled, not all: on a caller abort every band must have stopped before
+  // bandEvents is read below. Aborted bands keep the pages they already fetched.
+  const outcomes = await Promise.allSettled(
+    VOLUME_BANDS.map((band, i) => crawlVolumeBand(band, bandEvents[i], crawl, signal))
+  );
+  const failure = outcomes.find((o) => o.status === 'rejected' && o.reason?.name !== 'AbortError');
+  if (failure) throw failure.reason;
+  const complete = outcomes.every((o) => o.status === 'fulfilled' && o.value === true);
+
+  if (crawl.rateLimited) {
+    console.warn('[fetchAllMarkets] Rate limited — using', crawl.marketCount, 'markets fetched so far');
+  }
+  if (crawl.pages >= MAX_PAGES) {
+    console.warn(`[fetchAllMarkets] Hit MAX_PAGES safety cap (${MAX_PAGES}) — ${crawl.marketCount} markets fetched`);
   }
 
-  if (pageOffset >= MAX_PAGES) {
-    console.warn(`[fetchAllMarkets] Hit MAX_PAGES safety cap (${MAX_PAGES}) — ${allRaw.length} markets fetched`);
-  }
+  // Band edges are inclusive and volumes move mid-crawl, so an event can land
+  // in two bands — keep the first (higher-volume band) copy. /events/keyset has
+  // no `active` filter (offset /events did), so apply it here.
+  const seen = new Set();
+  const events = bandEvents.flat().filter((e) => {
+    if (e.active === false || seen.has(e.id)) return false;
+    seen.add(e.id);
+    return true;
+  });
+  const allRaw = flattenEventsToMarkets(events);
 
-  console.log(`[fetchAllMarkets] Fetch complete: ${allRaw.length} markets in ${Date.now() - startTime}ms (${pageOffset} pages)`);
+  console.log(`[fetchAllMarkets] Fetch ${complete ? 'complete' : 'INCOMPLETE'}: ${allRaw.length} markets (${events.length} events) in ${Date.now() - startTime}ms (${crawl.pages} pages)`);
 
-  return parseGammaMarkets(allRaw);
+  return { markets: parseGammaMarkets(allRaw), complete };
+}
+
+/** Crawl the active catalog; markets only (see fetchCatalog for completeness). */
+export async function fetchAllMarkets(onProgress, signal) {
+  return (await fetchCatalog(onProgress, signal)).markets;
 }
 
 export async function fetchOrderBook(tokenId, signal) {

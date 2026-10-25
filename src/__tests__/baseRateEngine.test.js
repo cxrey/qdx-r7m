@@ -44,6 +44,12 @@ function makeResolvedMarkets(n, startId = 0) {
   }));
 }
 
+// A /markets/keyset page: next_cursor is omitted on the last page
+function keysetResponse(markets, nextCursor) {
+  const body = nextCursor ? { markets, next_cursor: nextCursor } : { markets };
+  return new Response(JSON.stringify(body), { status: 200 });
+}
+
 // ── getBaseRates (cache wrapper) ───────────────────────────────────
 
 describe('getBaseRates', () => {
@@ -71,7 +77,7 @@ describe('getBaseRates', () => {
     });
 
     // Return empty pages so it finishes quickly
-    mockFetch.mockResolvedValue(new Response(JSON.stringify([]), { status: 200 }));
+    mockFetch.mockImplementation(async () => keysetResponse([]));
 
     const promise = getBaseRates();
     await vi.runAllTimersAsync();
@@ -83,7 +89,7 @@ describe('getBaseRates', () => {
 
   it('removes the legacy raw-market cache key', async () => {
     mockLocalStorage['polymarket_base_rates'] = JSON.stringify({ ts: Date.now(), data: {} });
-    mockFetch.mockResolvedValue(new Response(JSON.stringify([]), { status: 200 }));
+    mockFetch.mockImplementation(async () => keysetResponse([]));
 
     const promise = getBaseRates();
     await vi.runAllTimersAsync();
@@ -96,10 +102,8 @@ describe('getBaseRates', () => {
     let callCount = 0;
     mockFetch.mockImplementation(async () => {
       callCount++;
-      if (callCount === 1) {
-        return new Response(JSON.stringify(makeResolvedMarkets(100)), { status: 200 });
-      }
-      return new Response(JSON.stringify([]), { status: 200 });
+      if (callCount === 1) return keysetResponse(makeResolvedMarkets(100));
+      return keysetResponse([]);
     });
 
     const promise = getBaseRates();
@@ -116,7 +120,7 @@ describe('getBaseRates', () => {
   });
 
   it('does not cache when the sample is too small (rate-limited partial fetch)', async () => {
-    mockFetch.mockResolvedValue(new Response(JSON.stringify([]), { status: 200 }));
+    mockFetch.mockImplementation(async () => keysetResponse([]));
 
     const promise = getBaseRates();
     await vi.runAllTimersAsync();
@@ -132,141 +136,213 @@ describe('getBaseRates', () => {
 // ── fetchResolvedMarkets ───────────────────────────────────────────
 
 describe('fetchResolvedMarkets', () => {
-  it('fetches 4 concurrent pages per batch (RESOLVED_CONCURRENCY)', async () => {
-    let callCount = 0;
-    mockFetch.mockImplementation(async () => {
-      callCount++;
-      if (callCount <= 4) {
-        return new Response(JSON.stringify(makeResolvedMarkets(100, (callCount - 1) * 100)), { status: 200 });
-      }
-      return new Response(JSON.stringify([]), { status: 200 });
-    });
+  // Routes each request by volume band (volume_num_min, or 'bottom' for the
+  // open-ended band) and cursor. `pages[band][cursor ?? 'start']` is a Response
+  // factory; unrouted requests get an empty last page.
+  function bandOf(url) {
+    return new URL(url, 'http://localhost').searchParams.get('volume_num_min') ?? 'bottom';
+  }
 
+  function routeFetch(pages) {
+    mockFetch.mockImplementation(async (url) => {
+      const cursor = new URL(url, 'http://localhost').searchParams.get('after_cursor') ?? 'start';
+      const handler = pages[bandOf(url)]?.[cursor];
+      return handler ? handler() : keysetResponse([]);
+    });
+  }
+
+  const urlsFor = (band) => mockFetch.mock.calls.map(([url]) => url).filter((url) => bandOf(url) === band);
+  const callsWithCursor = (cursor) => mockFetch.mock.calls.filter(([url]) => url.includes(`after_cursor=${cursor}`));
+
+  it('crawls /markets/keyset for closed markets with one cursor chain per volume band', async () => {
+    routeFetch({});
     const promise = fetchResolvedMarkets();
     await vi.runAllTimersAsync();
     await promise;
 
-    // First batch: 4 concurrent, second batch: 4 concurrent (all empty → stops)
-    expect(callCount).toBe(8);
+    expect(mockFetch).toHaveBeenCalledTimes(4);
+    for (const [url] of mockFetch.mock.calls) {
+      expect(url).toMatch(/^\/gamma-api\/markets\/keyset\?/);
+      expect(url).toContain('closed=true');
+      expect(url).toContain('limit=100');
+      expect(url).toContain('order=volumeNum&ascending=false');
+      expect(url).not.toContain('offset=');
+    }
+    expect(urlsFor('5000000')[0]).not.toContain('volume_num_max');
+    expect(urlsFor('bottom')[0]).toContain('volume_num_max=2500000');
   });
 
-  it('stops on 3 consecutive empty pages', async () => {
-    let callCount = 0;
-    mockFetch.mockImplementation(async () => {
-      callCount++;
-      // First 2 pages have data, then 3 consecutive empty
-      if (callCount <= 2) {
-        return new Response(JSON.stringify(makeResolvedMarkets(100, (callCount - 1) * 100)), { status: 200 });
-      }
-      return new Response(JSON.stringify([]), { status: 200 });
+  it('follows next_cursor until a page has none', async () => {
+    routeFetch({
+      5000000: {
+        start: () => keysetResponse(makeResolvedMarkets(100, 0), 'c1'),
+        c1: () => keysetResponse(makeResolvedMarkets(100, 100), 'c 2'),
+        'c 2': () => keysetResponse(makeResolvedMarkets(40, 200)),
+      },
     });
-
     const promise = fetchResolvedMarkets();
     await vi.runAllTimersAsync();
     const result = await promise;
 
-    expect(result.resolvedMarkets.length).toBe(200);
+    const urls = urlsFor('5000000');
+    expect(urls).toHaveLength(3);
+    expect(urls[1]).toContain('after_cursor=c1');
+    expect(urls[2]).toContain('after_cursor=c%202');
+    expect(result.resolvedMarkets).toHaveLength(240);
   });
 
-  it('continues batch on partial 429 failure', async () => {
-    let callCount = 0;
-    mockFetch.mockImplementation(async () => {
-      callCount++;
-      if (callCount === 2) {
-        // Simulate fetchResolvedPage throwing 429 after retries
-        const err = new Error('Rate limited');
-        err.status = 429;
-        throw err;
-      }
-      if (callCount <= 4) {
-        return new Response(JSON.stringify(makeResolvedMarkets(100, (callCount - 1) * 100)), { status: 200 });
-      }
-      return new Response(JSON.stringify([]), { status: 200 });
+  it('orders results by band (descending volume) and dedupes markets on a band edge', async () => {
+    const edge = makeResolvedMarkets(1, 999)[0];
+    routeFetch({
+      5000000: { start: () => keysetResponse([...makeResolvedMarkets(2, 0), edge]) },
+      3500000: { start: () => keysetResponse([edge, ...makeResolvedMarkets(2, 10)]) },
+      bottom: { start: () => keysetResponse(makeResolvedMarkets(2, 20)) },
     });
-
     const promise = fetchResolvedMarkets();
     await vi.runAllTimersAsync();
     const result = await promise;
 
-    // Should have collected from pages 1, 3, 4 (page 2 was 429)
-    expect(result.resolvedMarkets.length).toBeGreaterThan(0);
+    expect(result.resolvedMarkets.map((m) => m.id)).toEqual([
+      'rm-0', 'rm-1', 'rm-999', 'rm-10', 'rm-11', 'rm-20', 'rm-21',
+    ]);
   });
 
-  it('returns partial results when signal aborts', async () => {
-    const controller = new AbortController();
-    let callCount = 0;
-    mockFetch.mockImplementation(async () => {
-      callCount++;
-      if (callCount === 3) controller.abort();
-      if (callCount <= 4) {
-        return new Response(JSON.stringify(makeResolvedMarkets(100, (callCount - 1) * 100)), { status: 200 });
-      }
-      return new Response(JSON.stringify([]), { status: 200 });
+  it('stops the open-ended bottom band at MAX_RESOLVED (5000) and truncates to it', async () => {
+    let next = 0;
+    const endlessPage = () => {
+      const page = makeResolvedMarkets(100, next);
+      next += 100;
+      return keysetResponse(page, 'more');
+    };
+    routeFetch({
+      5000000: { start: () => keysetResponse(makeResolvedMarkets(30, 100_000)) },
+      bottom: { start: endlessPage, more: endlessPage },
     });
-
-    const promise = fetchResolvedMarkets(controller.signal);
+    const promise = fetchResolvedMarkets();
     await vi.runAllTimersAsync();
     const result = await promise;
 
-    // Should have some data from before abort
-    expect(result.resolvedMarkets).toBeDefined();
+    expect(result.resolvedMarkets).toHaveLength(5000);
+    expect(result.resolvedMarkets[0].id).toBe('rm-100000'); // top band first
+    expect(urlsFor('bottom')).toHaveLength(50);
   });
 
-  it('retries on failure with exponential backoff', async () => {
-    let callCount = 0;
-    mockFetch.mockImplementation(async () => {
-      callCount++;
-      // First two calls to page 1 fail, third succeeds
-      if (callCount <= 2) return new Response('Server Error', { status: 500 });
-      if (callCount === 3) return new Response(JSON.stringify(makeResolvedMarkets(10)), { status: 200 });
-      return new Response(JSON.stringify([]), { status: 200 });
-    });
-
+  it('only keeps markets with a resolved outcome', async () => {
+    const unresolved = { id: 'open-1', question: 'Still open?' };
+    routeFetch({ 5000000: { start: () => keysetResponse([unresolved, ...makeResolvedMarkets(3)]) } });
     const promise = fetchResolvedMarkets();
-    // BaseRateEngine.fetchResolvedPage retries with 1000 * (attempt + 1) delay
+    await vi.runAllTimersAsync();
+    const result = await promise;
+
+    expect(result.resolvedMarkets.map((m) => m.id)).toEqual(['rm-0', 'rm-1', 'rm-2']);
+  });
+
+  it('ends a band at once on a 422 (no retries) and keeps its earlier pages', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    routeFetch({
+      5000000: {
+        start: () => keysetResponse(makeResolvedMarkets(100), 'bad'),
+        bad: () => new Response(JSON.stringify({ type: 'validation error', error: 'invalid cursor' }), { status: 422 }),
+      },
+    });
+    const promise = fetchResolvedMarkets();
+    await vi.runAllTimersAsync();
+    const result = await promise;
+
+    expect(urlsFor('5000000')).toHaveLength(2);
+    expect(callsWithCursor('bad')).toHaveLength(1);
+    expect(result.resolvedMarkets).toHaveLength(100);
+  });
+
+  it('retries a 5xx page with backoff', async () => {
+    let attempts = 0;
+    routeFetch({
+      5000000: {
+        start: () => {
+          attempts++;
+          return attempts <= 2
+            ? new Response('Server Error', { status: 500 })
+            : keysetResponse(makeResolvedMarkets(10));
+        },
+      },
+    });
+    const promise = fetchResolvedMarkets();
+    // fetchResolvedPage retries with 1000 * (attempt + 1) delay
     await vi.advanceTimersByTimeAsync(1000);
     await vi.advanceTimersByTimeAsync(2000);
     await vi.runAllTimersAsync();
     const result = await promise;
 
-    expect(callCount).toBeGreaterThan(2); // retried
-    expect(result.resolvedMarkets.length).toBeGreaterThanOrEqual(0);
+    expect(attempts).toBe(3);
+    expect(result.resolvedMarkets).toHaveLength(10);
   });
 
   it('reads Retry-After header on 429', async () => {
-    let callCount = 0;
-    mockFetch.mockImplementation(async () => {
-      callCount++;
-      if (callCount === 1) {
-        return new Response('Rate limited', {
-          status: 429,
-          headers: { 'Retry-After': '5' },
-        });
-      }
-      if (callCount === 2) {
-        return new Response(JSON.stringify(makeResolvedMarkets(10)), { status: 200 });
-      }
-      return new Response(JSON.stringify([]), { status: 200 });
+    let attempts = 0;
+    routeFetch({
+      5000000: {
+        start: () => {
+          attempts++;
+          return attempts === 1
+            ? new Response('Rate limited', { status: 429, headers: { 'Retry-After': '5' } })
+            : keysetResponse(makeResolvedMarkets(10));
+        },
+      },
     });
-
     const promise = fetchResolvedMarkets();
-    // Retry-After: 5 seconds
-    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(attempts).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
     await vi.runAllTimersAsync();
-    await promise;
+    const result = await promise;
 
-    expect(callCount).toBeGreaterThan(1); // retried after Retry-After delay
+    expect(attempts).toBe(2);
+    expect(result.resolvedMarkets).toHaveLength(10);
   });
 
-  it('URL includes closed=true for resolved markets', async () => {
-    mockFetch.mockResolvedValue(new Response(JSON.stringify([]), { status: 200 }));
+  it('stops every band on a persistent 429 and keeps the markets fetched so far', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    routeFetch({
+      5000000: {
+        start: () => keysetResponse(makeResolvedMarkets(100), 'next'),
+        next: () => new Response('Rate limited', { status: 429, headers: { 'Retry-After': '1' } }),
+      },
+      bottom: {
+        start: () => keysetResponse(makeResolvedMarkets(100, 500), 'b1'),
+        // Resolves only after the top band has given up on its 429 retries
+        b1: () => new Promise((resolve) => {
+          setTimeout(() => resolve(keysetResponse(makeResolvedMarkets(100, 600), 'b2')), 10_000);
+        }),
+        b2: () => keysetResponse(makeResolvedMarkets(100, 700)),
+      },
+    });
     const promise = fetchResolvedMarkets();
     await vi.runAllTimersAsync();
-    await promise;
+    const result = await promise;
 
-    const url = mockFetch.mock.calls[0][0];
-    expect(url).toContain('closed=true');
-    expect(url).toContain('limit=100');
+    expect(callsWithCursor('next')).toHaveLength(3);
+    expect(callsWithCursor('b2')).toHaveLength(0);
+    expect(result.resolvedMarkets).toHaveLength(300);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Rate limited'), 300, expect.any(String));
+  });
+
+  it('returns partial results when the signal aborts', async () => {
+    const controller = new AbortController();
+    routeFetch({
+      5000000: {
+        start: () => keysetResponse(makeResolvedMarkets(100), 'next'),
+        next: () => {
+          controller.abort();
+          return Promise.reject(new DOMException('Aborted', 'AbortError'));
+        },
+      },
+    });
+    const promise = fetchResolvedMarkets(controller.signal);
+    await vi.runAllTimersAsync();
+    const result = await promise;
+
+    expect(result.resolvedMarkets).toHaveLength(100);
+    expect(callsWithCursor('next')).toHaveLength(1);
   });
 });
 

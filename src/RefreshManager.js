@@ -10,7 +10,8 @@
 
 import { WebSocketPriceStream } from './WebSocketPriceStream';
 import { PriceUpdateBatcher } from './PriceUpdateBatcher';
-import { fetchAllMarkets, flattenEventsToMarkets } from './api';
+import { fetchCatalog, flattenEventsToMarkets } from './api';
+import { CATALOG_MIN_VOLUME } from './engineConfig';
 import { processMarket, enrichWithBaseRate } from './processMarket';
 import { processAllInWorker } from './workerManager';
 import { handleRateLimit, getBackoffMultiplier, onBackoffChange, isClobRateLimited } from './ApiHealthManager';
@@ -46,6 +47,9 @@ export class RefreshManager {
     this._assetToMarket = new Map(); // assetId → { marketId, side: 'yes'|'no' }
     // Assets of markets settled via market_resolved — later quotes are ignored
     this._resolvedAssets = new Set();
+
+    // marketId → consecutive incomplete Tier 3 crawls that missed it
+    this._unconfirmedMisses = new Map();
 
     // Aborts in-flight Tier 2 / polling requests on stop()
     this._bgController = null;
@@ -428,8 +432,12 @@ export class RefreshManager {
 
       const newMarkets = [];
       for (let page = 0; page < NEW_MARKET_PAGES; page++) {
-        // Fetch from /events to get event-level tags for fee category resolution
-        const url = `${GAMMA_API}/events?limit=${PAGE_SIZE}&offset=${page * PAGE_SIZE}&active=true&closed=false&order=createdAt&ascending=false&volume_num_min=100`;
+        // Fetch from /events to get event-level tags for fee category resolution.
+        // Same event-level floor as the catalog crawl (CATALOG_MIN_VOLUME).
+        // NOTE: /events filters by `volume_min`; it silently IGNORES
+        // `volume_num_min` (that's the /markets name), which is why discovery
+        // previously pulled in events with single-digit volume.
+        const url = `${GAMMA_API}/events?limit=${PAGE_SIZE}&offset=${page * PAGE_SIZE}&active=true&closed=false&order=createdAt&ascending=false&volume_min=${CATALOG_MIN_VOLUME}`;
         const res = await this._bgFetch(url);
 
         if (res.status === 429 || res.status === 403) {
@@ -488,7 +496,7 @@ export class RefreshManager {
     try {
       this._opts.onStatusChange?.({ ws: this.wsStatus, tier: 3, message: 'Full refresh in progress...' });
 
-      const raw = await fetchAllMarkets(
+      const { markets: raw, complete } = await fetchCatalog(
         null, // no progress callback for background refresh
         this._tier3Controller.signal
       );
@@ -506,10 +514,11 @@ export class RefreshManager {
       if (this._tier3Controller.signal.aborted) return;
       const allProcessed = await processAllInWorker(deduped);
       if (this._tier3Controller.signal.aborted) return;
-      const processed = allProcessed.filter((m) => m.question);
+      let processed = allProcessed.filter((m) => m.question);
 
       // Smart diff against current markets
       const currentMarkets = this._opts.getCurrentMarkets?.() || [];
+      processed = keepUnconfirmedMarkets(processed, currentMarkets, complete, this._unconfirmedMisses);
       const diff = smartDiff(currentMarkets, processed);
 
       if (diff.hasChanges) {
@@ -607,6 +616,49 @@ export class RefreshManager {
 }
 
 // ── Smart Diff ──────────────────────────────────────────────────
+
+// A market missing from this many consecutive INCOMPLETE crawls is dropped
+// anyway — otherwise a band that keeps failing would keep resolved markets
+// forever.
+export const MAX_UNCONFIRMED_REFRESHES = 3;
+
+/**
+ * After an INCOMPLETE catalog crawl (a band stopped early on a failed page,
+ * rate limit, or page cap), markets missing from the crawl are unconfirmed,
+ * not removed: keep the current copies so a transient failure can't wipe
+ * thousands of rows until the next refresh. A complete crawl is authoritative.
+ *
+ * `misses` (marketId → consecutive unconfirmed refreshes) persists across
+ * calls and is updated in place: a market seen again resets to 0, and one
+ * unconfirmed for MAX_UNCONFIRMED_REFRESHES refreshes in a row is dropped.
+ */
+export function keepUnconfirmedMarkets(crawled, currentMarkets, complete, misses = new Map()) {
+  if (complete) {
+    misses.clear();
+    return crawled;
+  }
+  const crawledIds = new Set(crawled.map((m) => m.id));
+  for (const id of crawledIds) misses.delete(id);
+
+  const kept = [];
+  let dropped = 0;
+  for (const m of currentMarkets) {
+    if (crawledIds.has(m.id)) continue;
+    const count = (misses.get(m.id) || 0) + 1;
+    if (count >= MAX_UNCONFIRMED_REFRESHES) {
+      misses.delete(m.id);
+      dropped++;
+    } else {
+      misses.set(m.id, count);
+      kept.push(m);
+    }
+  }
+  if (kept.length > 0 || dropped > 0) {
+    console.warn(`[RefreshManager] Tier 3 crawl incomplete — keeping ${kept.length} markets it didn't reach` +
+      (dropped > 0 ? `, dropping ${dropped} unconfirmed for ${MAX_UNCONFIRMED_REFRESHES} refreshes in a row` : ''));
+  }
+  return kept.length > 0 ? crawled.concat(kept) : crawled;
+}
 
 /**
  * Compare old and new market arrays to detect changes.
