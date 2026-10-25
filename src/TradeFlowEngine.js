@@ -21,9 +21,21 @@ const TRADE_FLOW_TTL = CACHE_TTL_5M;
 
 // ─── Data Fetching ──────────────────────────────────────────────────
 
+// Trades come newest first, 200 per page. A busy market can fill one page in a
+// few hours, so follow the cursor until the 24h window is covered — capped so
+// the busiest markets cost at most 5 requests (analyzeTradeFlow scales its
+// rates to whatever span the trades actually cover).
+const TRADE_PAGE_SIZE = 200;
+const MAX_TRADE_PAGES = 5;
+const TRADE_WINDOW_SEC = 86_400;
+
 export async function fetchMarketTrades(conditionId) {
+  const since = Date.now() / 1000 - TRADE_WINDOW_SEC;
   try {
-    const res = await dataApiGet('/v2/trades', { condition: conditionId, limit: 200 });
+    const res = await dataApiGet('/v2/trades', { condition: conditionId, limit: TRADE_PAGE_SIZE }, {
+      maxPages: MAX_TRADE_PAGES,
+      stopWhen: (page) => page.length === 0 || (page[page.length - 1].timestamp ?? 0) < since,
+    });
     if (!res.ok) {
       if (res.error) console.warn(`[TradeFlow] /v2/trades ${res.status}: ${res.error}`);
       return [];
@@ -464,10 +476,17 @@ export function analyzeTradeFlow(trades, holders, leaderboardIndex, market, wall
     });
 
   // ── Step 7: Volume acceleration ──
+  // Compare volume *rates*: last 6h vs the span the trades cover. That span
+  // is under 24h when the fetch hit its page cap or the market is young;
+  // dividing by a fixed 24h made both look like a 4x "surge". Measured over
+  // ALL fetched trades: one older than 24h proves the full day is covered.
   const last6hTrades = classifiedTrades.filter((t) => t.ts >= sixHoursAgo);
   const last6hVolume = last6hTrades.reduce((s, t) => s + t.usdcSize, 0);
-  const avg6hVolume = totalVolume24h / 4;
-  const acceleration = avg6hVolume > 0 ? last6hVolume / avg6hVolume : 1;
+  const oldestTs = trades.reduce((min, t) => Math.min(min, t.timestamp || t.created_at || t.time || now), now);
+  const coveredSec = isStaleData ? 86400 : Math.min(86400, now - oldestTs);
+  const recentSec = Math.min(21600, coveredSec);
+  const avgRate = coveredSec > 0 ? totalVolume24h / coveredSec : 0;
+  const acceleration = avgRate > 0 && recentSec > 0 ? (last6hVolume / recentSec) / avgRate : 1;
 
   let accelerationLabel;
   if (acceleration > 3.0) accelerationLabel = 'Surging';
@@ -555,6 +574,8 @@ export function analyzeTradeFlow(trades, holders, leaderboardIndex, market, wall
     // Acceleration
     acceleration,
     accelerationLabel,
+    // Hours of trading the "24h" figures actually cover (< 24 on capped busy markets)
+    coveredHours: coveredSec / 3600,
 
     // Reliability
     reliabilityScore,

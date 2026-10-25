@@ -59,12 +59,18 @@ export function toV1Row(row, type) {
  * @param {string} route  — e.g. '/v2/trades'
  * @param {object} params — query params; undefined/null values are dropped
  * @param {object} [opts]
+ * A page that fails after earlier pages succeeded doesn't throw those rows
+ * away: the result is ok with `hasMore: true` and `incomplete` describing the
+ * failure. 429/403 still throw — callers must back off either way.
+ *
  * @param {number} [opts.maxPages=1] — pages to follow (1 = first page only)
+ * @param {(pageRows: object[]) => boolean} [opts.stopWhen] — checked after each
+ *   page (raw v2 rows); return true to stop following the cursor early
  * @param {AbortSignal} [opts.signal]
- * @returns {Promise<{ ok: true, rows: object[], hasMore: boolean } | { ok: false, status: number, error: string|null }>}
+ * @returns {Promise<{ ok: true, rows: object[], hasMore: boolean, incomplete?: { status: number|null, error: string|null } } | { ok: false, status: number, error: string|null }>}
  * @throws on 429/403 (with .status) so callers' rate-limit handling keeps working
  */
-export async function dataApiGet(route, params = {}, { maxPages = 1, signal } = {}) {
+export async function dataApiGet(route, params = {}, { maxPages = 1, stopWhen, signal } = {}) {
   const rows = [];
   let cursor = null;
   let hasMore = false;
@@ -76,22 +82,30 @@ export async function dataApiGet(route, params = {}, { maxPages = 1, signal } = 
     }
     if (cursor) query.set('cursor', cursor);
 
-    const res = await fetch(`${DATA_API}${route}?${query}`, { signal: withTimeout(signal ?? null, TIMEOUT_DATA_API) });
+    let res;
+    try {
+      res = await fetch(`${DATA_API}${route}?${query}`, { signal: withTimeout(signal ?? null, TIMEOUT_DATA_API) });
+    } catch (err) {
+      // Network error or per-page timeout: keep earlier pages. A caller abort still throws.
+      if (rows.length === 0 || signal?.aborted) throw err;
+      return { ok: true, rows, hasMore: true, incomplete: { status: null, error: err.message } };
+    }
     throwIfRateLimited(res);
     if (!res.ok) {
       let error = null;
       try { error = (await res.json())?.error ?? null; } catch { /* non-JSON body */ }
+      if (rows.length > 0) return { ok: true, rows, hasMore: true, incomplete: { status: res.status, error } };
       return { ok: false, status: res.status, error };
     }
 
     const body = await res.json();
     const data = body?.data;
-    if (Array.isArray(data)) rows.push(...data);
-    else if (data != null) rows.push(data);
+    const pageRows = Array.isArray(data) ? data : (data != null ? [data] : []);
+    rows.push(...pageRows);
 
     cursor = body?.pagination?.next_cursor ?? null;
     hasMore = Boolean(body?.pagination?.has_more && cursor);
-    if (!hasMore) break;
+    if (!hasMore || stopWhen?.(pageRows)) break;
   }
 
   return { ok: true, rows, hasMore };
