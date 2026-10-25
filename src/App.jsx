@@ -14,6 +14,7 @@ import { PortfolioProvider } from './contexts/PortfolioContext';
 import { useExecutionStyle } from './contexts/ExecutionContext';
 import { ALL_CATEGORIES } from './processMarket';
 import { mergePendingPrice } from './utils/pendingPrices';
+import { buildIndexMap, diffPriceSnapshot, shouldRefilter } from './utils/priceSnapshot';
 import { fetchLeaderboard, buildLeaderboardIndex } from './TradeFlowEngine';
 import { filterAndSort } from './utils/filterAndSort';
 import { produce } from 'immer';
@@ -23,13 +24,6 @@ import { DEFAULT_FILTERS } from './filterDefaults';
 
 const NO_FLASHES = {};
 const isEmpty = (obj) => Object.keys(obj).length === 0;
-
-/** marketId → array index, rebuilt per throttle tick (O(n), once per second). */
-function buildIndexMap(markets) {
-  const map = new Map();
-  for (let i = 0; i < markets.length; i++) map.set(markets[i].id, i);
-  return map;
-}
 
 function App() {
   const { rawMarkets, setRawMarkets, loading, error, progress, lastFetch, baseRatesLoading, gammaRateLimited, refresh, baseRatesRef } = useMarkets();
@@ -98,7 +92,7 @@ function App() {
 
   // ── marketsVersion: immediate bumps for structural changes ────
 
-  // Bump marketsVersion once per render commit and reset the skip counter.
+  // Bump marketsVersion once per render commit, for structural changes.
   // Deduped by versionBumpedRef so multiple effects in the same commit don't double-bump.
   // Pending live prices (and their dirty flag) are deliberately left alone:
   // they are newer than the structural change and the throttle applies them
@@ -167,19 +161,9 @@ function App() {
         // Flashes are computed against the displayed prices and committed in
         // the same render as the new prices (one render per tick, and the
         // cell flashes on the new value, not the old one).
-        const seq = ++flashSeqRef.current;
-        const flashes = {};
-        for (const [marketId, update] of snapshot) {
-          const m = base[baseIdx.get(marketId)];
-          if (!m) continue;
-          const newYes = update.yesPrice ?? m.yesPrice;
-          const newNo = update.noPrice ?? m.noPrice;
-          if (newYes === m.yesPrice && newNo === m.noPrice) continue;
-          priceChanged = true;
-          if (m.yesPrice != null && newYes !== m.yesPrice) {
-            flashes[marketId] = `${newYes > m.yesPrice ? 'up' : 'down'}:${seq}`;
-          }
-        }
+        const diff = diffPriceSnapshot(base, snapshot, ++flashSeqRef.current, baseIdx);
+        priceChanged = diff.priceChanged;
+        const { flashes } = diff;
 
         if (priceChanged) {
           setRawMarkets(prev => {
@@ -207,7 +191,7 @@ function App() {
       // Re-filter only when there is something new: prices just applied, or
       // the markets array changed since the last filterAndSort (Tier 3
       // replace, resolution patch, enrichment). Idle data costs nothing.
-      if (priceChanged || base !== lastFilteredSourceRef.current) {
+      if (shouldRefilter(priceChanged, base, lastFilteredSourceRef.current)) {
         setMarketsVersion(v => v + 1);
       } else {
         skippedCyclesRef.current++;

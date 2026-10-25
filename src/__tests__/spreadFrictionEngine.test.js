@@ -9,6 +9,7 @@ import {
   estimateSpreadFromPrices,
 } from '../SpreadFrictionEngine.js';
 import { resolveFeeParams } from '../feeCalculator';
+import { calculateTheta } from '../ThetaEngine';
 
 // ─── Helpers ──────────────────────────────────────────────────────
 
@@ -385,6 +386,15 @@ describe('calculateEdgeSurvival', () => {
     const result = calculateEdgeSurvival(market, { absoluteSpread: 0.02 });
     expect(result.edges[0].netEdge).toBeCloseTo(-0.005, 6);
     expect(result.edges[0].survives).toBe(false);
+  });
+
+  it('theta-to-expiry is a lower bound on the hazard-model decay', () => {
+    // Daily decrement grows toward expiry, so today's theta × daysLeft must
+    // undercount the true cumulative decay (which telescopes to yesPrice).
+    for (const [p, d] of [[0.5, 30], [0.2, 90], [0.8, 10]]) {
+      const theta = calculateTheta(p, d, 'STANDARD');
+      expect(Math.abs(theta.dailyYesTheta) * d).toBeLessThan(p);
+    }
   });
 
   it('skips theta when daysLeft is unknown', () => {

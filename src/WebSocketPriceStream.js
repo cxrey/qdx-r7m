@@ -318,7 +318,16 @@ export class WebSocketPriceStream {
     }
   }
 
-  /** Emit a mid-price update from a best bid/ask pair; skip if either is missing/invalid. */
+  /**
+   * Emit a mid-price update from a best bid/ask pair; skip if either is
+   * missing/invalid.
+   *
+   * One-sided books are skipped DELIBERATELY: an empty bid side arrives as
+   * best_bid 0 and an empty ask side as best_ask 1, and there is no
+   * meaningful mid between them — the market keeps its last good price until
+   * a two-sided quote returns. Don't fall back to price_changes[].price: that
+   * is the order-book level that changed, not the market price.
+   */
   _emitQuote(assetId, rawBid, rawAsk, timestamp) {
     if (!assetId) return;
     const bestBid = parseFloat(rawBid);

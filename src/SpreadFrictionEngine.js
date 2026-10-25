@@ -314,6 +314,13 @@ export function calculateEdgeSurvival(market, spreadData) {
   // Theta — cumulative decay over the remaining life vs a full round trip
   // (enter + exit: full spread + two taker fees). Same cost basis as
   // processMarket's thetaBreakEvenDays, but priced off the live book.
+  //
+  // DELIBERATELY CONSERVATIVE: today's daily theta × daysLeft. Under the
+  // constant-hazard model the daily decrement h(1−h)^(d−1) GROWS as expiry
+  // approaches, so this is a lower bound on decay-to-expiry — an edge that
+  // survives here survives the true curve too. (The exact sum telescopes to
+  // the whole YES price, i.e. the payoff conditional on no event; that is
+  // not an expected edge, so it must not be used here.)
   if (market.theta?.bestTheta != null && Math.abs(market.theta.bestTheta) > 0 && market.daysLeft > 0) {
     const raw = Math.abs(market.theta.bestTheta) * market.daysLeft;
     const roundTrip = computeRoundTripCostPP(market.yesPrice, spreadData.absoluteSpread, feeParams).totalCostPP / 100;

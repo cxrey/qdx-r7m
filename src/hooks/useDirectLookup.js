@@ -40,6 +40,14 @@ export function useDirectLookup(rawMarkets, baseRatesRef) {
   const marketsRef = useRef(rawMarkets);
   marketsRef.current = rawMarkets;
 
+  // The last immediate (paste) lookup: { value, marketsLoaded }. When the
+  // debounced search catches up to the pasted text ~300ms later, App calls
+  // runLookup again with the same value — without this, that echo aborted
+  // the in-flight paste fetch and restarted it after a further 500ms.
+  // Markets finishing loading is NOT an echo: a link pasted mid-load must be
+  // re-checked against the loaded set, so loaded-state is part of the key.
+  const lastImmediateRef = useRef(null);
+
   /**
    * Search loaded markets for a match.
    */
@@ -177,6 +185,15 @@ export function useDirectLookup(rawMarkets, baseRatesRef) {
    */
   const runLookup = useCallback(
     (inputValue, immediate = false) => {
+      const marketsLoaded = marketsRef.current.length > 0;
+      if (immediate) {
+        lastImmediateRef.current = { value: inputValue, marketsLoaded };
+      } else {
+        const last = lastImmediateRef.current;
+        if (last && last.value === inputValue && last.marketsLoaded === marketsLoaded) return;
+        lastImmediateRef.current = null;
+      }
+
       // Cancel any in-flight request
       if (abortRef.current) {
         abortRef.current.abort();
@@ -277,6 +294,7 @@ export function useDirectLookup(rawMarkets, baseRatesRef) {
       clearTimeout(debounceRef.current);
       debounceRef.current = null;
     }
+    lastImmediateRef.current = null;
     setDetection(null);
     setFetchedMarkets(NO_MARKETS);
     setFoundInLoadedId(null);
