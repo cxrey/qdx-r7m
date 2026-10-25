@@ -15,6 +15,9 @@ import { computeEffectiveFeeRate } from './feeCalculator';
 const SETTINGS_KEY = 'pm_kelly_settings';
 const JOURNAL_KEY = 'pm_kelly_journal';
 const CALIBRATION_KEY = 'pm_kelly_calibration';
+// Correlation assumed for a bet in a market already in the portfolio (the
+// cap pair correlations use in PortfolioEngine)
+const ALREADY_HELD_CORRELATION = 0.95;
 
 const DEFAULT_SETTINGS = {
   bankroll: 1000,
@@ -503,7 +506,17 @@ export function applyPortfolioConstraints(rawDollars, market, portfolio = null, 
   // 3. Correlation penalty
   if (s.correlationPenalty && portfolio?.hasPortfolio && portfolio.screenTrade) {
     const screening = portfolio.screenTrade(market);
-    if (screening?.maxCorrelation > 0.5) {
+    if (screening?.alreadyHeld) {
+      // Adding to a market you already hold is the most concentrated bet
+      // there is: penalize it like the strongest correlation (the 0.95 cap)
+      const penalty = 1 - (ALREADY_HELD_CORRELATION - 0.5);
+      constraints.push({
+        type: 'CORRELATION',
+        label: `Adds to your existing ${screening.alreadyHeld.side || ''} position in this market, reduced by ${((1 - penalty) * 100).toFixed(0)}%`,
+        original: adjustedDollars,
+      });
+      adjustedDollars *= penalty;
+    } else if (screening?.maxCorrelation > 0.5) {
       const penalty = 1 - (screening.maxCorrelation - 0.5); // 0.5 corr = no penalty, 1.0 = 50% reduction
       const penalizedDollars = adjustedDollars * penalty;
       constraints.push({

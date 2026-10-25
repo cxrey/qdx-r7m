@@ -8,6 +8,7 @@ const FIT_STYLES = {
   NEUTRAL: { border: '#f59e0b', bg: 'rgba(245, 158, 11, 0.06)', label: 'Neutral' },
   INCREASES_CONCENTRATION: { border: '#ef4444', bg: 'rgba(239, 68, 68, 0.06)', label: 'Increases Concentration' },
   OPPOSING: { border: '#818cf8', bg: 'rgba(129, 140, 248, 0.06)', label: 'Opposing / Hedge' },
+  ALREADY_HELD: { border: '#ef4444', bg: 'rgba(239, 68, 68, 0.06)', label: 'Already Held' },
 };
 
 export default function PortfolioImpact({ screening }) {
@@ -29,7 +30,7 @@ export default function PortfolioImpact({ screening }) {
       <div className="space-y-1.5 text-xs">
         {screening.maxCorrelation > 0 && (
           <div className="text-gray-400">
-            Correlation with existing positions:{' '}
+            Correlation with {screening.alreadyHeld ? 'your other' : 'existing'} positions:{' '}
             <span className="text-gray-200 font-medium">{screening.maxCorrelation.toFixed(2)}</span>
             {screening.maxCorrelationMarket && (
               <span className="text-gray-500"> with "{screening.maxCorrelationMarket.question?.slice(0, 40)}"</span>

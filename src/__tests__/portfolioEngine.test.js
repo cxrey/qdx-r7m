@@ -31,8 +31,11 @@ import {
   sameHeldMarkets,
   holdingsKey,
   repriceWalletPosition,
+  buildCorrelationStructure,
+  priceClusters,
 } from '../PortfolioEngine';
 import { envelope, jsonResponse, v2Position, WALLET, YES_TOKEN, CONDITION } from './helpers/dataApiV2Fixtures';
+import { generateMarkets } from '../__benchmarks__/helpers/fixtures';
 
 // ── Helpers ──
 
@@ -384,6 +387,53 @@ describe('screenNewTrade', () => {
   it('returns GOOD_FIT with null market', () => {
     const result = screenNewTrade(null, [], []);
     expect(result.fit).toBe('GOOD_FIT');
+  });
+
+  it('reports a market you already hold as ALREADY_HELD, not as correlated with itself', () => {
+    const held = makePosition({ id: 'held', question: 'Steelers vs. Saints', slug: 'nfl', category: 'Sports' }, { side: 'YES', size: 100 });
+    const other = makePosition({ id: 'other', question: 'Will it rain in Paris?', description: 'Weather', slug: 'rain', category: 'Weather', daysLeft: 300 });
+    const { clusters } = buildCorrelationClusters([held, other]);
+    const result = screenNewTrade(held.market, [held, other], clusters);
+    expect(result.fit).toBe('ALREADY_HELD');
+    expect(result.alreadyHeld).toEqual({ side: 'YES', size: 100 });
+    expect(result.text).toContain('already hold this market (YES 100 shares)');
+    // Correlation is against OTHER positions only
+    expect(result.maxCorrelationMarket?.id).not.toBe('held');
+    expect(result.maxCorrelation).toBeLessThan(0.5);
+  });
+
+  it('matches a full re-clustering on a realistic portfolio (the incremental path is not an approximation in practice)', () => {
+    const positions = generateMarkets(40, 11).slice(0, 39).map((m) => ({ market: m, side: 'YES', size: 50, currentValue: 50 * (m.yesPrice ?? 0.5) }));
+    const candidate = generateMarkets(40, 11)[39];
+    const { clusters } = buildCorrelationClusters(positions);
+    const result = screenNewTrade(candidate, positions, clusters);
+
+    const exactPositions = [...positions, { market: candidate, side: 'YES', size: 50, currentValue: 50, currentPrice: candidate.yesPrice }];
+    const { clusters: exactClusters } = buildCorrelationClusters(exactPositions);
+    expect(result.newDivScore).toBe(calculateConcentration(exactPositions, exactClusters).diversificationScore);
+  });
+});
+
+describe('clustering split: structure (price-independent) + pricing', () => {
+  const positions = [
+    makePosition({ id: 's1', question: 'Will Trump win?', slug: 'trump' }, { currentValue: 100 }),
+    makePosition({ id: 's2', question: 'Will Trump be nominated?', slug: 'trump' }, { currentValue: 300 }),
+    makePosition({ id: 's3', question: 'Will it rain in Paris?', description: 'Weather', slug: 'rain', category: 'Weather', daysLeft: 300 }, { currentValue: 100 }),
+  ];
+
+  it('structure + priceClusters equals buildCorrelationClusters', () => {
+    const structure = buildCorrelationStructure(positions);
+    expect(priceClusters(positions, structure)).toEqual(buildCorrelationClusters(positions).clusters);
+  });
+
+  it('a reused structure re-prices weights from the current values', () => {
+    const structure = buildCorrelationStructure(positions);
+    const ticked = positions.map((p, i) => (i === 2 ? { ...p, currentValue: 500 } : p));
+    const clusters = priceClusters(ticked, structure);
+    const rain = clusters.find((c) => c.positions[0].market.id === 's3');
+    expect(rain.portfolioWeight).toBeCloseTo(500 / 900);
+    expect(rain.positions[0]).toBe(ticked[2]);
+    expect(clusters).toEqual(buildCorrelationClusters(ticked).clusters);
   });
 });
 

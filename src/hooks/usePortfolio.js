@@ -3,7 +3,8 @@ import {
   fetchPositions,
   normalizePosition,
   matchPositionsToMarkets,
-  buildCorrelationClusters,
+  buildCorrelationStructure,
+  priceClusters,
   calculateConcentration,
   generateAlerts,
   getPositionSignals,
@@ -186,7 +187,21 @@ export function usePortfolio(loadedMarkets) {
     return [...pricedWallet, ...matchedManual].filter((p) => p.market != null);
   }, [walletPositions, manualPositions, heldLookup, lookedUpPrices]);
 
-  // Correlation analysis
+  // Holdings as table rows see them: market, side, size. Keyed by content, so
+  // the row-facing values below keep their identity across price ticks —
+  // rows re-render when what you hold changes, not when its price moves.
+  const holdingsJson = useMemo(() => holdingsKey(allPositions), [allPositions]);
+  const holdings = useMemo(
+    () => JSON.parse(holdingsJson).map(([marketId, side, size, source]) => ({ marketId, side, size, source })),
+    [holdingsJson],
+  );
+
+  // Correlation analysis. The O(n²) part (correlation matrix and cluster
+  // membership) doesn't depend on price, so it's rebuilt only when holdings
+  // change; a price tick only re-prices clusters (O(n)). Ref-cached for the
+  // same reason as heldLookup above. (Its date-proximity term uses daysLeft
+  // as of when holdings last changed.)
+  const structureRef = useRef({ key: null, structure: null });
   const analysis = useMemo(() => {
     if (allPositions.length === 0) {
       return {
@@ -202,7 +217,11 @@ export function usePortfolio(loadedMarkets) {
       };
     }
 
-    const { clusters, correlationMatrix } = buildCorrelationClusters(allPositions);
+    if (structureRef.current.key !== holdingsJson) {
+      structureRef.current = { key: holdingsJson, structure: buildCorrelationStructure(allPositions) };
+    }
+    const { structure } = structureRef.current;
+    const clusters = priceClusters(allPositions, structure);
     const concentration = calculateConcentration(allPositions, clusters);
     const alerts = generateAlerts(allPositions, clusters, concentration);
 
@@ -212,8 +231,8 @@ export function usePortfolio(loadedMarkets) {
       positionSignals.set(i, getPositionSignals(allPositions[i]));
     }
 
-    return { clusters, correlationMatrix, concentration, alerts, positionSignals };
-  }, [allPositions]);
+    return { clusters, correlationMatrix: structure.matrix, concentration, alerts, positionSignals };
+  }, [allPositions, holdingsJson]);
 
   // Filter out dismissed alerts
   const activeAlerts = useMemo(() => {
@@ -226,19 +245,20 @@ export function usePortfolio(loadedMarkets) {
     setDismissedAlerts((prev) => [...prev, alertText]);
   }, []);
 
-  // Screen a new trade
+  // Screen a new trade. The detail panel and the Kelly calculator both ask
+  // for the market on every render; results are cached per market until the
+  // portfolio changes (each call is O(positions), but renders are frequent).
+  // (analysis.clusters is rebuilt whenever allPositions changes, so it keys the cache.)
+  const screenCacheRef = useRef({ clusters: null, byMarket: new Map() });
   const screenTrade = useCallback((market) => {
-    return screenNewTrade(market, allPositions, analysis.clusters);
+    if (screenCacheRef.current.clusters !== analysis.clusters) {
+      screenCacheRef.current = { clusters: analysis.clusters, byMarket: new Map() };
+    }
+    const { byMarket } = screenCacheRef.current;
+    const key = String(market?.id);
+    if (!byMarket.has(key)) byMarket.set(key, screenNewTrade(market, allPositions, analysis.clusters));
+    return byMarket.get(key);
   }, [allPositions, analysis.clusters]);
-
-  // Holdings as table rows see them: market, side, size. Keyed by content, so
-  // the row-facing values below keep their identity across price ticks —
-  // rows re-render when what you hold changes, not when its price moves.
-  const holdingsJson = useMemo(() => holdingsKey(allPositions), [allPositions]);
-  const holdings = useMemo(
-    () => JSON.parse(holdingsJson).map(([marketId, side, size, source]) => ({ marketId, side, size, source })),
-    [holdingsJson],
-  );
 
   // O(1) set of held market IDs for fast filter checks
   const heldMarketIds = useMemo(() => new Set(holdings.map((h) => h.marketId)), [holdings]);

@@ -102,6 +102,29 @@ describe('usePortfolio — positions follow live price ticks', () => {
     expect(result.current.rowContext.isMarketHeld('other')).toBe(true);
   });
 
+  it('a held-price tick re-prices the analysis without rebuilding its correlation structure', () => {
+    localStorage.setItem(MANUAL_KEY, JSON.stringify([manual('live', 0.3), manual('other', 0.5)]));
+    const before = [loaded('live', 0.6), loaded('other', 0.5)];
+    const { result, rerender } = renderHook(({ markets }) => usePortfolio(markets), { initialProps: { markets: before } });
+    const matrixBefore = result.current.analysis.correlationMatrix;
+    const valueBefore = result.current.analysis.clusters.reduce((s, c) => s + c.totalValue, 0);
+
+    rerender({ markets: tick(before, 'live', 0.9) });
+    expect(result.current.analysis.correlationMatrix).toBe(matrixBefore); // structure reused
+    expect(result.current.analysis.clusters.reduce((s, c) => s + c.totalValue, 0)).toBeCloseTo(valueBefore + 30);
+  });
+
+  it('screenTrade is computed once per market until the portfolio changes', () => {
+    localStorage.setItem(MANUAL_KEY, JSON.stringify([manual('live', 0.3)]));
+    const before = [loaded('live', 0.6), loaded('other', 0.5)];
+    const { result, rerender } = renderHook(({ markets }) => usePortfolio(markets), { initialProps: { markets: before } });
+    const first = result.current.screenTrade(loaded('other', 0.5));
+    expect(result.current.screenTrade(loaded('other', 0.5))).toBe(first);
+
+    rerender({ markets: tick(before, 'live', 0.7) }); // held price moved → portfolio changed
+    expect(result.current.screenTrade(loaded('other', 0.5))).not.toBe(first);
+  });
+
   it('price ticks do not re-trigger lookups for unloaded markets', async () => {
     localStorage.setItem(MANUAL_KEY, JSON.stringify([manual('under-floor', 0.2)]));
     fetchMarketById.mockResolvedValue(gamma('under-floor', '["0.25", "0.75"]', false));

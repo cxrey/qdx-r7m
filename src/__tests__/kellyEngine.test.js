@@ -310,6 +310,17 @@ describe('applyPortfolioConstraints', () => {
     expect(r.constraints.some((c) => c.type === 'MAX_POSITION')).toBe(false);
   });
 
+  it('penalizes adding to a market you already hold like the strongest correlation, with its own label', () => {
+    const portfolio = {
+      hasPortfolio: true, summary: { totalValue: 0 },
+      screenTrade: () => ({ alreadyHeld: { side: 'YES', size: 100 }, maxCorrelation: 0.1 }),
+    };
+    const r = applyPortfolioConstraints(100, market, portfolio, settings);
+    expect(r.adjustedDollars).toBeCloseTo(55); // 0.95 → 45% reduction
+    const c = r.constraints.find((x) => x.type === 'CORRELATION');
+    expect(c.label).toContain('existing YES position in this market');
+  });
+
   it('limits by total exposure when portfolio present', () => {
     const portfolio = { hasPortfolio: true, summary: { totalValue: 750 } };
     const r = applyPortfolioConstraints(150, market, portfolio, settings);

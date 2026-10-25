@@ -293,30 +293,36 @@ export function extractEntities(text) {
   return found;
 }
 
-// Module-level cache for entity extraction results.
-// Keyed on market ID — market text is immutable within a session,
-// so extracting once per market is sufficient. Avoids O(n²) redundant
-// extractions in buildCorrelationClusters (9,900 → 50 for 50 positions).
-// LRU-capped to bound memory if screenNewTrade scans many candidates.
-const entityCache = new Map();
-const MAX_ENTITY_CACHE = 500;
+// Module-level cache of each market's text features for correlation:
+// entities, significant title words, lowercased description. Keyed on market
+// ID — market text is immutable within a session, and price ticks replace
+// market objects but keep their ID — so every pair comparison reuses them
+// instead of re-extracting and re-splitting per PAIR (O(n²) string work).
+// LRU-capped above the 2,000-position wallet fetch cap: at the old cap of
+// 500 a large wallet evicted entries mid-pass and re-extracted every pair.
+const featureCache = new Map();
+const MAX_FEATURE_CACHE = 5_000;
 
-function getCachedEntities(market) {
+function getMarketFeatures(market) {
   const id = market.id;
-  if (entityCache.has(id)) {
-    const cached = entityCache.get(id);
+  const cached = featureCache.get(id);
+  if (cached) {
     // Promote to end (true LRU)
-    entityCache.delete(id);
-    entityCache.set(id, cached);
+    featureCache.delete(id);
+    featureCache.set(id, cached);
     return cached;
   }
-  const entities = extractEntities(market.question + ' ' + (market.description || ''));
-  entityCache.set(id, entities);
-  if (entityCache.size > MAX_ENTITY_CACHE) {
-    const oldestKey = entityCache.keys().next().value;
-    entityCache.delete(oldestKey);
+  const description = (market.description || '').toLowerCase();
+  const features = {
+    entities: extractEntities(market.question + ' ' + (market.description || '')),
+    titleWords: (market.question || '').toLowerCase().split(/\s+/).filter((w) => w.length > 4),
+    description,
+  };
+  featureCache.set(id, features);
+  if (featureCache.size > MAX_FEATURE_CACHE) {
+    featureCache.delete(featureCache.keys().next().value);
   }
-  return entities;
+  return features;
 }
 
 // ── Correlation Analysis ──
@@ -346,9 +352,9 @@ export function calculatePairCorrelation(posA, posB) {
   }
 
   // ENTITY_OVERLAP — cached per market to avoid O(n²) re-extraction
-  const eA = getCachedEntities(mA);
-  const eB = getCachedEntities(mB);
-  const shared = sharedEntities(eA, eB);
+  const fA = getMarketFeatures(mA);
+  const fB = getMarketFeatures(mB);
+  const shared = sharedEntities(fA.entities, fB.entities);
   if (shared.length > 0) {
     types.push('ENTITY');
     correlations.push(0.5);
@@ -370,16 +376,10 @@ export function calculatePairCorrelation(posA, posB) {
     }
   }
 
-  // RESOLUTION_DEPENDENCY (one market mentions the other's key terms)
-  const titleA = mA.question.toLowerCase();
-  const titleB = mB.question.toLowerCase();
-  // Check if significant words from A appear in B's description or vice versa
-  const wordsA = titleA.split(/\s+/).filter((w) => w.length > 4);
-  const wordsB = titleB.split(/\s+/).filter((w) => w.length > 4);
-  const descA = (mA.description || '').toLowerCase();
-  const descB = (mB.description || '').toLowerCase();
-  const depAB = wordsA.filter((w) => descB.includes(w)).length;
-  const depBA = wordsB.filter((w) => descA.includes(w)).length;
+  // RESOLUTION_DEPENDENCY (one market mentions the other's key terms):
+  // significant words from A's title in B's description, or vice versa
+  const depAB = fA.titleWords.filter((w) => fB.description.includes(w)).length;
+  const depBA = fB.titleWords.filter((w) => fA.description.includes(w)).length;
   if (depAB >= 3 || depBA >= 3) {
     types.push('RESOLUTION_DEPENDENCY');
     correlations.push(0.7);
@@ -397,9 +397,20 @@ export function calculatePairCorrelation(posA, posB) {
 
 // ── Clustering ──
 
-export function buildCorrelationClusters(positions) {
+// Clustering is split in two because only part of it depends on price:
+// - buildCorrelationStructure: the correlation matrix and cluster membership,
+//   names, average correlation and dominant side. Depends on market text,
+//   category, event, dates and position sides — not prices. O(n²); compute
+//   it when holdings change.
+// - priceClusters: values, portfolio weights and risk. O(n); cheap enough to
+//   redo on every price tick.
+
+const CLUSTER_THRESHOLD = 0.4;
+
+/** Price-independent part of clustering (see above). */
+export function buildCorrelationStructure(positions) {
   const n = positions.length;
-  if (n === 0) return { clusters: [], correlationMatrix: [] };
+  if (n === 0) return { matrix: [], groups: [] };
 
   // Build full correlation matrix
   const matrix = Array.from({ length: n }, () => Array(n).fill(0));
@@ -416,15 +427,14 @@ export function buildCorrelationClusters(positions) {
   }
 
   // Greedy clustering: start with most correlated pair, expand
-  const assigned = new Set();
-  const clusters = [];
-  const THRESHOLD = 0.4;
+  const clusterOf = new Array(n).fill(-1); // position index → cluster index
+  const members = []; // cluster index → position indices, in join order
 
   // Collect all pairs above threshold, sorted by correlation desc
   const pairs = [];
   for (let i = 0; i < n; i++) {
     for (let j = i + 1; j < n; j++) {
-      if (matrix[i][j] >= THRESHOLD) {
+      if (matrix[i][j] >= CLUSTER_THRESHOLD) {
         pairs.push({ i, j, corr: matrix[i][j] });
       }
     }
@@ -432,53 +442,35 @@ export function buildCorrelationClusters(positions) {
   pairs.sort((a, b) => b.corr - a.corr);
 
   for (const { i, j } of pairs) {
-    if (assigned.has(i) && assigned.has(j)) {
-      // Both already assigned — check if same cluster, skip if not
-      continue;
-    }
+    // Both already assigned (same cluster or not) — skip
+    if (clusterOf[i] !== -1 && clusterOf[j] !== -1) continue;
 
-    // Find or create cluster
-    let cluster = null;
-    if (assigned.has(i)) {
-      cluster = clusters.find((c) => c.indices.has(i));
-    } else if (assigned.has(j)) {
-      cluster = clusters.find((c) => c.indices.has(j));
+    // Join the assigned one's cluster, or start a new cluster
+    let c = clusterOf[i] !== -1 ? clusterOf[i] : clusterOf[j];
+    if (c === -1) {
+      c = members.length;
+      members.push([]);
     }
-
-    if (!cluster) {
-      cluster = { indices: new Set(), positions: [] };
-      clusters.push(cluster);
-    }
-
-    // Add both
     for (const idx of [i, j]) {
-      if (!cluster.indices.has(idx)) {
-        cluster.indices.add(idx);
-        cluster.positions.push(positions[idx]);
-        assigned.add(idx);
+      if (clusterOf[idx] === -1) {
+        clusterOf[idx] = c;
+        members[c].push(idx);
       }
     }
   }
 
   // Add unclustered positions as single-position clusters
   for (let i = 0; i < n; i++) {
-    if (!assigned.has(i)) {
-      clusters.push({
-        indices: new Set([i]),
-        positions: [positions[i]],
-      });
+    if (clusterOf[i] === -1) {
+      clusterOf[i] = members.length;
+      members.push([i]);
     }
   }
 
-  // Compute cluster metadata
-  const totalValue = positions.reduce((s, p) => s + (p.currentValue || 0), 0);
-
-  const enrichedClusters = clusters.map((c, idx) => {
-    const posArr = c.positions;
-    const clusterValue = posArr.reduce((s, p) => s + (p.currentValue || 0), 0);
+  const groups = members.map((indices, idx) => {
+    const posArr = indices.map((i) => positions[i]);
 
     // Average intra-cluster correlation
-    const indices = [...c.indices];
     let sumCorr = 0;
     let countPairs = 0;
     for (let a = 0; a < indices.length; a++) {
@@ -487,23 +479,17 @@ export function buildCorrelationClusters(positions) {
         countPairs++;
       }
     }
-    const avgCorrelation = countPairs > 0 ? sumCorr / countPairs : 0;
-    const effectivePositionCount = posArr.length * (1 - avgCorrelation);
+    const averageCorrelation = countPairs > 0 ? sumCorr / countPairs : 0;
 
     // Auto-generate name from shared entities/categories
-    const allLabels = [];
+    const labelCounts = {};
     for (let a = 0; a < indices.length; a++) {
       for (let b = a + 1; b < indices.length; b++) {
         const pd = pairData[indices[a]][indices[b]];
-        if (pd) allLabels.push(...pd.sharedLabels);
+        if (pd) for (const l of pd.sharedLabels) labelCounts[l] = (labelCounts[l] || 0) + 1;
       }
     }
-    // Also add categories
     const cats = [...new Set(posArr.map((p) => p.market?.category).filter(Boolean))];
-    const labelCounts = {};
-    for (const l of allLabels) {
-      labelCounts[l] = (labelCounts[l] || 0) + 1;
-    }
     const topLabels = Object.entries(labelCounts).sort((a, b) => b[1] - a[1]).slice(0, 2).map(([l]) => l);
     const name = topLabels.length > 0
       ? topLabels.map((l) => l.charAt(0).toUpperCase() + l.slice(1)).join('/') + (cats.length === 1 ? ` (${cats[0]})` : '')
@@ -515,6 +501,24 @@ export function buildCorrelationClusters(positions) {
     const noSide = posArr.filter((p) => p.side === 'NO').length;
     const dominantSide = yesSide > noSide ? 'YES' : noSide > yesSide ? 'NO' : 'MIXED';
 
+    return { indices, name, averageCorrelation, dominantSide };
+  });
+
+  return { matrix, groups };
+}
+
+/**
+ * Price-dependent part of clustering: attach current positions, values,
+ * weights and risk to a structure from buildCorrelationStructure. `positions`
+ * must be the same holdings, in the same order, the structure was built from
+ * (their prices may differ).
+ */
+export function priceClusters(positions, structure) {
+  const totalValue = positions.reduce((s, p) => s + (p.currentValue || 0), 0);
+  return structure.groups.map((g, idx) => {
+    const posArr = g.indices.map((i) => positions[i]);
+    const clusterValue = posArr.reduce((s, p) => s + (p.currentValue || 0), 0);
+    const effectivePositionCount = posArr.length * (1 - g.averageCorrelation);
     const portfolioWeight = totalValue > 0 ? clusterValue / totalValue : 0;
     let risk = 'LOW';
     if (portfolioWeight > 0.4 || effectivePositionCount < 2) risk = 'HIGH';
@@ -522,18 +526,21 @@ export function buildCorrelationClusters(positions) {
 
     return {
       id: idx,
-      name,
+      name: g.name,
       positions: posArr,
       totalValue: clusterValue,
       portfolioWeight,
-      averageCorrelation: avgCorrelation,
+      averageCorrelation: g.averageCorrelation,
       effectivePositionCount: Math.max(1, effectivePositionCount),
-      dominantSide,
+      dominantSide: g.dominantSide,
       risk,
     };
   });
+}
 
-  return { clusters: enrichedClusters, correlationMatrix: matrix };
+export function buildCorrelationClusters(positions) {
+  const structure = buildCorrelationStructure(positions);
+  return { clusters: priceClusters(positions, structure), correlationMatrix: structure.matrix };
 }
 
 // ── Concentration Metrics ──
@@ -624,43 +631,74 @@ export function screenNewTrade(market, portfolioPositions, clusters, simulatedSi
     currentPrice: market.yesPrice,
   };
 
-  // Find highest correlation with existing positions
+  // One pass: the candidate's correlation with every existing position.
+  // Positions in this very market are "already held", not correlation — a
+  // market compared with itself scores the 0.95 cap.
+  const corrWith = new Map();
+  const heldHere = [];
   let maxCorr = 0;
   let maxCorrMarket = null;
   for (const pos of portfolioPositions) {
-    const pair = calculatePairCorrelation(candidatePos, pos);
-    if (pair.correlation > maxCorr) {
-      maxCorr = pair.correlation;
+    const corr = calculatePairCorrelation(candidatePos, pos).correlation;
+    corrWith.set(pos, corr);
+    if (pos.market && String(pos.market.id) === String(market.id)) {
+      heldHere.push(pos);
+    } else if (corr > maxCorr) {
+      maxCorr = corr;
       maxCorrMarket = pos.market;
     }
   }
 
-  // Find which cluster it would join
-  let joinCluster = null;
-  for (const cluster of clusters) {
-    for (const pos of cluster.positions) {
-      const pair = calculatePairCorrelation(candidatePos, pos);
-      if (pair.correlation >= 0.4) {
-        joinCluster = cluster;
-        break;
-      }
-    }
-    if (joinCluster) break;
-  }
+  // The cluster it would join: the first containing a position it clears the
+  // clustering threshold with (a position in this market counts)
+  const joinCluster = clusters.find((c) => c.positions.some((p) => (corrWith.get(p) ?? 0) >= CLUSTER_THRESHOLD)) || null;
 
-  // Reuse passed-in clusters for current score; only rebuild for the new set
   const currentConcentration = calculateConcentration(portfolioPositions, clusters);
 
+  // New clusters without re-clustering everything (that was O(n²+) per call):
+  // the candidate joins joinCluster — its average correlation updated with
+  // the candidate's correlations to the members — or becomes a singleton;
+  // every cluster's weight is rescaled to the new total.
   const newPositions = [...portfolioPositions, candidatePos];
-  const { clusters: newClusters } = buildCorrelationClusters(newPositions);
+  const newTotal = newPositions.reduce((s, p) => s + (p.currentValue || 0), 0);
+  const newClusters = clusters.map((c) => {
+    if (c !== joinCluster) return { ...c, portfolioWeight: newTotal > 0 ? c.totalValue / newTotal : 0 };
+    const k = c.positions.length;
+    const sumCorr = c.averageCorrelation * (k * (k - 1)) / 2
+      + c.positions.reduce((s, p) => s + (corrWith.get(p) ?? 0), 0);
+    const averageCorrelation = sumCorr / ((k + 1) * k / 2);
+    const totalValue = c.totalValue + simulatedSize;
+    return {
+      ...c,
+      positions: [...c.positions, candidatePos],
+      totalValue,
+      portfolioWeight: newTotal > 0 ? totalValue / newTotal : 0,
+      averageCorrelation,
+      effectivePositionCount: Math.max(1, (k + 1) * (1 - averageCorrelation)),
+    };
+  });
+  if (!joinCluster) {
+    newClusters.push({
+      id: newClusters.length, name: market.question, positions: [candidatePos], totalValue: simulatedSize,
+      portfolioWeight: newTotal > 0 ? simulatedSize / newTotal : 0, averageCorrelation: 0, effectivePositionCount: 1,
+    });
+  }
   const newConcentration = calculateConcentration(newPositions, newClusters);
+
+  const alreadyHeld = heldHere.length > 0
+    ? { side: heldHere[0].side, size: heldHere.reduce((s, p) => s + (p.size || 0), 0) }
+    : null;
 
   // Determine fit
   let fit, text;
   const isOpposingSide = maxCorrMarket && maxCorr > 0.5 &&
     portfolioPositions.some((p) => p.market === maxCorrMarket && p.side !== candidatePos.side);
 
-  if (isOpposingSide) {
+  if (alreadyHeld) {
+    fit = 'ALREADY_HELD';
+    const shares = Number.isFinite(alreadyHeld.size) ? ` ${alreadyHeld.size.toFixed(0)} shares` : '';
+    text = `You already hold this market (${alreadyHeld.side || '?'}${shares}). Adding to it concentrates that position.`;
+  } else if (isOpposingSide) {
     fit = 'OPPOSING';
     text = `This market opposes your existing ${joinCluster?.name || 'correlated'} positions — acts as a partial hedge.`;
   } else if (maxCorr > 0.5 && joinCluster && joinCluster.portfolioWeight > 0.3) {
@@ -681,6 +719,7 @@ export function screenNewTrade(market, portfolioPositions, clusters, simulatedSi
     clusterName: joinCluster?.name ?? null,
     currentDivScore: currentConcentration.diversificationScore,
     newDivScore: newConcentration.diversificationScore,
+    alreadyHeld,
     text,
   };
 }
