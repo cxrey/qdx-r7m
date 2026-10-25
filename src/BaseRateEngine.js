@@ -12,7 +12,7 @@
 import { inferCategory } from './categoryPatterns';
 import { withTimeout, TIMEOUT_GAMMA_PAGE } from './fetchUtils';
 import { GAMMA_API } from './apiConfig';
-import { MS_PER_DAY, CACHE_TTL_24H, BASE_RATE_MAX_RESOLVED, BASE_RATE_MAX_PAGES, BASE_RATE_CONCURRENCY, BASE_RATE_MIN_DATA_POINTS } from './engineConfig';
+import { MS_PER_DAY, CACHE_TTL_24H, BASE_RATE_MAX_RESOLVED, BASE_RATE_MAX_PAGES, BASE_RATE_MIN_DATA_POINTS } from './engineConfig';
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -47,10 +47,24 @@ function saveCache(data) {
 }
 
 // ─── Fetch resolved markets ───
+// Gamma's offset pagination rejects offset > 2000 with 422, which capped the
+// sample at ~2,100 markets. /markets/keyset has no offset cap. As in
+// fetchAllMarkets (api.js), the crawl is split into volume bands with one
+// cursor chain each, to keep the parallelism of the old offset batches. Edges
+// are rough rank quantiles of resolved markets by volume (Oct 2026: rank 2000 ≈
+// $5.1M, 3000 ≈ $3.5M, 4000 ≈ $2.6M). The bounded bands are crawled to the end,
+// and only the open-ended bottom band stops at MAX_RESOLVED. So once they are
+// concatenated in descending order and truncated, the result is the top-N by
+// volume, as with the old offset crawl.
 const MAX_RESOLVED = BASE_RATE_MAX_RESOLVED;
-const MAX_RESOLVED_PAGES = BASE_RATE_MAX_PAGES;
-const MAX_CONSECUTIVE_EMPTY_RESOLVED = 3;
-const RESOLVED_CONCURRENCY = BASE_RATE_CONCURRENCY;
+const MAX_RESOLVED_PAGES = BASE_RATE_MAX_PAGES; // shared across all bands
+const RESOLVED_PAGE_SIZE = 100;
+const RESOLVED_VOLUME_BANDS = [
+  [5_000_000, null],
+  [3_500_000, 5_000_000],
+  [2_500_000, 3_500_000],
+  [null, 2_500_000],
+];
 
 async function fetchResolvedPage(url, signal, maxRetries = 3) {
   let lastWas429 = false;
@@ -67,6 +81,11 @@ async function fetchResolvedPage(url, signal, maxRetries = 3) {
       }
       lastWas429 = false;
       if (!res.ok) {
+        // A 4xx (e.g. a 422 for a rejected cursor) won't change on retry
+        if (res.status < 500) {
+          console.warn(`[BaseRateEngine] Page failed: HTTP ${res.status}`);
+          return null;
+        }
         await delay(1000 * (attempt + 1));
         continue;
       }
@@ -84,90 +103,79 @@ async function fetchResolvedPage(url, signal, maxRetries = 3) {
   return null;
 }
 
+// Only keep markets that have a clear resolved outcome
+function isResolved(m) {
+  return Boolean(m.resolutionSource || m.resolvedBy || m.outcome != null || m.resolution != null);
+}
+
+/**
+ * Follow one volume band's keyset cursor chain to the end (or, for the
+ * open-ended bottom band, until the crawl has MAX_RESOLVED markets).
+ * Pushes into `markets` so partial results survive a stop, and shares the page
+ * budget / rate-limit flag / market count with the other bands via `crawl`.
+ */
+async function crawlResolvedBand([volumeMin, volumeMax], markets, crawl, signal) {
+  const openEnded = volumeMin == null;
+  let cursor = null;
+  while (crawl.pages < MAX_RESOLVED_PAGES && !crawl.rateLimited) {
+    if (signal?.aborted) return;
+    if (openEnded && crawl.marketCount >= MAX_RESOLVED) return;
+    crawl.pages++;
+
+    let url = `${GAMMA_API}/markets/keyset?limit=${RESOLVED_PAGE_SIZE}&closed=true&order=volumeNum&ascending=false`;
+    if (volumeMin != null) url += `&volume_num_min=${volumeMin}`;
+    if (volumeMax != null) url += `&volume_num_max=${volumeMax}`;
+    if (cursor) url += `&after_cursor=${encodeURIComponent(cursor)}`;
+
+    let data;
+    try {
+      data = await fetchResolvedPage(url, signal);
+    } catch (err) {
+      if (err?.status !== 429) throw err;
+      crawl.rateLimited = true;
+      return;
+    }
+    // Abort, a 4xx, or retries exhausted — a cursor chain can't skip a page
+    if (data == null) return;
+
+    const page = Array.isArray(data.markets) ? data.markets : [];
+    for (const m of page) {
+      if (isResolved(m)) {
+        markets.push(m);
+        crawl.marketCount++;
+      }
+    }
+
+    cursor = data.next_cursor;
+    if (!cursor || page.length === 0) return; // End of band
+  }
+}
+
 export async function fetchResolvedMarkets(signal) {
   const startTime = Date.now();
-  const markets = [];
-  let pageOffset = 0;
-  const limit = 100;
-  let done = false;
-  let hitRateLimit = false;
-  let pageCount = 0;
+  const crawl = { pages: 0, marketCount: 0, rateLimited: false };
+  const bandMarkets = RESOLVED_VOLUME_BANDS.map(() => []);
 
-  // Parallel offset batches. NOTE: Gamma 422s offset > 2000, so this stops at
-  // ~2,100 resolved markets (fetchAllMarkets moved to /events/keyset for that reason).
-  let consecutiveEmpty = 0; // tracks across batches to detect end-of-data
-  while (!done && !hitRateLimit && markets.length < MAX_RESOLVED && pageOffset < MAX_RESOLVED_PAGES) {
-    if (signal?.aborted) break;
+  // allSettled, not all: every band must have stopped before bandMarkets is read
+  const outcomes = await Promise.allSettled(
+    RESOLVED_VOLUME_BANDS.map((band, i) => crawlResolvedBand(band, bandMarkets[i], crawl, signal))
+  );
+  const failure = outcomes.find((o) => o.status === 'rejected' && o.reason?.name !== 'AbortError');
+  if (failure) throw failure.reason;
 
-    // Build a batch of RESOLVED_CONCURRENCY page fetches
-    const batch = [];
-    for (let i = 0; i < RESOLVED_CONCURRENCY && (pageOffset + i) < MAX_RESOLVED_PAGES; i++) {
-      const offset = (pageOffset + i) * limit;
-      const url = `${GAMMA_API}/markets?limit=${limit}&offset=${offset}&closed=true&order=volume&ascending=false`;
-      batch.push(
-        fetchResolvedPage(url, signal)
-          .then(data => ({ status: 'ok', data }))
-          .catch(err => {
-            if (err?.status === 429) return { status: 429, data: null };
-            if (err?.name === 'AbortError') throw err;
-            return { status: 'error', data: null };
-          })
-      );
-    }
-
-    let results;
-    try {
-      results = await Promise.all(batch);
-    } catch (err) {
-      if (err.name === 'AbortError') break;
-      throw err;
-    }
-
-    // Collect results from all pages in the batch
-    for (const result of results) {
-      pageCount++;
-
-      if (result.status === 429) {
-        hitRateLimit = true;
-        continue; // Don't break — collect remaining successful pages
-      }
-
-      const data = result.data;
-      if (!data || !Array.isArray(data) || data.length === 0) {
-        consecutiveEmpty++;
-        if (consecutiveEmpty >= MAX_CONSECUTIVE_EMPTY_RESOLVED) {
-          done = true;
-        }
-        continue;
-      }
-
-      consecutiveEmpty = 0;
-
-      // Only keep markets that have a clear resolved outcome
-      for (const m of data) {
-        if (m.resolutionSource || m.resolvedBy || m.outcome != null || m.resolution != null) {
-          markets.push(m);
-        }
-      }
-
-      if (markets.length >= MAX_RESOLVED) {
-        done = true;
-      }
-    }
-
-    pageOffset += RESOLVED_CONCURRENCY;
-
-    // Brief delay between batches to avoid hammering the API
-    if (!done && !hitRateLimit && !signal?.aborted) {
-      await delay(100);
-    }
+  if (crawl.rateLimited) {
+    console.warn('[BaseRateEngine] Rate limited — using', crawl.marketCount, 'resolved markets fetched so far');
   }
 
-  if (hitRateLimit) {
-    console.warn('[BaseRateEngine] Rate limited — using', markets.length, 'resolved markets fetched so far');
-  }
+  // Band edges are inclusive, so a market on an edge can appear in two bands
+  const seen = new Set();
+  const markets = bandMarkets.flat().filter((m) => {
+    if (seen.has(m.id)) return false;
+    seen.add(m.id);
+    return true;
+  }).slice(0, MAX_RESOLVED);
 
-  console.log(`[BaseRateEngine] Fetched ${markets.length} resolved markets across ${pageCount} pages in ${Date.now() - startTime}ms.`);
+  console.log(`[BaseRateEngine] Fetched ${markets.length} resolved markets across ${crawl.pages} pages in ${Date.now() - startTime}ms.`);
 
   return { resolvedMarkets: markets, fetchedAt: Date.now() };
 }

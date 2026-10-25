@@ -42,7 +42,6 @@ export const FLB_SPREAD_KILLS_EDGE = 0.015;
 // ─── BaseRateEngine ────────────────────────────────────────────────
 export const BASE_RATE_MAX_RESOLVED = 5000;
 export const BASE_RATE_MAX_PAGES = 200;
-export const BASE_RATE_CONCURRENCY = 4;
 export const BASE_RATE_MIN_DATA_POINTS = 20;
 export const BASE_RATE_HIGH_CONFIDENCE_SAMPLE = 100;
 export const BASE_RATE_FAIR_GAP_CENTS = 3;
