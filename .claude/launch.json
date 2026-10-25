@@ -4,7 +4,7 @@
     {
       "name": "polymarket-scanner",
       "runtimeExecutable": "npx",
-      "runtimeArgs": ["vite", "--host"],
+      "runtimeArgs": ["vite"],
       "port": 3999,
       "autoPort": true
     }
