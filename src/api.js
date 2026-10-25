@@ -40,7 +40,18 @@ const TIMEOUT_PRICE_HISTORY = 8_000; // 8s per price history request
 const TIMEOUT_LOOKUP = 8_000;        // 8s per direct lookup request
 
 /**
- * Flatten an array of event objects into individual market objects.
+ * Whether a market nested in an open event is actually listed for trading.
+ * `closed=false` on /events filters EVENTS, not their markets. An open event
+ * still carries markets that have resolved (closed, prices settled at 0/1) and
+ * placeholder slots like "Person X" (inactive, never traded, no prices) — in
+ * Oct 2026 about 60% of the markets on the first catalog page.
+ */
+export function isListedMarket(market) {
+  return market.active !== false && market.closed !== true && market.archived !== true;
+}
+
+/**
+ * Flatten an array of event objects into individual listed market objects.
  * Injects parent event metadata (tags, slug, openInterest, etc.) into each
  * nested market so processMarket can read market.events[0].tags etc.
  */
@@ -50,6 +61,7 @@ export function flattenEventsToMarkets(events) {
     const { markets: nestedMarkets, ...eventData } = event;
     if (!Array.isArray(nestedMarkets)) continue;
     for (const market of nestedMarkets) {
+      if (!isListedMarket(market)) continue;
       market.events = [eventData];
       markets.push(market);
     }
@@ -104,12 +116,12 @@ async function crawlVolumeBand([volumeMin, volumeMax], events, crawl, signal) {
 
     const page = Array.isArray(data.events) ? data.events : [];
     events.push(...page);
-    // Progress counts unique, active events only — the same filter applied to
-    // the final result — so the loading counter never overshoots the total.
+    // Progress counts listed markets in unique, active events only — the same
+    // filters applied to the final result — so the counter never overshoots.
     for (const e of page) {
       if (e.active === false || crawl.countedEvents.has(e.id)) continue;
       crawl.countedEvents.add(e.id);
-      crawl.marketCount += Array.isArray(e.markets) ? e.markets.length : 0;
+      if (Array.isArray(e.markets)) crawl.marketCount += e.markets.filter(isListedMarket).length;
     }
     if (crawl.onProgress && crawl.marketCount > 0) crawl.onProgress(crawl.marketCount);
 
