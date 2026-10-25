@@ -24,6 +24,9 @@ import {
   getDismissedAlerts,
   dismissAlert,
   resetDismissedAlerts,
+  pricesFromGammaMarket,
+  unloadedManualMarketIds,
+  priceManualPosition,
 } from '../PortfolioEngine';
 import { envelope, jsonResponse, v2Position, WALLET, YES_TOKEN, CONDITION } from './helpers/dataApiV2Fixtures';
 
@@ -469,6 +472,49 @@ describe('localStorage helpers', () => {
     expect(getDismissedAlerts()).toEqual(['alert-1', 'alert-2']);
     resetDismissedAlerts();
     expect(getDismissedAlerts()).toEqual([]);
+  });
+});
+
+describe('manual positions in markets the catalog does not hold', () => {
+  const lookup = (markets) => ({
+    byId: new Map(markets.map((m) => [String(m.id), m])),
+    byCondition: new Map(markets.filter((m) => m.conditionId).map((m) => [m.conditionId, m])),
+  });
+  const snapshot = { id: 'm1', question: 'Q?', yesPrice: 0.4, noPrice: 0.6 };
+  const mp = { marketId: 'm1', conditionId: 'c1', side: 'NO', size: 10, entryPrice: 0.6, currentPrice: 0.6, market: snapshot };
+
+  it('pricesFromGammaMarket reads settled prices from the JSON string Gamma returns', () => {
+    expect(pricesFromGammaMarket({ outcomePrices: '["0", "1"]', closed: true })).toEqual({ yesPrice: 0, noPrice: 1, closed: true });
+    expect(pricesFromGammaMarket({ outcomePrices: ['0.25', '0.75'] })).toEqual({ yesPrice: 0.25, noPrice: 0.75, closed: false });
+  });
+
+  it('pricesFromGammaMarket returns null for missing or malformed prices (e.g. placeholders)', () => {
+    expect(pricesFromGammaMarket(null)).toBeNull();
+    expect(pricesFromGammaMarket({})).toBeNull();
+    expect(pricesFromGammaMarket({ outcomePrices: 'not json' })).toBeNull();
+    expect(pricesFromGammaMarket({ outcomePrices: '["x", "y"]' })).toBeNull();
+  });
+
+  it('unloadedManualMarketIds lists each missing market once, matching by id or conditionId', () => {
+    const positions = [mp, { ...mp }, { marketId: 'm2', conditionId: 'c2' }, { marketId: 'm3' }];
+    const ids = unloadedManualMarketIds(positions, lookup([{ id: 'other', conditionId: 'c2' }]));
+    expect(ids).toEqual(['m1', 'm3']);
+  });
+
+  it('priceManualPosition prefers the loaded market, then the looked-up price, then the saved copy', () => {
+    const fetched = new Map([['m1', { yesPrice: 1, noPrice: 0, closed: true }]]);
+
+    const fromLoaded = priceManualPosition(mp, lookup([{ id: 'm1', yesPrice: 0.3, noPrice: 0.7 }]), fetched);
+    expect(fromLoaded.currentPrice).toBe(0.7);
+
+    const fromLookup = priceManualPosition(mp, lookup([]), fetched);
+    expect(fromLookup).toMatchObject({ currentPrice: 0, currentValue: 0, source: 'manual' });
+    expect(fromLookup.unrealizedPnl).toBeCloseTo(-6);
+    expect(fromLookup.market).toMatchObject({ question: 'Q?', closed: true, noPrice: 0 });
+
+    const fromCopy = priceManualPosition(mp, lookup([]), new Map());
+    expect(fromCopy.currentPrice).toBe(0.6);
+    expect(fromCopy.market).toBe(snapshot);
   });
 });
 

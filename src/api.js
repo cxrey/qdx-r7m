@@ -44,7 +44,7 @@ const TIMEOUT_LOOKUP = 8_000;        // 8s per direct lookup request
  * `closed=false` on /events filters EVENTS, not their markets. An open event
  * still carries markets that have resolved (closed, prices settled at 0/1) and
  * placeholder slots like "Person X" (inactive, never traded, no prices) — in
- * Oct 2026 about 60% of the markets on the first catalog page.
+ * Oct 2026, 43% of the markets in qualifying events.
  */
 export function isListedMarket(market) {
   return market.active !== false && market.closed !== true && market.archived !== true;

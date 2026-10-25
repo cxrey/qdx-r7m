@@ -17,7 +17,11 @@ import {
   getDismissedAlerts,
   dismissAlert as dismissAlertStorage,
   screenNewTrade,
+  pricesFromGammaMarket,
+  unloadedManualMarketIds,
+  priceManualPosition,
 } from '../PortfolioEngine';
+import { fetchMarketById } from '../api';
 
 const REFRESH_INTERVAL = 5 * 60 * 1000; // 5 minutes
 
@@ -124,32 +128,49 @@ export function usePortfolio(loadedMarkets) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadedMarkets.length]);
 
+  // Manual positions whose market isn't in the catalog (resolved, or in an
+  // event under the volume floor) would show the price saved when they were
+  // added. Look those markets up directly instead: /markets/{id} returns
+  // closed markets too. Settled prices are final, so fetched once; open
+  // markets are re-fetched on the portfolio refresh interval.
+  const [lookedUpPrices, setLookedUpPrices] = useState(() => new Map());
+  const lookedUpRef = useRef(lookedUpPrices);
+  lookedUpRef.current = lookedUpPrices;
+  const [lookupTick, setLookupTick] = useState(0);
+
+  useEffect(() => {
+    const timer = setInterval(() => setLookupTick((n) => n + 1), REFRESH_INTERVAL);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    // Before the catalog loads, every market would look unloaded
+    if (marketLookup.byId.size === 0) return;
+    const ids = unloadedManualMarketIds(manualPositions, marketLookup)
+      .filter((id) => !lookedUpRef.current.get(id)?.closed);
+    if (ids.length === 0) return;
+
+    const ctrl = new AbortController();
+    Promise.all(ids.map((id) => fetchMarketById(id, ctrl.signal)
+      .then((res) => [id, pricesFromGammaMarket(res?.markets?.[0])])))
+      .then((results) => {
+        if (ctrl.signal.aborted) return;
+        const found = results.filter(([, prices]) => prices);
+        if (found.length === 0) return;
+        setLookedUpPrices((prev) => {
+          const next = new Map(prev);
+          for (const [id, prices] of found) next.set(id, prices);
+          return next;
+        });
+      });
+    return () => ctrl.abort();
+  }, [manualPositions, marketLookup, lookupTick]);
+
   // Merge all positions (wallet + manual), match manuals to markets
   const allPositions = useMemo(() => {
-    // Match manual positions to loaded markets — O(1) lookups
-    const matchedManual = manualPositions.map((mp) => {
-      const market = marketLookup.byId.get(String(mp.marketId))
-        || (mp.conditionId && marketLookup.byCondition.get(mp.conditionId))
-        || mp.market;
-
-      const currentPrice = mp.side === 'YES'
-        ? (market?.yesPrice ?? mp.currentPrice)
-        : (market?.noPrice ?? mp.currentPrice);
-
-      return {
-        ...mp,
-        market: market || mp.market,
-        currentPrice,
-        currentValue: (mp.size || 0) * (currentPrice || 0),
-        unrealizedPnl: mp.entryPrice != null && currentPrice != null
-          ? (currentPrice - mp.entryPrice) * (mp.size || 0)
-          : 0,
-        source: 'manual',
-      };
-    });
-
+    const matchedManual = manualPositions.map((mp) => priceManualPosition(mp, marketLookup, lookedUpPrices));
     return [...walletPositions, ...matchedManual].filter((p) => p.market != null);
-  }, [walletPositions, manualPositions, marketLookup]);
+  }, [walletPositions, manualPositions, marketLookup, lookedUpPrices]);
 
   // Correlation analysis
   const analysis = useMemo(() => {

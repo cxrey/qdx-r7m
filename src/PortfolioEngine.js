@@ -136,6 +136,72 @@ export function matchPositionsToMarkets(positions, loadedMarkets) {
   });
 }
 
+// ── Manual positions in markets the catalog doesn't hold ──
+// A manual position saves a copy of its market when added. If that market
+// later leaves the loaded catalog (it resolved, or its event is under the
+// volume floor), the copy's price is frozen at the day it was added. These
+// helpers let the portfolio look such markets up directly and price from that.
+
+/**
+ * Prices from a raw Gamma market (as /markets/{id} returns it — closed
+ * markets included, with their settled 0/1 prices).
+ * @returns {{ yesPrice: number, noPrice: number, closed: boolean } | null}
+ */
+export function pricesFromGammaMarket(raw) {
+  if (!raw) return null;
+  let prices = raw.outcomePrices;
+  if (typeof prices === 'string') {
+    try { prices = JSON.parse(prices); } catch { return null; }
+  }
+  if (!Array.isArray(prices) || prices.length < 2) return null;
+  const yesPrice = parseFloat(prices[0]);
+  const noPrice = parseFloat(prices[1]);
+  if (!Number.isFinite(yesPrice) || !Number.isFinite(noPrice)) return null;
+  return { yesPrice, noPrice, closed: raw.closed === true };
+}
+
+function findLoadedMarket(mp, marketLookup) {
+  return marketLookup.byId.get(String(mp.marketId))
+    || (mp.conditionId && marketLookup.byCondition.get(mp.conditionId))
+    || null;
+}
+
+/** Market IDs of manual positions whose market isn't in the loaded catalog. */
+export function unloadedManualMarketIds(manualPositions, marketLookup) {
+  const ids = new Set();
+  for (const mp of manualPositions) {
+    if (mp.marketId != null && !findLoadedMarket(mp, marketLookup)) ids.add(String(mp.marketId));
+  }
+  return [...ids];
+}
+
+/**
+ * Attach current prices to a manual position. Price source, in order: the
+ * loaded market, then prices looked up for a market the catalog doesn't hold
+ * (`lookedUp`: marketId → pricesFromGammaMarket result), then the saved copy.
+ */
+export function priceManualPosition(mp, marketLookup, lookedUp) {
+  const loaded = findLoadedMarket(mp, marketLookup);
+  const fetched = !loaded ? lookedUp?.get(String(mp.marketId)) : null;
+  const market = loaded
+    || (fetched && mp.market ? { ...mp.market, ...fetched } : mp.market);
+
+  const currentPrice = mp.side === 'YES'
+    ? (market?.yesPrice ?? mp.currentPrice)
+    : (market?.noPrice ?? mp.currentPrice);
+
+  return {
+    ...mp,
+    market,
+    currentPrice,
+    currentValue: (mp.size || 0) * (currentPrice || 0),
+    unrealizedPnl: mp.entryPrice != null && currentPrice != null
+      ? (currentPrice - mp.entryPrice) * (mp.size || 0)
+      : 0,
+    source: 'manual',
+  };
+}
+
 // ── Entity Extraction ──
 
 export function extractEntities(text) {
