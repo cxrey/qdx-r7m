@@ -4,6 +4,7 @@ import { throwIfRateLimited } from './clobErrorHandler';
 import { parseGammaMarkets, parseOrderBook } from './schemas';
 
 import { GAMMA_API, CLOB_API } from './apiConfig';
+import { CATALOG_MIN_VOLUME } from './engineConfig';
 
 const PAGE_SIZE = 100;
 const MAX_PAGES = 200; // Safety cap across all bands: 200 pages × 100 events/page = 20K events max (markets are nested per event, so more markets)
@@ -17,16 +18,19 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 // uses /events/keyset cursors instead. A cursor chain is strictly sequential, so
 // to keep the parallelism of the old 5-way offset batches, the catalog is split
 // into volume bands with one cursor chain each. Edges are rough quantiles of
-// the active catalog (~8K events, Oct 2026); uneven bands only cost wall-clock
-// time, never coverage. Bands are listed in descending volume, so concatenating
-// them preserves the global order=volume desc ordering.
+// active events at or above the catalog floor (Oct 2026); uneven bands only
+// cost wall-clock time, never coverage. Bands are listed in descending volume,
+// so concatenating them preserves the global order=volume desc ordering. The
+// bottom band starts at CATALOG_MIN_VOLUME: events below it (by TOTAL event
+// volume) are not loaded; all markets inside qualifying events are.
 const VOLUME_BANDS = [
-  [50_000, null],
-  [15_000, 50_000],
-  [5_000, 15_000],
-  [1_000, 5_000],
-  [100, 1_000],
+  [250_000, null],
+  [80_000, 250_000],
+  [40_000, 80_000],
+  [22_000, 40_000],
+  [CATALOG_MIN_VOLUME, 22_000],
 ];
+
 
 // ── Request-level timeouts ──────────────────────────────────────
 // Prevents hung fetches from blocking a band's cursor chain indefinitely.

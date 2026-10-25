@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 
 afterEach(() => { vi.restoreAllMocks(); });
-import { createScaleMapper, smartRound } from '../components/DualRangeSlider';
+import { createScaleMapper, smartRound, parseSliderValue } from '../components/DualRangeSlider';
 
 // ── createScaleMapper ────────────────────────────────────────────
 
@@ -178,5 +178,28 @@ describe('smartRound — defensive inputs', () => {
 
   it('does not throw when min > max', () => {
     expect(() => smartRound(50, 100, 0)).not.toThrow();
+  });
+});
+
+describe('parseSliderValue (slider text boxes)', () => {
+  it('reads K/M/B suffixes as displayed in the Volume boxes', () => {
+    expect(parseSliderValue('$15K')).toBe(15_000);
+    expect(parseSliderValue('$20k')).toBe(20_000);
+    expect(parseSliderValue('$1.5M')).toBe(1_500_000);
+    expect(parseSliderValue('2b')).toBe(2_000_000_000);
+  });
+
+  it('reads plain numbers and ignores symbols', () => {
+    expect(parseSliderValue('365')).toBe(365);
+    expect(parseSliderValue('50¢')).toBe(50);
+    expect(parseSliderValue('$25,000')).toBe(25_000);
+    expect(parseSliderValue(' 12.5 ')).toBe(12.5);
+  });
+
+  it('returns NaN for non-numeric input', () => {
+    expect(parseSliderValue('')).toBeNaN();
+    expect(parseSliderValue('-')).toBeNaN();
+    expect(parseSliderValue('abc')).toBeNaN();
+    expect(parseSliderValue('K')).toBeNaN();
   });
 });

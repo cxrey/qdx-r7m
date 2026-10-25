@@ -11,6 +11,7 @@
 import { WebSocketPriceStream } from './WebSocketPriceStream';
 import { PriceUpdateBatcher } from './PriceUpdateBatcher';
 import { fetchCatalog, flattenEventsToMarkets } from './api';
+import { CATALOG_MIN_VOLUME } from './engineConfig';
 import { processMarket, enrichWithBaseRate } from './processMarket';
 import { processAllInWorker } from './workerManager';
 import { handleRateLimit, getBackoffMultiplier, onBackoffChange, isClobRateLimited } from './ApiHealthManager';
@@ -428,8 +429,12 @@ export class RefreshManager {
 
       const newMarkets = [];
       for (let page = 0; page < NEW_MARKET_PAGES; page++) {
-        // Fetch from /events to get event-level tags for fee category resolution
-        const url = `${GAMMA_API}/events?limit=${PAGE_SIZE}&offset=${page * PAGE_SIZE}&active=true&closed=false&order=createdAt&ascending=false&volume_num_min=100`;
+        // Fetch from /events to get event-level tags for fee category resolution.
+        // Same event-level floor as the catalog crawl (CATALOG_MIN_VOLUME).
+        // NOTE: /events filters by `volume_min`; it silently IGNORES
+        // `volume_num_min` (that's the /markets name), which is why discovery
+        // previously pulled in events with single-digit volume.
+        const url = `${GAMMA_API}/events?limit=${PAGE_SIZE}&offset=${page * PAGE_SIZE}&active=true&closed=false&order=createdAt&ascending=false&volume_min=${CATALOG_MIN_VOLUME}`;
         const res = await this._bgFetch(url);
 
         if (res.status === 429 || res.status === 403) {

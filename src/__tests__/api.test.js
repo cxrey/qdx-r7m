@@ -15,6 +15,7 @@ import {
   fetchMarketByConditionId, fetchMarketByTokenId,
 } from '../api';
 import { withTimeout } from '../fetchUtils';
+import { CATALOG_MIN_VOLUME } from '../engineConfig';
 
 let mockFetch;
 
@@ -137,7 +138,7 @@ describe('fetchPriceHistory', () => {
 
 describe('fetchAllMarkets', () => {
   // volume_min of each band, in the order fetchAllMarkets lists them (highest volume first)
-  const BAND_MINS = ['50000', '15000', '5000', '1000', '100'];
+  const BAND_MINS = ['250000', '80000', '40000', '22000', '15000'];
 
   // Helper: make n events, each containing marketsPerEvent markets — the shape
   // of the `events` array in a /events/keyset response.
@@ -152,6 +153,7 @@ describe('fetchAllMarkets', () => {
         markets: Array.from({ length: marketsPerEvent }, (_, j) => ({
           id: `m-${eventId}-${j}`,
           question: `Market ${eventId}-${j}`,
+          volume: '20000', // above the $15K catalog floor
         })),
       };
     });
@@ -191,7 +193,7 @@ describe('fetchAllMarkets', () => {
     expect(p.has('after_cursor')).toBe(false); // first page of a chain has no cursor
   });
 
-  it('starts one cursor chain per volume band, covering volume ≥ 100 without gaps', async () => {
+  it('starts one cursor chain per volume band, covering volume ≥ the catalog floor without gaps', async () => {
     mockFetch.mockImplementation(keysetServer({}));
     await fetchAllMarkets(vi.fn());
     expect(mockFetch).toHaveBeenCalledTimes(BAND_MINS.length);
@@ -200,7 +202,7 @@ describe('fetchAllMarkets', () => {
       return [Number(p.get('volume_min')), p.has('volume_max') ? Number(p.get('volume_max')) : Infinity];
     }).sort((a, b) => b[0] - a[0]);
     expect(bands[0][1]).toBe(Infinity); // top band is open-ended
-    expect(bands[bands.length - 1][0]).toBe(100);
+    expect(bands[bands.length - 1][0]).toBe(CATALOG_MIN_VOLUME);
     for (let i = 1; i < bands.length; i++) {
       expect(bands[i][1]).toBe(bands[i - 1][0]); // each band's max is the next band's min
     }
@@ -210,7 +212,7 @@ describe('fetchAllMarkets', () => {
     const cursor = 'abc+/=';
     mockFetch.mockImplementation(async (url) => {
       const p = params(url);
-      if (p.get('volume_min') !== '5000') return keysetResponse([]);
+      if (p.get('volume_min') !== '40000') return keysetResponse([]);
       if (!p.has('after_cursor')) return keysetResponse(makeEvents(100, 0), cursor);
       return keysetResponse(makeEvents(30, 100));
     });
@@ -219,13 +221,13 @@ describe('fetchAllMarkets', () => {
     const followUps = mockFetch.mock.calls.map(([url]) => url).filter((url) => url.includes('after_cursor='));
     expect(followUps).toHaveLength(1);
     expect(followUps[0]).toContain(`after_cursor=${encodeURIComponent(cursor)}`);
-    expect(params(followUps[0]).get('volume_min')).toBe('5000');
+    expect(params(followUps[0]).get('volume_min')).toBe('40000');
   });
 
   it('follows each band to the end of its cursor chain and stops', async () => {
     mockFetch.mockImplementation(keysetServer({
-      50000: [makeEvents(100, 0), makeEvents(100, 100), makeEvents(20, 200)],
-      100: [makeEvents(100, 1000), makeEvents(5, 1100)],
+      250000: [makeEvents(100, 0), makeEvents(100, 100), makeEvents(20, 200)],
+      15000: [makeEvents(100, 1000), makeEvents(5, 1100)],
     }));
     const result = await fetchAllMarkets(vi.fn());
     // 3 pages + 2 pages + 1 empty page for each of the 3 other bands
@@ -242,16 +244,16 @@ describe('fetchAllMarkets', () => {
 
   it('returns markets in descending band order', async () => {
     mockFetch.mockImplementation(keysetServer({
-      100: [makeEvents(1, 400)],
-      15000: [makeEvents(1, 100)],
-      50000: [makeEvents(1, 0)],
+      15000: [makeEvents(1, 400)],
+      80000: [makeEvents(1, 100)],
+      250000: [makeEvents(1, 0)],
     }));
     const result = await fetchAllMarkets(vi.fn());
     expect(result.map((m) => m.id)).toEqual(['m-0-0', 'm-100-0', 'm-400-0']);
   });
 
   it('flattens nested markets from events and injects parent event data', async () => {
-    mockFetch.mockImplementation(keysetServer({ 50000: [makeEvents(1, 0, 3)] }));
+    mockFetch.mockImplementation(keysetServer({ 250000: [makeEvents(1, 0, 3)] }));
     const result = await fetchAllMarkets(vi.fn());
     expect(result.length).toBe(3);
     // Each market should have events[0] injected with parent event data (tags, slug)
@@ -263,8 +265,8 @@ describe('fetchAllMarkets', () => {
 
   it('dedupes an event returned by two bands (boundary / volume moved mid-crawl)', async () => {
     mockFetch.mockImplementation(keysetServer({
-      50000: [makeEvents(2, 0)],
-      15000: [makeEvents(2, 1)], // evt-1 overlaps
+      250000: [makeEvents(2, 0)],
+      80000: [makeEvents(2, 1)], // evt-1 overlaps
     }));
     const result = await fetchAllMarkets(vi.fn());
     expect(result.map((m) => m.id)).toEqual(['m-0-0', 'm-1-0', 'm-2-0']);
@@ -273,7 +275,7 @@ describe('fetchAllMarkets', () => {
   it('drops events marked inactive (keyset has no active filter)', async () => {
     const events = makeEvents(2, 0);
     events[1].active = false;
-    mockFetch.mockImplementation(keysetServer({ 50000: [events] }));
+    mockFetch.mockImplementation(keysetServer({ 250000: [events] }));
     const result = await fetchAllMarkets(vi.fn());
     expect(result.map((m) => m.id)).toEqual(['m-0-0']);
   });
@@ -281,8 +283,8 @@ describe('fetchAllMarkets', () => {
   it('calls onProgress with the cumulative market count across bands', async () => {
     const onProgress = vi.fn();
     mockFetch.mockImplementation(keysetServer({
-      50000: [makeEvents(100, 0), makeEvents(100, 100)],
-      1000: [makeEvents(50, 500, 2)],
+      250000: [makeEvents(100, 0), makeEvents(100, 100)],
+      22000: [makeEvents(50, 500, 2)],
     }));
     await fetchAllMarkets(onProgress);
     const counts = onProgress.mock.calls.map(([n]) => n);
@@ -298,48 +300,48 @@ describe('fetchAllMarkets', () => {
   });
 
   it('accepts a null onProgress (Tier 3 background refresh)', async () => {
-    mockFetch.mockImplementation(keysetServer({ 50000: [makeEvents(3, 0)] }));
+    mockFetch.mockImplementation(keysetServer({ 250000: [makeEvents(3, 0)] }));
     const result = await fetchAllMarkets(null);
     expect(result.length).toBe(3);
   });
 
   it('on 429 stops every band and keeps what was already fetched', async () => {
     const server = keysetServer({
-      50000: [makeEvents(100, 0), makeEvents(100, 100), makeEvents(100, 200)],
-      15000: [makeEvents(100, 1000), makeEvents(100, 1100)],
+      250000: [makeEvents(100, 0), makeEvents(100, 100), makeEvents(100, 200)],
+      80000: [makeEvents(100, 1000), makeEvents(100, 1100)],
     });
     mockFetch.mockImplementation(async (url) => {
       // The 15000 band's second page is rate limited
-      if (params(url).get('after_cursor') === '15000/1') return new Response('', { status: 429 });
+      if (params(url).get('after_cursor') === '80000/1') return new Response('', { status: 429 });
       return server(url);
     });
     const result = await fetchAllMarkets(vi.fn());
     // Round 1: 5 first pages; round 2: 50000/1 and 15000/1 (429). No round 3.
     expect(mockFetch).toHaveBeenCalledTimes(7);
-    expect(mockFetch.mock.calls.some(([url]) => url.includes('after_cursor=50000%2F2'))).toBe(false);
+    expect(mockFetch.mock.calls.some(([url]) => url.includes('after_cursor=250000%2F2'))).toBe(false);
     // 50000 band pages 0 and 1, 15000 band page 0
     expect(result.length).toBe(300);
     // 429 is never retried
-    expect(mockFetch.mock.calls.filter(([url]) => url.includes('after_cursor=15000%2F1'))).toHaveLength(1);
+    expect(mockFetch.mock.calls.filter(([url]) => url.includes('after_cursor=80000%2F1'))).toHaveLength(1);
   });
 
   it('stops on caller abort and returns the pages fetched before it', async () => {
     const controller = new AbortController();
     const server = keysetServer({
-      50000: [makeEvents(100, 0), makeEvents(100, 100), makeEvents(100, 200)],
-      15000: [makeEvents(100, 1000), makeEvents(100, 1100)],
+      250000: [makeEvents(100, 0), makeEvents(100, 100), makeEvents(100, 200)],
+      80000: [makeEvents(100, 1000), makeEvents(100, 1100)],
     });
     mockFetch.mockImplementation(async (url, init) => {
       if (init?.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
       const res = await server(url);
-      if (params(url).get('after_cursor') === '50000/1') controller.abort();
+      if (params(url).get('after_cursor') === '250000/1') controller.abort();
       return res;
     });
     const result = await fetchAllMarkets(vi.fn(), controller.signal);
     // No band starts a page after the abort
-    const afterAbort = mockFetch.mock.calls.findIndex(([url]) => url.includes('after_cursor=50000%2F1'));
+    const afterAbort = mockFetch.mock.calls.findIndex(([url]) => url.includes('after_cursor=250000%2F1'));
     expect(mockFetch.mock.calls.length).toBeLessThanOrEqual(afterAbort + 2);
-    expect(mockFetch.mock.calls.some(([url]) => url.includes('after_cursor=50000%2F2'))).toBe(false);
+    expect(mockFetch.mock.calls.some(([url]) => url.includes('after_cursor=250000%2F2'))).toBe(false);
     // Round 1 pages (50000/0 and 15000/0) survive; nothing is thrown
     expect(result.map((m) => m.id)).toContain('m-0-0');
     expect(result.map((m) => m.id)).toContain('m-1000-0');
@@ -348,17 +350,17 @@ describe('fetchAllMarkets', () => {
   it('returns without fetching when the signal is already aborted', async () => {
     const controller = new AbortController();
     controller.abort();
-    mockFetch.mockImplementation(keysetServer({ 50000: [makeEvents(1, 0)] }));
+    mockFetch.mockImplementation(keysetServer({ 250000: [makeEvents(1, 0)] }));
     const result = await fetchAllMarkets(vi.fn(), controller.signal);
     expect(mockFetch).not.toHaveBeenCalled();
     expect(result).toEqual([]);
   });
 
   it('retries a timed-out page once (timeout abort is not a caller abort)', async () => {
-    const server = keysetServer({ 50000: [makeEvents(100, 0), makeEvents(10, 100)] });
+    const server = keysetServer({ 250000: [makeEvents(100, 0), makeEvents(10, 100)] });
     let timedOut = false;
     mockFetch.mockImplementation(async (url) => {
-      if (!timedOut && params(url).get('after_cursor') === '50000/1') {
+      if (!timedOut && params(url).get('after_cursor') === '250000/1') {
         timedOut = true;
         throw new DOMException('signal timed out', 'AbortError');
       }
@@ -366,41 +368,41 @@ describe('fetchAllMarkets', () => {
     });
     const result = await fetchAllMarkets(vi.fn(), new AbortController().signal);
     expect(result.length).toBe(110);
-    expect(mockFetch.mock.calls.filter(([url]) => url.includes('after_cursor=50000%2F1'))).toHaveLength(2);
+    expect(mockFetch.mock.calls.filter(([url]) => url.includes('after_cursor=250000%2F1'))).toHaveLength(2);
   });
 
   it('retries a 5xx / network failure once, then ends only that band', async () => {
     const server = keysetServer({
-      50000: [makeEvents(100, 0), makeEvents(100, 100)],
-      100: [makeEvents(100, 1000), makeEvents(100, 1100)],
+      250000: [makeEvents(100, 0), makeEvents(100, 100)],
+      15000: [makeEvents(100, 1000), makeEvents(100, 1100)],
     });
     mockFetch.mockImplementation(async (url) => {
       const cursor = params(url).get('after_cursor');
-      if (cursor === '50000/1') return new Response('Server Error', { status: 500 });
-      if (cursor === '100/1' && !mockFetch.mock.calls.slice(0, -1).some(([u]) => u === url)) {
+      if (cursor === '250000/1') return new Response('Server Error', { status: 500 });
+      if (cursor === '15000/1' && !mockFetch.mock.calls.slice(0, -1).some(([u]) => u === url)) {
         throw new TypeError('fetch failed'); // first attempt only
       }
       return server(url);
     });
     const result = await fetchAllMarkets(vi.fn());
-    expect(mockFetch.mock.calls.filter(([url]) => url.includes('after_cursor=50000%2F1'))).toHaveLength(2);
+    expect(mockFetch.mock.calls.filter(([url]) => url.includes('after_cursor=250000%2F1'))).toHaveLength(2);
     // 50000 band: page 0 only; 100 band: both pages after the retry
     expect(result.length).toBe(300);
   });
 
   it('ends a band on a 4xx without retrying, other bands continue', async () => {
     const server = keysetServer({
-      50000: [makeEvents(100, 0), makeEvents(100, 100)],
-      100: [makeEvents(100, 1000), makeEvents(100, 1100)],
+      250000: [makeEvents(100, 0), makeEvents(100, 100)],
+      15000: [makeEvents(100, 1000), makeEvents(100, 1100)],
     });
     mockFetch.mockImplementation(async (url) => {
-      if (params(url).get('after_cursor') === '50000/1') {
+      if (params(url).get('after_cursor') === '250000/1') {
         return new Response('{"type":"validation error"}', { status: 422 });
       }
       return server(url);
     });
     const result = await fetchAllMarkets(vi.fn());
-    expect(mockFetch.mock.calls.filter(([url]) => url.includes('after_cursor=50000%2F1'))).toHaveLength(1);
+    expect(mockFetch.mock.calls.filter(([url]) => url.includes('after_cursor=250000%2F1'))).toHaveLength(1);
     expect(result.length).toBe(300);
   });
 
@@ -420,15 +422,15 @@ describe('fetchAllMarkets', () => {
   // ── Completeness (Tier 3 must not treat an incomplete crawl as authoritative) ──
 
   it('fetchCatalog reports complete when every band reaches the end of its chain', async () => {
-    mockFetch.mockImplementation(keysetServer({ 50000: [makeEvents(100, 0), makeEvents(5, 100)], 100: [makeEvents(3, 900)] }));
+    mockFetch.mockImplementation(keysetServer({ 250000: [makeEvents(100, 0), makeEvents(5, 100)], 15000: [makeEvents(3, 900)] }));
     const { markets, complete } = await fetchCatalog(vi.fn());
     expect(complete).toBe(true);
     expect(markets).toHaveLength(108);
   });
 
   it('fetchCatalog reports incomplete when a band ends on a failed page', async () => {
-    const server = keysetServer({ 50000: [makeEvents(100, 0), makeEvents(100, 100)] });
-    mockFetch.mockImplementation(async (url) => (params(url).get('after_cursor') === '50000/1'
+    const server = keysetServer({ 250000: [makeEvents(100, 0), makeEvents(100, 100)] });
+    mockFetch.mockImplementation(async (url) => (params(url).get('after_cursor') === '250000/1'
       ? new Response('{"type":"validation error"}', { status: 422 })
       : server(url)));
     const { markets, complete } = await fetchCatalog(vi.fn());
@@ -437,8 +439,8 @@ describe('fetchAllMarkets', () => {
   });
 
   it('fetchCatalog reports incomplete when rate limited', async () => {
-    const server = keysetServer({ 50000: [makeEvents(100, 0), makeEvents(100, 100)] });
-    mockFetch.mockImplementation(async (url) => (params(url).get('after_cursor') === '50000/1'
+    const server = keysetServer({ 250000: [makeEvents(100, 0), makeEvents(100, 100)] });
+    mockFetch.mockImplementation(async (url) => (params(url).get('after_cursor') === '250000/1'
       ? new Response('Too Many Requests', { status: 429 })
       : server(url)));
     expect((await fetchCatalog(vi.fn())).complete).toBe(false);
@@ -450,7 +452,7 @@ describe('fetchAllMarkets', () => {
   });
 
   it('fetchAllMarkets still returns the markets array (unchanged contract)', async () => {
-    mockFetch.mockImplementation(keysetServer({ 50000: [makeEvents(4, 0)] }));
+    mockFetch.mockImplementation(keysetServer({ 250000: [makeEvents(4, 0)] }));
     const markets = await fetchAllMarkets(vi.fn());
     expect(Array.isArray(markets)).toBe(true);
     expect(markets).toHaveLength(4);
@@ -460,7 +462,7 @@ describe('fetchAllMarkets', () => {
     const onProgress = vi.fn();
     const shared = makeEvents(10, 0);                       // returned by two bands
     const inactive = makeEvents(5, 500).map((e) => ({ ...e, active: false }));
-    mockFetch.mockImplementation(keysetServer({ 50000: [shared], 15000: [shared], 100: [inactive] }));
+    mockFetch.mockImplementation(keysetServer({ 250000: [shared], 80000: [shared], 15000: [inactive] }));
     const markets = await fetchAllMarkets(onProgress);
     const last = onProgress.mock.calls.at(-1)[0];
     expect(markets).toHaveLength(10);
@@ -471,15 +473,15 @@ describe('fetchAllMarkets', () => {
   it('pauses before retrying a failed page instead of retrying instantly', async () => {
     vi.useFakeTimers();
     try {
-      const server = keysetServer({ 50000: [makeEvents(2, 0)] });
+      const server = keysetServer({ 250000: [makeEvents(2, 0)] });
       let failed = false;
       mockFetch.mockImplementation(async (url) => {
-        if (!failed && params(url).get('volume_min') === '50000') { failed = true; return new Response('err', { status: 503 }); }
+        if (!failed && params(url).get('volume_min') === '250000') { failed = true; return new Response('err', { status: 503 }); }
         return server(url);
       });
       const done = fetchAllMarkets(vi.fn());
       await vi.advanceTimersByTimeAsync(500);
-      const callsAt500 = mockFetch.mock.calls.filter(([u]) => params(u).get('volume_min') === '50000').length;
+      const callsAt500 = mockFetch.mock.calls.filter(([u]) => params(u).get('volume_min') === '250000').length;
       await vi.advanceTimersByTimeAsync(600);
       const markets = await done;
       expect(callsAt500).toBe(1);                  // retry not sent yet at 500ms
@@ -489,17 +491,40 @@ describe('fetchAllMarkets', () => {
     }
   });
 
+  // ── Catalog volume floor ──
+
+  it('the floor is event-level: every market in a qualifying event is loaded, whatever its own volume', async () => {
+    const event = {
+      id: 'evt-mixed', slug: 'mixed', active: true,
+      markets: [
+        { id: 'big', question: 'Big', volume: '250000' },
+        { id: 'small', question: 'Small', volume: '1200' },
+        { id: 'none', question: 'No volume yet' },
+      ],
+    };
+    mockFetch.mockImplementation(keysetServer({ 250000: [[event]] }));
+    const markets = await fetchAllMarkets(vi.fn());
+    expect(markets.map((m) => m.id)).toEqual(['big', 'small', 'none']);
+  });
+
+  it('never requests events below the floor (bottom band starts at CATALOG_MIN_VOLUME)', async () => {
+    mockFetch.mockImplementation(keysetServer({}));
+    await fetchAllMarkets(vi.fn());
+    const mins = mockFetch.mock.calls.map(([url]) => Number(params(url).get('volume_min')));
+    expect(Math.min(...mins)).toBe(CATALOG_MIN_VOLUME);
+  });
+
   it('handles events with multiple markets (fan-out)', async () => {
-    mockFetch.mockImplementation(keysetServer({ 50000: [makeEvents(10, 0, 5)] }));
+    mockFetch.mockImplementation(keysetServer({ 250000: [makeEvents(10, 0, 5)] }));
     const result = await fetchAllMarkets(vi.fn());
     expect(result.length).toBe(50);
   });
 
   it('skips events with no markets array', async () => {
     mockFetch.mockImplementation(keysetServer({
-      50000: [[
+      250000: [[
         { id: 'evt-1', slug: 'no-markets' }, // missing markets array
-        { id: 'evt-2', slug: 'with-markets', markets: [{ id: 'm-1' }] },
+        { id: 'evt-2', slug: 'with-markets', markets: [{ id: 'm-1', volume: '20000' }] },
       ]],
     }));
     const result = await fetchAllMarkets(vi.fn());

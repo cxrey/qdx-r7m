@@ -1,6 +1,9 @@
 import { useCallback, useMemo } from 'react';
 import DualRangeSlider from './DualRangeSlider';
-import { DEFAULT_FILTERS } from '../filterDefaults';
+import { DEFAULT_FILTERS, VOLUME_FILTER_MAX } from '../filterDefaults';
+import { CATALOG_MIN_VOLUME } from '../engineConfig';
+
+const formatVolumeShort = (v) => (v >= 1_000_000 ? `$${(v / 1_000_000).toFixed(1)}M` : `$${(v / 1_000).toFixed(0)}K`);
 import { useExecutionStyle } from '../contexts/ExecutionContext';
 
 const SORT_OPTIONS = [
@@ -134,11 +137,12 @@ export default function FilterPanel({ filters, setFilters, categories, hasPortfo
       {/* Volume Range */}
       <DualRangeSlider
         label="Volume"
-        min={0} max={50_000_000}
+        min={0} max={VOLUME_FILTER_MAX}
         value={filters.volumeRange}
         onChange={(v) => update('volumeRange', v)}
-        displayFormat={(v) => v >= 1_000_000 ? `$${(v / 1_000_000).toFixed(1)}M` : `$${(v / 1_000).toFixed(0)}K`}
+        displayFormat={formatVolumeShort}
         logScale
+        hint={`Only events with ${formatVolumeShort(CATALOG_MIN_VOLUME)}+ total volume are loaded. Markets under ${formatVolumeShort(CATALOG_MIN_VOLUME)} are hidden by default — lower the slider to show them.`}
       />
 
       {/* Yes Price Range */}

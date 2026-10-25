@@ -282,3 +282,30 @@ describe('RefreshManager — asset index rebuild', () => {
     expect(order).toEqual(['unsubscribe', 'subscribe']);
   });
 });
+
+describe('RefreshManager — Tier 2 discovery respects the catalog floor', () => {
+  it('requests volume_min (the param /events honours) and keeps every market of qualifying events', async () => {
+    const { CATALOG_MIN_VOLUME } = await import('../engineConfig');
+    const event = {
+      id: 'evt-new', slug: 'new-event', active: true,
+      markets: [
+        { id: 'keep', question: 'Keep?', volume: String(CATALOG_MIN_VOLUME + 1), outcomePrices: '["0.5","0.5"]', clobTokenIds: '["k1","k2"]' },
+        { id: 'drop', question: 'Drop?', volume: '50', outcomePrices: '["0.5","0.5"]', clobTokenIds: '["d1","d2"]' },
+      ],
+    };
+    const urls = [];
+    vi.stubGlobal('fetch', vi.fn(async (url) => {
+      urls.push(url);
+      return new Response(JSON.stringify(urls.length === 1 ? [event] : []), { status: 200 });
+    }));
+    const onNewMarkets = vi.fn();
+    const mgr = new RefreshManager({ onNewMarkets, onToast: vi.fn(), getCurrentMarkets: () => [] });
+    mgr._enabled = true;
+    await mgr._runTier2();
+    expect(urls[0]).toContain(`volume_min=${CATALOG_MIN_VOLUME}`);
+    expect(urls[0]).not.toContain('volume_num_min');
+    // Event-level floor: low-volume markets in a qualifying event are kept
+    expect(onNewMarkets.mock.calls[0][0].map((m) => m.id)).toEqual(['keep', 'drop']);
+    vi.unstubAllGlobals();
+  });
+});

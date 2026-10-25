@@ -8,6 +8,17 @@
 // ─── Time ──────────────────────────────────────────────────────────
 export const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
+// ─── Catalog scope ─────────────────────────────────────────────────
+// Only EVENTS with at least this total lifetime volume ($) are loaded; every
+// market inside a qualifying event is loaded, whatever its own volume (most
+// sub-markets trade far less than their event). The same value is the
+// default lower bound of the Volume filter, so by default the table shows
+// markets that individually clear it; the slider can go lower to reveal the
+// rest of what's loaded. Shared by the catalog crawl, new-market discovery
+// and the filter defaults. Lowering it grows the catalog fast (~164K markets
+// at $100 vs ~78K at $15K), and with it first-load time and memory.
+export const CATALOG_MIN_VOLUME = 15_000;
+
 // ─── Cache TTLs ────────────────────────────────────────────────────
 export const CACHE_TTL_24H = MS_PER_DAY;
 export const CACHE_TTL_5M = 5 * 60 * 1000;
