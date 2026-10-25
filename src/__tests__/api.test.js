@@ -13,6 +13,7 @@ import {
   fetchAllMarkets, fetchCatalog, fetchOrderBook, fetchPriceHistory,
   fetchMarketById, fetchMarketBySlug,
   fetchMarketByConditionId, fetchMarketByTokenId,
+  flattenEventsToMarkets, isListedMarket,
 } from '../api';
 import { withTimeout } from '../fetchUtils';
 import { CATALOG_MIN_VOLUME } from '../engineConfig';
@@ -530,6 +531,43 @@ describe('fetchAllMarkets', () => {
     const result = await fetchAllMarkets(vi.fn());
     expect(result.length).toBe(1);
     expect(result[0].id).toBe('m-1');
+  });
+
+  // ── Unlisted markets inside open events ──
+
+  // The shapes Gamma returns inside closed=false events (Oct 2026)
+  const resolved = { id: 'resolved', question: 'Resolved', volume: '900000', active: true, closed: true, acceptingOrders: false, outcomePrices: '["0", "1"]' };
+  const placeholder = { id: 'person-x', question: 'Will Person X win?', active: false, closed: false, acceptingOrders: true, groupItemTitle: 'Person X' };
+  const archived = { id: 'archived', question: 'Archived', active: true, closed: false, archived: true, acceptingOrders: false };
+  const live = { id: 'live', question: 'Live', volume: '50000', active: true, closed: false, archived: false, acceptingOrders: true };
+
+  it('drops resolved, placeholder and archived markets inside open events', async () => {
+    const event = { id: 'evt-mixed', slug: 'mixed', active: true, markets: [resolved, placeholder, archived, live] };
+    mockFetch.mockImplementation(keysetServer({ 250000: [[event]] }));
+    const markets = await fetchAllMarkets(vi.fn());
+    expect(markets.map((m) => m.id)).toEqual(['live']);
+  });
+
+  it('progress counts only listed markets', async () => {
+    const onProgress = vi.fn();
+    const event = { id: 'evt-mixed', slug: 'mixed', active: true, markets: [resolved, placeholder, live] };
+    mockFetch.mockImplementation(keysetServer({ 250000: [[event]] }));
+    await fetchAllMarkets(onProgress);
+    expect(onProgress.mock.calls.at(-1)[0]).toBe(1);
+  });
+
+  it('flattenEventsToMarkets (also used by new-market discovery) skips unlisted markets', () => {
+    const out = flattenEventsToMarkets([{ id: 'e1', slug: 'e1', markets: [{ ...resolved }, { ...placeholder }, { ...live }] }]);
+    expect(out.map((m) => m.id)).toEqual(['live']);
+    expect(out[0].events[0]).toMatchObject({ id: 'e1', slug: 'e1' });
+  });
+
+  it('isListedMarket keeps markets without status flags (older/partial payloads)', () => {
+    expect(isListedMarket({ id: 'x' })).toBe(true);
+    expect(isListedMarket(live)).toBe(true);
+    expect(isListedMarket(resolved)).toBe(false);
+    expect(isListedMarket(placeholder)).toBe(false);
+    expect(isListedMarket(archived)).toBe(false);
   });
 
   it('treats a response without an events array as an empty page', async () => {
