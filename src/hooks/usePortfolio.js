@@ -20,6 +20,8 @@ import {
   pricesFromGammaMarket,
   unloadedManualMarketIds,
   priceManualPosition,
+  buildHeldMarketLookup,
+  repriceWalletPosition,
 } from '../PortfolioEngine';
 import { fetchMarketById } from '../api';
 
@@ -113,20 +115,29 @@ export function usePortfolio(loadedMarkets) {
     setManualPositions([...updated]);
   }, []);
 
-  // Pre-build lookup maps for O(1) manual position matching
-  // Keyed on loadedMarkets.length — only rebuilds when markets are added/removed,
-  // not on every Immer price-tick reference change (~7/sec).
+  // O(1) lookup of the CURRENT market objects. Rebuilt whenever the markets
+  // array changes — price ticks replace changed market objects (Immer), so a
+  // lookup keyed on length alone kept positions on stale prices. Ticks are
+  // applied at most once a second (App's price throttle, which builds a
+  // same-sized index per tick itself).
   const marketLookup = useMemo(() => {
-    const markets = loadedMarketsRef.current;
     const byId = new Map();
     const byCondition = new Map();
-    for (const m of markets) {
+    for (const m of loadedMarkets) {
       byId.set(String(m.id), m);
       if (m.conditionId) byCondition.set(m.conditionId, m);
     }
     return { byId, byCondition };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loadedMarkets.length]);
+  }, [loadedMarkets]);
+
+  // Just the markets positions are in. Keeps its identity across ticks that
+  // don't touch a held market, so allPositions, the analysis and
+  // PortfolioContext consumers only update when a held price moved.
+  const heldLookupRef = useRef(null);
+  const heldLookup = useMemo(() => {
+    heldLookupRef.current = buildHeldMarketLookup(walletPositions, manualPositions, marketLookup, heldLookupRef.current);
+    return heldLookupRef.current;
+  }, [walletPositions, manualPositions, marketLookup]);
 
   // Manual positions whose market isn't in the catalog (resolved, or in an
   // event under the volume floor) would show the price saved when they were
@@ -143,11 +154,18 @@ export function usePortfolio(loadedMarkets) {
     return () => clearInterval(timer);
   }, []);
 
+  // A string, so price ticks (new marketLookup, same unloaded set) don't
+  // re-run the lookup effect below
+  const unloadedIdsKey = useMemo(
+    () => unloadedManualMarketIds(manualPositions, marketLookup).join('\n'),
+    [manualPositions, marketLookup],
+  );
+  const catalogSize = loadedMarkets.length;
+
   useEffect(() => {
     // Before the catalog loads, every market would look unloaded
-    if (marketLookup.byId.size === 0) return;
-    const ids = unloadedManualMarketIds(manualPositions, marketLookup)
-      .filter((id) => !lookedUpRef.current.get(id)?.closed);
+    if (catalogSize === 0 || !unloadedIdsKey) return;
+    const ids = unloadedIdsKey.split('\n').filter((id) => !lookedUpRef.current.get(id)?.closed);
     if (ids.length === 0) return;
 
     const ctrl = new AbortController();
@@ -164,13 +182,14 @@ export function usePortfolio(loadedMarkets) {
         });
       });
     return () => ctrl.abort();
-  }, [manualPositions, marketLookup, lookupTick]);
+  }, [unloadedIdsKey, catalogSize, lookupTick]);
 
-  // Merge all positions (wallet + manual), match manuals to markets
+  // Merge all positions (wallet + manual), each priced from its market's current object
   const allPositions = useMemo(() => {
-    const matchedManual = manualPositions.map((mp) => priceManualPosition(mp, marketLookup, lookedUpPrices));
-    return [...walletPositions, ...matchedManual].filter((p) => p.market != null);
-  }, [walletPositions, manualPositions, marketLookup, lookedUpPrices]);
+    const pricedWallet = walletPositions.map((p) => repriceWalletPosition(p, heldLookup));
+    const matchedManual = manualPositions.map((mp) => priceManualPosition(mp, heldLookup, lookedUpPrices));
+    return [...pricedWallet, ...matchedManual].filter((p) => p.market != null);
+  }, [walletPositions, manualPositions, heldLookup, lookedUpPrices]);
 
   // Correlation analysis
   const analysis = useMemo(() => {

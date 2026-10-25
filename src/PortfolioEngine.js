@@ -166,6 +166,56 @@ function findLoadedMarket(mp, marketLookup) {
     || null;
 }
 
+// ── Live prices ──
+// Price ticks replace a changed market's object (Immer) and leave the rest
+// as-is. Positions must price from the CURRENT object, and the portfolio
+// should only recompute when a market someone holds actually changed.
+
+/**
+ * Lookup ({ byId, byCondition }) of just the markets positions are in, taken
+ * from the full catalog lookup. Returns `prev` unchanged when every held
+ * market is the same object as before — a tick on a market nobody holds
+ * then leaves the portfolio (and everything memoized on it) untouched.
+ */
+export function buildHeldMarketLookup(walletPositions, manualPositions, marketLookup, prev) {
+  const byId = new Map();
+  const byCondition = new Map();
+  const add = (m) => {
+    byId.set(String(m.id), m);
+    if (m.conditionId) byCondition.set(m.conditionId, m);
+  };
+  for (const p of walletPositions) {
+    const m = p.market && marketLookup.byId.get(String(p.market.id));
+    if (m) add(m);
+  }
+  for (const mp of manualPositions) {
+    const m = findLoadedMarket(mp, marketLookup);
+    if (m) add(m);
+  }
+  if (prev && prev.byId.size === byId.size && [...byId].every(([id, m]) => prev.byId.get(id) === m)) return prev;
+  return { byId, byCondition };
+}
+
+/**
+ * Re-price a wallet position from the current object of its market. Wallet
+ * positions are matched to markets once per wallet refresh (5 min); this
+ * keeps them on live prices in between, without a request.
+ */
+export function repriceWalletPosition(pos, heldLookup) {
+  const market = pos.market && heldLookup.byId.get(String(pos.market.id));
+  if (!market || market === pos.market) return pos;
+  const currentPrice = pos.side === 'YES' ? market.yesPrice : market.noPrice;
+  return {
+    ...pos,
+    market,
+    currentPrice,
+    currentValue: pos.size * (currentPrice || 0),
+    unrealizedPnl: pos.entryPrice != null && currentPrice != null
+      ? (currentPrice - pos.entryPrice) * pos.size
+      : 0,
+  };
+}
+
 /** Market IDs of manual positions whose market isn't in the loaded catalog. */
 export function unloadedManualMarketIds(manualPositions, marketLookup) {
   const ids = new Set();

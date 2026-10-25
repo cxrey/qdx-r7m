@@ -27,6 +27,8 @@ import {
   pricesFromGammaMarket,
   unloadedManualMarketIds,
   priceManualPosition,
+  buildHeldMarketLookup,
+  repriceWalletPosition,
 } from '../PortfolioEngine';
 import { envelope, jsonResponse, v2Position, WALLET, YES_TOKEN, CONDITION } from './helpers/dataApiV2Fixtures';
 
@@ -515,6 +517,49 @@ describe('manual positions in markets the catalog does not hold', () => {
     const fromCopy = priceManualPosition(mp, lookup([]), new Map());
     expect(fromCopy.currentPrice).toBe(0.6);
     expect(fromCopy.market).toBe(snapshot);
+  });
+});
+
+describe('live prices: held-market lookup and wallet re-pricing', () => {
+  const lookupOf = (markets) => ({
+    byId: new Map(markets.map((m) => [String(m.id), m])),
+    byCondition: new Map(markets.filter((m) => m.conditionId).map((m) => [m.conditionId, m])),
+  });
+  const a = { id: 'a', conditionId: 'ca', yesPrice: 0.5, noPrice: 0.5 };
+  const b = { id: 'b', conditionId: 'cb', yesPrice: 0.2, noPrice: 0.8 };
+  const c = { id: 'c', yesPrice: 0.9, noPrice: 0.1 };
+  const wallet = [{ market: a, side: 'YES', size: 10, entryPrice: 0.4 }];
+  const manualPos = [{ marketId: 'x', conditionId: 'cb' }]; // matched by conditionId
+
+  it('holds only the markets positions are in, matched by id or conditionId', () => {
+    const held = buildHeldMarketLookup(wallet, manualPos, lookupOf([a, b, c]), null);
+    expect([...held.byId.keys()].sort()).toEqual(['a', 'b']);
+    expect(held.byCondition.get('cb')).toBe(b);
+  });
+
+  it('keeps its identity when no held market changed, and replaces it when one did', () => {
+    const first = buildHeldMarketLookup(wallet, manualPos, lookupOf([a, b, c]), null);
+    const untouched = buildHeldMarketLookup(wallet, manualPos, lookupOf([a, b, { ...c, yesPrice: 0.95 }]), first);
+    expect(untouched).toBe(first);
+    const a2 = { ...a, yesPrice: 0.6 };
+    const changed = buildHeldMarketLookup(wallet, manualPos, lookupOf([a2, b, c]), first);
+    expect(changed).not.toBe(first);
+    expect(changed.byId.get('a')).toBe(a2);
+  });
+
+  it('repriceWalletPosition prices from the current market object', () => {
+    const a2 = { ...a, yesPrice: 0.7, noPrice: 0.3 };
+    const pos = repriceWalletPosition(wallet[0], lookupOf([a2]));
+    expect(pos).toMatchObject({ market: a2, currentPrice: 0.7 });
+    expect(pos.currentValue).toBeCloseTo(7);
+    expect(pos.unrealizedPnl).toBeCloseTo(3);
+    expect(repriceWalletPosition({ ...wallet[0], side: 'NO', entryPrice: null }, lookupOf([a2])))
+      .toMatchObject({ currentPrice: 0.3, unrealizedPnl: 0 });
+  });
+
+  it('repriceWalletPosition returns the same object when nothing changed or the market is gone', () => {
+    expect(repriceWalletPosition(wallet[0], lookupOf([a]))).toBe(wallet[0]);
+    expect(repriceWalletPosition(wallet[0], lookupOf([]))).toBe(wallet[0]);
   });
 });
 
