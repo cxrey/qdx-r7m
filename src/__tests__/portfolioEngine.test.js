@@ -25,7 +25,7 @@ import {
   dismissAlert,
   resetDismissedAlerts,
 } from '../PortfolioEngine';
-import { envelope, jsonResponse, v2Position, v2Trade, WALLET, YES_TOKEN, CONDITION } from './helpers/dataApiV2Fixtures';
+import { envelope, jsonResponse, v2Position, WALLET, YES_TOKEN, CONDITION } from './helpers/dataApiV2Fixtures';
 
 // ── Helpers ──
 
@@ -476,15 +476,13 @@ describe('fetchPositions (Data API v2)', () => {
   let mockFetch;
   beforeEach(() => { mockFetch = vi.fn(); vi.stubGlobal('fetch', mockFetch); });
 
-  const route = (url) => (url.includes('/v2/positions') ? 'positions' : url.includes('/v2/trades') ? 'trades' : 'other');
+  const route = (url) => (url.includes('/v2/positions') ? 'positions' : 'other');
 
-  it('calls /v2/positions and /v2/trades with the user param', async () => {
-    mockFetch.mockImplementation(async (url) => jsonResponse(envelope(route(url) === 'positions' ? [v2Position()] : [v2Trade()])));
+  it('calls only /v2/positions, with the user param (entry price comes from avgPrice)', async () => {
+    mockFetch.mockImplementation(async () => jsonResponse(envelope([v2Position()])));
     await fetchPositions(WALLET);
     const urls = mockFetch.mock.calls.map((c) => c[0]);
-    expect(urls).toContain(`/data-api/v2/positions?user=${WALLET}`);
-    expect(urls).toContain(`/data-api/v2/trades?user=${WALLET}&limit=100`);
-    expect(urls.some((u) => /[?&]address=/.test(u))).toBe(false);
+    expect(urls).toEqual([`/data-api/v2/positions?user=${WALLET}`]);
   });
 
   it('returns v1-shaped positions that normalizePosition understands', async () => {
@@ -515,13 +513,12 @@ describe('fetchPositions (Data API v2)', () => {
     expect(error).toMatch(/Could not fetch positions/);
   });
 
-  it('survives a failing trades call', async () => {
-    mockFetch.mockImplementation(async (url) => (route(url) === 'positions'
-      ? jsonResponse(envelope([v2Position()]))
-      : new Response('Server Error', { status: 500 })));
-    const { positions, trades, error } = await fetchPositions(WALLET);
-    expect(positions).toHaveLength(1);
-    expect(trades).toEqual([]);
+  it('keeps the positions already fetched when a later page fails', async () => {
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse(envelope(Array.from({ length: 100 }, (_, i) => v2Position({ token_id: `t${i}` })), { nextCursor: 'c1' })))
+      .mockResolvedValueOnce(new Response('Server Error', { status: 500 }));
+    const { positions, error } = await fetchPositions(WALLET);
+    expect(positions).toHaveLength(100);
     expect(error).toBeNull();
   });
 });

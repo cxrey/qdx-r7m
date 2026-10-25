@@ -244,10 +244,18 @@ export default function TradeFlowPanel({ market }) {
 
 // ─── Sub-Components ─────────────────────────────────────────────────
 
+// The trades fetch is capped, so on the busiest markets the "24h" figures
+// cover fewer hours; say how many instead of claiming a full day.
+function windowLabel(flowData) {
+  const h = flowData.coveredHours;
+  if (h == null || h >= 23.5) return '24h';
+  return h < 1 ? `${Math.max(1, Math.round(h * 60))} min` : `${Math.round(h)}h`;
+}
+
 function ReliabilityBadge({ flowData }) {
   const config = RELIABILITY_CONFIG[flowData.reliabilityScore] || RELIABILITY_CONFIG.VERY_LOW;
   const desc = {
-    HIGH: `${flowData.tradeCount24h} trades from ${flowData.totalUniqueWallets} unique wallets in 24h`,
+    HIGH: `${flowData.tradeCount24h} trades from ${flowData.totalUniqueWallets} unique wallets in the last ${windowLabel(flowData)}`,
     MEDIUM: `${flowData.tradeCount24h} trades from ${flowData.totalUniqueWallets} wallets. Interpret with caution.`,
     LOW: `Limited trading activity. Signals may be noise.`,
     VERY_LOW: `Under 5 trades in 24h. No meaningful flow analysis possible.`,
@@ -309,7 +317,7 @@ function FlowSummary({ flowData }) {
             {walletCountYes > walletCountNo ? 'Yes' : walletCountNo > walletCountYes ? 'No' : ''}
           </span>
         </div>
-        <div className="text-[10px] text-gray-500 mt-1">{totalUniqueWallets} unique wallets in 24h</div>
+        <div className="text-[10px] text-gray-500 mt-1">{totalUniqueWallets} unique wallets in last {windowLabel(flowData)}</div>
       </div>
 
       {/* Volume Flow */}
@@ -378,7 +386,7 @@ function LeaderboardSection({ flowData, category }) {
     return (
       <div className="mb-3">
         <div className="text-[10px] text-gray-500 uppercase mb-1.5">Leaderboard Trader Activity</div>
-        <div className="text-xs text-gray-600">No top-100 leaderboard traders have traded this market in the last 24 hours.</div>
+        <div className="text-xs text-gray-600">No top-100 leaderboard traders have traded this market in the last {windowLabel(flowData)}.</div>
       </div>
     );
   }
@@ -549,15 +557,15 @@ function LargeTradesSection({ flowData }) {
   if (!trades || trades.length === 0) {
     return (
       <div className="mb-4">
-        <div className="text-[10px] text-gray-500 uppercase mb-1.5">Recent Large Trades (24h)</div>
-        <div className="text-xs text-gray-600">No trades over $1,000 in the last 24 hours</div>
+        <div className="text-[10px] text-gray-500 uppercase mb-1.5">Recent Large Trades (last {windowLabel(flowData)})</div>
+        <div className="text-xs text-gray-600">No trades over $1,000 in the last {windowLabel(flowData)}</div>
       </div>
     );
   }
 
   return (
     <div className="mb-4">
-      <div className="text-[10px] text-gray-500 uppercase mb-2">Recent Large Trades (24h)</div>
+      <div className="text-[10px] text-gray-500 uppercase mb-2">Recent Large Trades (last {windowLabel(flowData)})</div>
       <div className="space-y-0.5">
         <div className="grid grid-cols-[55px_1fr_65px_60px_50px_50px] gap-1 text-[10px] text-gray-500 font-semibold pb-1 border-b border-gray-800">
           <div>Time</div>

@@ -115,6 +115,49 @@ describe('dataApiGet', () => {
     expect(await dataApiGet('/v2/trades', {})).toEqual({ ok: false, status: 502, error: null });
   });
 
+  it('stopWhen ends paging early even when the server has more', async () => {
+    mockFetch.mockImplementation(async () => jsonResponse(envelope([v2Trade()], { nextCursor: 'more' })));
+    const res = await dataApiGet('/v2/trades', {}, { maxPages: 5, stopWhen: (page) => page.length > 0 });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(res.hasMore).toBe(true);
+  });
+
+  it('keeps earlier pages when a later page fails, flagged incomplete', async () => {
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse(envelope([v2Position(), v2Position()], { nextCursor: 'c1' })))
+      .mockResolvedValueOnce(jsonResponse({ error: 'upstream' }, 500));
+    const res = await dataApiGet('/v2/positions', { user: WALLET }, { maxPages: 5 });
+    expect(res).toMatchObject({ ok: true, hasMore: true, incomplete: { status: 500, error: 'upstream' } });
+    expect(res.rows).toHaveLength(2);
+  });
+
+  it('keeps earlier pages when a later page times out or the network drops', async () => {
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse(envelope([v2Position()], { nextCursor: 'c1' })))
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    const res = await dataApiGet('/v2/positions', { user: WALLET }, { maxPages: 5 });
+    expect(res).toMatchObject({ ok: true, hasMore: true, incomplete: { status: null, error: 'Failed to fetch' } });
+    expect(res.rows).toHaveLength(1);
+  });
+
+  it('still throws a network error on the first page, and on caller abort', async () => {
+    mockFetch.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    await expect(dataApiGet('/v2/trades', {})).rejects.toThrow('Failed to fetch');
+
+    const ctrl = new AbortController();
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse(envelope([v2Trade()], { nextCursor: 'c1' })))
+      .mockImplementationOnce(async () => { ctrl.abort(); throw new DOMException('Aborted', 'AbortError'); });
+    await expect(dataApiGet('/v2/trades', {}, { maxPages: 3, signal: ctrl.signal })).rejects.toThrow('Aborted');
+  });
+
+  it('a 429 on a later page still throws', async () => {
+    mockFetch
+      .mockResolvedValueOnce(jsonResponse(envelope([v2Trade()], { nextCursor: 'c1' })))
+      .mockResolvedValueOnce(new Response('Rate limited', { status: 429 }));
+    await expect(dataApiGet('/v2/trades', {}, { maxPages: 3 })).rejects.toMatchObject({ status: 429 });
+  });
+
   it('throws on 429/403 with .status so rate-limit handling still works', async () => {
     mockFetch.mockResolvedValueOnce(new Response('Rate limited', { status: 429 }));
     await expect(dataApiGet('/v2/trades', {})).rejects.toMatchObject({ status: 429 });

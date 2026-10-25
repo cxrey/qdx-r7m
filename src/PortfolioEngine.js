@@ -43,31 +43,24 @@ const MAX_POSITION_PAGES = 20;
 export async function fetchPositions(walletAddress) {
   let positions = null;
 
-  // Data API v2: the default status filter returns OPEN rows, which include
-  // redeemable (won, not yet redeemed) positions — the same set v1 returned.
+  // Data API v2: the default status filter is OPEN. Won-but-unredeemed rows
+  // are a separate status (REDEEMABLE); their markets have resolved, so they
+  // couldn't be matched to the scanner's open markets anyway.
+  // Entry price comes from each position's avgPrice, so no trade history fetch.
   try {
     const res = await dataApiGet('/v2/positions', { user: walletAddress }, { maxPages: MAX_POSITION_PAGES });
     if (res.ok && res.rows.length > 0) positions = res.rows.map((r) => toV1Row(r, 'position'));
     if (!res.ok) console.warn(`[PortfolioEngine] /v2/positions ${res.status}${res.error ? `: ${res.error}` : ''}`);
+    else if (res.incomplete) console.warn(`[PortfolioEngine] positions incomplete — a later page failed (${res.incomplete.status ?? 'network'}${res.incomplete.error ? `: ${res.incomplete.error}` : ''})`);
     else if (res.hasMore) console.warn(`[PortfolioEngine] positions truncated at ${MAX_POSITION_PAGES} pages`);
     console.debug('[PortfolioEngine] /v2/positions returned', positions?.length ?? 0, 'positions');
   } catch (e) {
     console.warn('[PortfolioEngine] /v2/positions failed:', e.message);
   }
 
-  // Also fetch trade history for entry price data
-  let trades = null;
-  try {
-    const res = await dataApiGet('/v2/trades', { user: walletAddress, limit: 100 });
-    if (res.ok) trades = res.rows.map((r) => toV1Row(r, 'trade'));
-    console.debug('[PortfolioEngine] /v2/trades returned', trades?.length ?? 0, 'trades');
-  } catch (e) {
-    console.warn('[PortfolioEngine] trades fetch failed:', e.message);
-  }
+  if (!positions) return { positions: [], error: 'Could not fetch positions from Polymarket.' };
 
-  if (!positions) return { positions: [], trades: [], error: 'Could not fetch positions from Polymarket.' };
-
-  return { positions, trades: trades || [], error: null };
+  return { positions, error: null };
 }
 
 /**

@@ -11,7 +11,7 @@ vi.mock('../categoryPatterns', () => ({
 
 import {
   fetchMarketTrades, fetchMarketHolders,
-  fetchLeaderboard, fetchWalletActivity,
+  fetchLeaderboard, fetchWalletActivity, analyzeTradeFlow,
 } from '../TradeFlowEngine';
 import { setupLocalStorageMock } from './helpers/mockLocalStorage';
 import { envelope, jsonResponse, v2Trade, v2HolderGroup, v2LeaderboardEntry, v2Activity, YES_TOKEN, NO_TOKEN, WALLET } from './helpers/dataApiV2Fixtures';
@@ -56,6 +56,84 @@ describe('fetchMarketTrades', () => {
   it('throws on 403 with .status property', async () => {
     mockFetch.mockResolvedValue(new Response('Forbidden', { status: 403 }));
     await expect(fetchMarketTrades('cond-abc')).rejects.toMatchObject({ status: 403 });
+  });
+
+  const nowSec = () => Math.floor(Date.now() / 1000);
+  const page = (ages, cursor) => jsonResponse(envelope(ages.map((age) => v2Trade({ timestamp: nowSec() - age })), { nextCursor: cursor }));
+
+  it('follows the cursor until the trades reach back 24h', async () => {
+    mockFetch
+      .mockResolvedValueOnce(page([60, 3_600], 'c1'))
+      .mockResolvedValueOnce(page([20_000, 90_000], 'c2')); // oldest is past 24h → stop
+    const result = await fetchMarketTrades('cond-abc');
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(mockFetch.mock.calls[1][0]).toContain('cursor=c1');
+    expect(result).toHaveLength(4);
+  });
+
+  it('makes one request when the first page already covers 24h', async () => {
+    mockFetch.mockResolvedValueOnce(page([60, 100_000], 'c1'));
+    await fetchMarketTrades('cond-abc');
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('caps the busiest markets at 5 pages', async () => {
+    mockFetch.mockImplementation(async () => page([60, 120], 'more'));
+    const result = await fetchMarketTrades('cond-abc');
+    expect(mockFetch).toHaveBeenCalledTimes(5);
+    expect(result).toHaveLength(10);
+  });
+});
+
+// ── analyzeTradeFlow: volume trend ────────────────────────────────
+
+describe('analyzeTradeFlow — volume trend uses the span the trades cover', () => {
+  const HOUR = 3_600;
+  // One $100 Yes buy from a distinct wallet every `stepSec`, spanning `spanSec`
+  const steadyTrades = (spanSec, stepSec) => {
+    const now = Math.floor(Date.now() / 1000);
+    const out = [];
+    for (let age = 60; age < spanSec; age += stepSec) {
+      out.push({ proxyWallet: `0x${out.length}`, side: 'BUY', outcomeIndex: 0, size: 200, price: 0.5, timestamp: now - age });
+    }
+    return out;
+  };
+
+  it('steady trading across a full 24h reads Normal (~1x)', () => {
+    const flow = analyzeTradeFlow(steadyTrades(24 * HOUR, 600), null, null, {}, null);
+    expect(flow.acceleration).toBeCloseTo(1, 1);
+    expect(flow.accelerationLabel).toBe('Normal');
+  });
+
+  it('steady trading that covers only the last 3h is not a surge', () => {
+    // e.g. a busy market whose fetch hit the page cap, or a market created 3h ago.
+    // Dividing by a fixed 24h used to report ~4x "Surging" here.
+    const flow = analyzeTradeFlow(steadyTrades(3 * HOUR, 60), null, null, {}, null);
+    expect(flow.acceleration).toBeCloseTo(1, 1);
+    expect(flow.accelerationLabel).toBe('Normal');
+  });
+
+  it('a burst after a quiet day is a surge (a trade older than 24h proves full coverage)', () => {
+    const now = Math.floor(Date.now() / 1000);
+    const burst = steadyTrades(2 * HOUR, 120);
+    const old = { proxyWallet: '0xold', side: 'BUY', outcomeIndex: 0, size: 200, price: 0.5, timestamp: now - 30 * HOUR };
+    const flow = analyzeTradeFlow([...burst, old], null, null, {}, null);
+    expect(flow.coveredHours).toBe(24);
+    expect(flow.accelerationLabel).toBe('Surging');
+  });
+
+  it('reports the hours covered when trades span less than a day', () => {
+    const flow = analyzeTradeFlow(steadyTrades(3 * HOUR, 60), null, null, {}, null);
+    expect(flow.coveredHours).toBeGreaterThan(2.9);
+    expect(flow.coveredHours).toBeLessThan(3);
+  });
+
+  it('still flags a real surge', () => {
+    const quiet = steadyTrades(24 * HOUR, 2 * HOUR).filter((t) => t.timestamp < Date.now() / 1000 - 6 * HOUR);
+    const busy = steadyTrades(6 * HOUR, 200);
+    const flow = analyzeTradeFlow([...busy, ...quiet], null, null, {}, null);
+    expect(flow.acceleration).toBeGreaterThan(3);
+    expect(flow.accelerationLabel).toBe('Surging');
   });
 });
 
