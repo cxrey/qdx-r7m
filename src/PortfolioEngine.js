@@ -685,8 +685,14 @@ export function screenNewTrade(market, portfolioPositions, clusters, simulatedSi
   }
   const newConcentration = calculateConcentration(newPositions, newClusters);
 
+  // Shares held in this market, per side (a wallet YES and a manual NO in
+  // the same market are different exposures, not one bigger one)
   const alreadyHeld = heldHere.length > 0
-    ? { side: heldHere[0].side, size: heldHere.reduce((s, p) => s + (p.size || 0), 0) }
+    ? heldHere.reduce((acc, p) => {
+      if (p.side === 'YES') acc.yes += p.size || 0;
+      else if (p.side === 'NO') acc.no += p.size || 0;
+      return acc;
+    }, { yes: 0, no: 0 })
     : null;
 
   // Determine fit
@@ -696,8 +702,16 @@ export function screenNewTrade(market, portfolioPositions, clusters, simulatedSi
 
   if (alreadyHeld) {
     fit = 'ALREADY_HELD';
-    const shares = Number.isFinite(alreadyHeld.size) ? ` ${alreadyHeld.size.toFixed(0)} shares` : '';
-    text = `You already hold this market (${alreadyHeld.side || '?'}${shares}). Adding to it concentrates that position.`;
+    // The screen doesn't know which side you'd buy, so describe both
+    const { yes, no } = alreadyHeld;
+    if (yes > 0 && no > 0) {
+      text = `You already hold this market on both sides (YES ${yes.toFixed(0)}, NO ${no.toFixed(0)} shares).`;
+    } else if (yes > 0 || no > 0) {
+      const [held, other] = yes > 0 ? ['YES', 'NO'] : ['NO', 'YES'];
+      text = `You already hold this market (${held} ${(yes || no).toFixed(0)} shares). Buying more ${held} concentrates that position; buying ${other} offsets it.`;
+    } else {
+      text = 'You already hold this market.';
+    }
   } else if (isOpposingSide) {
     fit = 'OPPOSING';
     text = `This market opposes your existing ${joinCluster?.name || 'correlated'} positions — acts as a partial hedge.`;

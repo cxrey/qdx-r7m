@@ -470,9 +470,12 @@ export function calculateReEvalTrigger(entryPrice, estProb, daysLeft, theta = nu
  * @param {Object} market - Market data
  * @param {Object} portfolio - Portfolio hook data (optional)
  * @param {Object} settings - Kelly settings
+ * @param {'YES'|'NO'|null} side - Side being bet. Needed to tell adding to a
+ *   position you hold in this market from offsetting it; when unknown, the
+ *   conservative "adds to it" penalty applies.
  * @returns {Object} Constrained sizing result
  */
-export function applyPortfolioConstraints(rawDollars, market, portfolio = null, settings = null) {
+export function applyPortfolioConstraints(rawDollars, market, portfolio = null, settings = null, side = null) {
   const s = settings || getKellySettings();
   const constraints = [];
   let adjustedDollars = rawDollars;
@@ -506,25 +509,46 @@ export function applyPortfolioConstraints(rawDollars, market, portfolio = null, 
   // 3. Correlation penalty
   if (s.correlationPenalty && portfolio?.hasPortfolio && portfolio.screenTrade) {
     const screening = portfolio.screenTrade(market);
-    if (screening?.alreadyHeld) {
-      // Adding to a market you already hold is the most concentrated bet
-      // there is: penalize it like the strongest correlation (the 0.95 cap)
+    const held = screening?.alreadyHeld; // { yes, no } shares in this market
+    const betSide = side === 'YES' || side === 'NO' ? side : null;
+    const heldOnBetSide = held && betSide ? held[betSide.toLowerCase()] : 0;
+    const otherSide = betSide === 'YES' ? 'NO' : 'YES';
+    const heldOnOtherSide = held && betSide ? held[otherSide.toLowerCase()] : 0;
+
+    if (held && (!betSide || heldOnBetSide > 0)) {
+      // Adding to a position in this very market is the most concentrated
+      // bet there is: penalize it like the strongest correlation (the 0.95
+      // cap). Side unknown → assume it adds (conservative).
       const penalty = 1 - (ALREADY_HELD_CORRELATION - 0.5);
       constraints.push({
         type: 'CORRELATION',
-        label: `Adds to your existing ${screening.alreadyHeld.side || ''} position in this market, reduced by ${((1 - penalty) * 100).toFixed(0)}%`,
+        label: betSide
+          ? `Adds to your existing ${betSide} position in this market (${heldOnBetSide.toFixed(0)} shares), reduced by ${((1 - penalty) * 100).toFixed(0)}%`
+          : `Adds to a market you already hold, reduced by ${((1 - penalty) * 100).toFixed(0)}%`,
         original: adjustedDollars,
       });
       adjustedDollars *= penalty;
-    } else if (screening?.maxCorrelation > 0.5) {
-      const penalty = 1 - (screening.maxCorrelation - 0.5); // 0.5 corr = no penalty, 1.0 = 50% reduction
-      const penalizedDollars = adjustedDollars * penalty;
-      constraints.push({
-        type: 'CORRELATION',
-        label: `Correlated with existing position (r=${screening.maxCorrelation.toFixed(2)}), reduced by ${((1 - penalty) * 100).toFixed(0)}%`,
-        original: adjustedDollars,
-      });
-      adjustedDollars = penalizedDollars;
+    } else {
+      if (heldOnOtherSide > 0) {
+        // Betting the other side offsets the position rather than adding
+        // risk — say so, without a penalty for it
+        constraints.push({
+          type: 'OFFSET',
+          label: `Offsets your existing ${otherSide} position in this market (${heldOnOtherSide.toFixed(0)} shares) — no concentration penalty`,
+        });
+      }
+      if (screening?.maxCorrelation > 0.5) {
+        // Correlations are unsigned: whether this bet moves with or against
+        // that position isn't modelled, so the penalty applies either way
+        const penalty = 1 - (screening.maxCorrelation - 0.5); // 0.5 corr = no penalty, 1.0 = 50% reduction
+        const penalizedDollars = adjustedDollars * penalty;
+        constraints.push({
+          type: 'CORRELATION',
+          label: `Correlated with another position (r=${screening.maxCorrelation.toFixed(2)}; direction not modelled), reduced by ${((1 - penalty) * 100).toFixed(0)}%`,
+          original: adjustedDollars,
+        });
+        adjustedDollars = penalizedDollars;
+      }
     }
   }
 

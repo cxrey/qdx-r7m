@@ -199,8 +199,8 @@ export function usePortfolio(loadedMarkets) {
   // Correlation analysis. The O(n²) part (correlation matrix and cluster
   // membership) doesn't depend on price, so it's rebuilt only when holdings
   // change; a price tick only re-prices clusters (O(n)). Ref-cached for the
-  // same reason as heldLookup above. (Its date-proximity term uses daysLeft
-  // as of when holdings last changed.)
+  // same reason as heldLookup above. Also rebuilt on a new day: its
+  // date-proximity term reads daysLeft, which a long session would leave stale.
   const structureRef = useRef({ key: null, structure: null });
   const analysis = useMemo(() => {
     if (allPositions.length === 0) {
@@ -217,8 +217,9 @@ export function usePortfolio(loadedMarkets) {
       };
     }
 
-    if (structureRef.current.key !== holdingsJson) {
-      structureRef.current = { key: holdingsJson, structure: buildCorrelationStructure(allPositions) };
+    const structureKey = `${holdingsJson}|${Math.floor(Date.now() / 86_400_000)}`;
+    if (structureRef.current.key !== structureKey) {
+      structureRef.current = { key: structureKey, structure: buildCorrelationStructure(allPositions) };
     }
     const { structure } = structureRef.current;
     const clusters = priceClusters(allPositions, structure);

@@ -114,6 +114,26 @@ describe('usePortfolio — positions follow live price ticks', () => {
     expect(result.current.analysis.clusters.reduce((s, c) => s + c.totalValue, 0)).toBeCloseTo(valueBefore + 30);
   });
 
+  it('rebuilds the correlation structure on a new day (its date term reads daysLeft)', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-10-25T12:00:00Z'));
+      localStorage.setItem(MANUAL_KEY, JSON.stringify([manual('live', 0.3), manual('other', 0.5)]));
+      const before = [loaded('live', 0.6), loaded('other', 0.5)];
+      const { result, rerender } = renderHook(({ markets }) => usePortfolio(markets), { initialProps: { markets: before } });
+      const matrixDay1 = result.current.analysis.correlationMatrix;
+
+      rerender({ markets: tick(before, 'live', 0.65) });
+      expect(result.current.analysis.correlationMatrix).toBe(matrixDay1);
+
+      vi.setSystemTime(new Date('2026-10-26T12:00:00Z'));
+      rerender({ markets: tick(before, 'live', 0.7) });
+      expect(result.current.analysis.correlationMatrix).not.toBe(matrixDay1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('screenTrade is computed once per market until the portfolio changes', () => {
     localStorage.setItem(MANUAL_KEY, JSON.stringify([manual('live', 0.3)]));
     const before = [loaded('live', 0.6), loaded('other', 0.5)];

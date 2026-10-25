@@ -240,8 +240,9 @@ function ConstraintWarnings({ constraints }) {
   return (
     <div className="space-y-1">
       {constraints.constraints.map((c, i) => (
-        <div key={i} className="text-[10px] text-amber-400 flex items-start gap-1">
-          <span className="shrink-0">!</span>
+        // OFFSET is informational (no reduction), so it isn't styled as a warning
+        <div key={i} className={`text-[10px] flex items-start gap-1 ${c.type === 'OFFSET' ? 'text-gray-400' : 'text-amber-400'}`}>
+          <span className="shrink-0">{c.type === 'OFFSET' ? 'i' : '!'}</span>
           <span>{c.label}</span>
         </div>
       ))}
@@ -415,8 +416,8 @@ export default function KellyCalculator({ market, portfolio }) {
     : 0;
 
   const constrained = useMemo(
-    () => applyPortfolioConstraints(betDollars, market, portfolio, settings),
-    [betDollars, market, portfolio, settings]
+    () => applyPortfolioConstraints(betDollars, market, portfolio, settings, side),
+    [betDollars, market, portfolio, settings, side]
   );
 
   const scenarios = useMemo(

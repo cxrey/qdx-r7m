@@ -310,15 +310,39 @@ describe('applyPortfolioConstraints', () => {
     expect(r.constraints.some((c) => c.type === 'MAX_POSITION')).toBe(false);
   });
 
-  it('penalizes adding to a market you already hold like the strongest correlation, with its own label', () => {
-    const portfolio = {
+  describe('a market you already hold', () => {
+    const heldPortfolio = (alreadyHeld, maxCorrelation = 0.1) => ({
       hasPortfolio: true, summary: { totalValue: 0 },
-      screenTrade: () => ({ alreadyHeld: { side: 'YES', size: 100 }, maxCorrelation: 0.1 }),
-    };
-    const r = applyPortfolioConstraints(100, market, portfolio, settings);
-    expect(r.adjustedDollars).toBeCloseTo(55); // 0.95 → 45% reduction
-    const c = r.constraints.find((x) => x.type === 'CORRELATION');
-    expect(c.label).toContain('existing YES position in this market');
+      screenTrade: () => ({ alreadyHeld, maxCorrelation }),
+    });
+
+    it('betting the side you hold is penalized like the strongest correlation', () => {
+      const r = applyPortfolioConstraints(100, market, heldPortfolio({ yes: 100, no: 0 }), settings, 'YES');
+      expect(r.adjustedDollars).toBeCloseTo(55); // 0.95 → 45% reduction
+      expect(r.constraints.find((x) => x.type === 'CORRELATION').label)
+        .toBe('Adds to your existing YES position in this market (100 shares), reduced by 45%');
+    });
+
+    it('betting the other side offsets it: no penalty, an informational note', () => {
+      const r = applyPortfolioConstraints(100, market, heldPortfolio({ yes: 100, no: 0 }), settings, 'NO');
+      expect(r.adjustedDollars).toBe(100);
+      expect(r.constraints.some((x) => x.type === 'CORRELATION')).toBe(false);
+      const note = r.constraints.find((x) => x.type === 'OFFSET');
+      expect(note.label).toBe('Offsets your existing YES position in this market (100 shares) — no concentration penalty');
+      expect(note.original).toBeUndefined();
+    });
+
+    it('an offsetting bet still gets the penalty for OTHER correlated positions', () => {
+      const r = applyPortfolioConstraints(100, market, heldPortfolio({ yes: 100, no: 0 }, 0.8), settings, 'NO');
+      expect(r.adjustedDollars).toBeCloseTo(70);
+      expect(r.constraints.find((x) => x.type === 'CORRELATION').label).toContain('direction not modelled');
+    });
+
+    it('when the side is unknown, assumes it adds (conservative)', () => {
+      const r = applyPortfolioConstraints(100, market, heldPortfolio({ yes: 0, no: 50 }), settings);
+      expect(r.adjustedDollars).toBeCloseTo(55);
+      expect(r.constraints.find((x) => x.type === 'CORRELATION').label).toBe('Adds to a market you already hold, reduced by 45%');
+    });
   });
 
   it('limits by total exposure when portfolio present', () => {

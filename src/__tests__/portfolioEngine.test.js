@@ -395,11 +395,27 @@ describe('screenNewTrade', () => {
     const { clusters } = buildCorrelationClusters([held, other]);
     const result = screenNewTrade(held.market, [held, other], clusters);
     expect(result.fit).toBe('ALREADY_HELD');
-    expect(result.alreadyHeld).toEqual({ side: 'YES', size: 100 });
-    expect(result.text).toContain('already hold this market (YES 100 shares)');
+    expect(result.alreadyHeld).toEqual({ yes: 100, no: 0 });
+    expect(result.text).toBe('You already hold this market (YES 100 shares). Buying more YES concentrates that position; buying NO offsets it.');
     // Correlation is against OTHER positions only
     expect(result.maxCorrelationMarket?.id).not.toBe('held');
     expect(result.maxCorrelation).toBeLessThan(0.5);
+  });
+
+  it('totals each side separately when a market is held on both sides', () => {
+    const yes = makePosition({ id: 'both', slug: 'b' }, { side: 'YES', size: 100 });
+    const no = { ...makePosition({ id: 'both', slug: 'b' }, { side: 'NO', size: 40 }) };
+    const { clusters } = buildCorrelationClusters([yes, no]);
+    const result = screenNewTrade(yes.market, [yes, no], clusters);
+    expect(result.alreadyHeld).toEqual({ yes: 100, no: 40 });
+    expect(result.text).toBe('You already hold this market on both sides (YES 100, NO 40 shares).');
+  });
+
+  it('describes a NO holding with NO as the concentrating side', () => {
+    const held = makePosition({ id: 'n-held', slug: 'n' }, { side: 'NO', size: 25 });
+    const { clusters } = buildCorrelationClusters([held]);
+    expect(screenNewTrade(held.market, [held], clusters).text)
+      .toBe('You already hold this market (NO 25 shares). Buying more NO concentrates that position; buying YES offsets it.');
   });
 
   it('matches a full re-clustering on a realistic portfolio (the incremental path is not an approximation in practice)', () => {
