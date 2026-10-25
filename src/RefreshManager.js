@@ -10,7 +10,7 @@
 
 import { WebSocketPriceStream } from './WebSocketPriceStream';
 import { PriceUpdateBatcher } from './PriceUpdateBatcher';
-import { fetchAllMarkets, flattenEventsToMarkets } from './api';
+import { fetchCatalog, flattenEventsToMarkets } from './api';
 import { processMarket, enrichWithBaseRate } from './processMarket';
 import { processAllInWorker } from './workerManager';
 import { handleRateLimit, getBackoffMultiplier, onBackoffChange, isClobRateLimited } from './ApiHealthManager';
@@ -488,7 +488,7 @@ export class RefreshManager {
     try {
       this._opts.onStatusChange?.({ ws: this.wsStatus, tier: 3, message: 'Full refresh in progress...' });
 
-      const raw = await fetchAllMarkets(
+      const { markets: raw, complete } = await fetchCatalog(
         null, // no progress callback for background refresh
         this._tier3Controller.signal
       );
@@ -506,10 +506,11 @@ export class RefreshManager {
       if (this._tier3Controller.signal.aborted) return;
       const allProcessed = await processAllInWorker(deduped);
       if (this._tier3Controller.signal.aborted) return;
-      const processed = allProcessed.filter((m) => m.question);
+      let processed = allProcessed.filter((m) => m.question);
 
       // Smart diff against current markets
       const currentMarkets = this._opts.getCurrentMarkets?.() || [];
+      processed = keepUnconfirmedMarkets(processed, currentMarkets, complete);
       const diff = smartDiff(currentMarkets, processed);
 
       if (diff.hasChanges) {
@@ -607,6 +608,22 @@ export class RefreshManager {
 }
 
 // ── Smart Diff ──────────────────────────────────────────────────
+
+/**
+ * After an INCOMPLETE catalog crawl (a band stopped early on a failed page,
+ * rate limit, or page cap), markets missing from the crawl are unconfirmed,
+ * not removed: keep the current copies so a transient failure can't wipe
+ * thousands of rows until the next refresh. A complete crawl is authoritative.
+ */
+export function keepUnconfirmedMarkets(crawled, currentMarkets, complete) {
+  if (complete) return crawled;
+  const crawledIds = new Set(crawled.map((m) => m.id));
+  const kept = currentMarkets.filter((m) => !crawledIds.has(m.id));
+  if (kept.length > 0) {
+    console.warn(`[RefreshManager] Tier 3 crawl incomplete — keeping ${kept.length} markets it didn't reach`);
+  }
+  return kept.length > 0 ? crawled.concat(kept) : crawled;
+}
 
 /**
  * Compare old and new market arrays to detect changes.

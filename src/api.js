@@ -8,6 +8,9 @@ import { GAMMA_API, CLOB_API } from './apiConfig';
 const PAGE_SIZE = 100;
 const MAX_PAGES = 200; // Safety cap across all bands: 200 pages × 100 events/page = 20K events max (markets are nested per event, so more markets)
 const PAGE_ATTEMPTS = 2; // One retry for a timed-out / 5xx / network-failed page — a cursor chain can't skip a page
+const RETRY_DELAY_MS = 1_000; // Pause before that retry, so a struggling server isn't hit again instantly
+
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Gamma's offset pagination rejects offset > 2000 with 422 ("use /events/keyset
 // for deeper pagination"), which capped the catalog at ~2,100 events. The crawl
@@ -54,12 +57,16 @@ export function flattenEventsToMarkets(events) {
  * Follow one volume band's keyset cursor chain to the end.
  * Pushes each page's events into `events` (so partial results survive a stop)
  * and shares the page budget / rate-limit flag with the other bands via `crawl`.
+ *
+ * @returns {Promise<boolean>} true only if the band reached the natural end of
+ *   its cursor chain. false means it stopped early (failed page, rate limit,
+ *   page cap, abort), so its markets are an incomplete set.
  * Throws only on caller abort.
  */
 async function crawlVolumeBand([volumeMin, volumeMax], events, crawl, signal) {
   let cursor = null;
   while (crawl.pages < MAX_PAGES && !crawl.rateLimited) {
-    if (signal?.aborted) return;
+    if (signal?.aborted) return false;
     crawl.pages++;
 
     let url = `${GAMMA_API}/events/keyset?limit=${PAGE_SIZE}&closed=false&order=volume&ascending=false&volume_min=${volumeMin}`;
@@ -68,16 +75,18 @@ async function crawlVolumeBand([volumeMin, volumeMax], events, crawl, signal) {
 
     let data = null;
     for (let attempt = 1; attempt <= PAGE_ATTEMPTS && data == null; attempt++) {
+      if (attempt > 1) await delay(RETRY_DELAY_MS);
+      if (signal?.aborted) return false;
       try {
         const res = await fetch(url, { signal: withTimeout(signal, TIMEOUT_GAMMA_PAGE) });
         if (res.status === 429) {
           crawl.rateLimited = true;
-          return;
+          return false;
         }
         if (!res.ok) {
           console.warn(`[fetchAllMarkets] Band ≥${volumeMin} page failed: HTTP ${res.status}`);
           // A 4xx (e.g. a rejected cursor) won't change on retry — end this band
-          if (res.status < 500) return;
+          if (res.status < 500) return false;
           continue;
         }
         data = await res.json();
@@ -87,23 +96,38 @@ async function crawlVolumeBand([volumeMin, volumeMax], events, crawl, signal) {
         console.warn(`[fetchAllMarkets] Band ≥${volumeMin} page failed:`, err.message);
       }
     }
-    if (data == null) return;
+    if (data == null) return false; // retries exhausted
 
     const page = Array.isArray(data.events) ? data.events : [];
     events.push(...page);
-    crawl.marketCount += page.reduce((n, e) => n + (Array.isArray(e.markets) ? e.markets.length : 0), 0);
+    // Progress counts unique, active events only — the same filter applied to
+    // the final result — so the loading counter never overshoots the total.
+    for (const e of page) {
+      if (e.active === false || crawl.countedEvents.has(e.id)) continue;
+      crawl.countedEvents.add(e.id);
+      crawl.marketCount += Array.isArray(e.markets) ? e.markets.length : 0;
+    }
     if (crawl.onProgress && crawl.marketCount > 0) crawl.onProgress(crawl.marketCount);
 
     cursor = data.next_cursor;
-    if (!cursor || page.length === 0) return; // End of band
+    if (!cursor || page.length === 0) return true; // natural end of band
   }
+  return false; // page cap or rate limit stopped the band
 }
 
-export async function fetchAllMarkets(onProgress, signal) {
+/**
+ * Crawl the active catalog and report whether the crawl was complete.
+ *
+ * @returns {Promise<{ markets: object[], complete: boolean }>}
+ *   complete is false when any band stopped early. Callers that REPLACE
+ *   their market set (Tier 3) must not treat markets missing from an
+ *   incomplete crawl as removed — a single failed page ends its whole band.
+ */
+export async function fetchCatalog(onProgress, signal) {
   const startTime = Date.now();
   // Fetches from /events (not /markets) to get event-level tags for fee category resolution.
   // Each event contains nested markets which are flattened after fetch.
-  const crawl = { pages: 0, marketCount: 0, rateLimited: false, onProgress };
+  const crawl = { pages: 0, marketCount: 0, countedEvents: new Set(), rateLimited: false, onProgress };
   const bandEvents = VOLUME_BANDS.map(() => []);
 
   // allSettled, not all: on a caller abort every band must have stopped before
@@ -113,6 +137,7 @@ export async function fetchAllMarkets(onProgress, signal) {
   );
   const failure = outcomes.find((o) => o.status === 'rejected' && o.reason?.name !== 'AbortError');
   if (failure) throw failure.reason;
+  const complete = outcomes.every((o) => o.status === 'fulfilled' && o.value === true);
 
   if (crawl.rateLimited) {
     console.warn('[fetchAllMarkets] Rate limited — using', crawl.marketCount, 'markets fetched so far');
@@ -132,9 +157,14 @@ export async function fetchAllMarkets(onProgress, signal) {
   });
   const allRaw = flattenEventsToMarkets(events);
 
-  console.log(`[fetchAllMarkets] Fetch complete: ${allRaw.length} markets (${events.length} events) in ${Date.now() - startTime}ms (${crawl.pages} pages)`);
+  console.log(`[fetchAllMarkets] Fetch ${complete ? 'complete' : 'INCOMPLETE'}: ${allRaw.length} markets (${events.length} events) in ${Date.now() - startTime}ms (${crawl.pages} pages)`);
 
-  return parseGammaMarkets(allRaw);
+  return { markets: parseGammaMarkets(allRaw), complete };
+}
+
+/** Crawl the active catalog; markets only (see fetchCatalog for completeness). */
+export async function fetchAllMarkets(onProgress, signal) {
+  return (await fetchCatalog(onProgress, signal)).markets;
 }
 
 export async function fetchOrderBook(tokenId, signal) {

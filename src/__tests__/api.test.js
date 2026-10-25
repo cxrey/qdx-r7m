@@ -10,7 +10,7 @@ vi.mock('../fetchUtils', () => ({
 // Use real truncateSlugNumerics — it's a pure function with no dependencies
 
 import {
-  fetchAllMarkets, fetchOrderBook, fetchPriceHistory,
+  fetchAllMarkets, fetchCatalog, fetchOrderBook, fetchPriceHistory,
   fetchMarketById, fetchMarketBySlug,
   fetchMarketByConditionId, fetchMarketByTokenId,
 } from '../api';
@@ -415,6 +415,78 @@ describe('fetchAllMarkets', () => {
     const result = await fetchAllMarkets(vi.fn());
     expect(mockFetch).toHaveBeenCalledTimes(200);
     expect(result.length).toBe(20_000);
+  });
+
+  // ── Completeness (Tier 3 must not treat an incomplete crawl as authoritative) ──
+
+  it('fetchCatalog reports complete when every band reaches the end of its chain', async () => {
+    mockFetch.mockImplementation(keysetServer({ 50000: [makeEvents(100, 0), makeEvents(5, 100)], 100: [makeEvents(3, 900)] }));
+    const { markets, complete } = await fetchCatalog(vi.fn());
+    expect(complete).toBe(true);
+    expect(markets).toHaveLength(108);
+  });
+
+  it('fetchCatalog reports incomplete when a band ends on a failed page', async () => {
+    const server = keysetServer({ 50000: [makeEvents(100, 0), makeEvents(100, 100)] });
+    mockFetch.mockImplementation(async (url) => (params(url).get('after_cursor') === '50000/1'
+      ? new Response('{"type":"validation error"}', { status: 422 })
+      : server(url)));
+    const { markets, complete } = await fetchCatalog(vi.fn());
+    expect(complete).toBe(false);
+    expect(markets).toHaveLength(100); // what it did reach is still returned
+  });
+
+  it('fetchCatalog reports incomplete when rate limited', async () => {
+    const server = keysetServer({ 50000: [makeEvents(100, 0), makeEvents(100, 100)] });
+    mockFetch.mockImplementation(async (url) => (params(url).get('after_cursor') === '50000/1'
+      ? new Response('Too Many Requests', { status: 429 })
+      : server(url)));
+    expect((await fetchCatalog(vi.fn())).complete).toBe(false);
+  });
+
+  it('fetchCatalog reports incomplete when the page cap stops a band', async () => {
+    mockFetch.mockImplementation(async (url) => keysetResponse(makeEvents(1, Math.random() * 1e9 | 0), `${params(url).get('volume_min')}/1`));
+    expect((await fetchCatalog(vi.fn())).complete).toBe(false);
+  });
+
+  it('fetchAllMarkets still returns the markets array (unchanged contract)', async () => {
+    mockFetch.mockImplementation(keysetServer({ 50000: [makeEvents(4, 0)] }));
+    const markets = await fetchAllMarkets(vi.fn());
+    expect(Array.isArray(markets)).toBe(true);
+    expect(markets).toHaveLength(4);
+  });
+
+  it('progress never overshoots the final total (duplicates and inactive events excluded)', async () => {
+    const onProgress = vi.fn();
+    const shared = makeEvents(10, 0);                       // returned by two bands
+    const inactive = makeEvents(5, 500).map((e) => ({ ...e, active: false }));
+    mockFetch.mockImplementation(keysetServer({ 50000: [shared], 15000: [shared], 100: [inactive] }));
+    const markets = await fetchAllMarkets(onProgress);
+    const last = onProgress.mock.calls.at(-1)[0];
+    expect(markets).toHaveLength(10);
+    expect(last).toBe(10);
+    expect(Math.max(...onProgress.mock.calls.map(([n]) => n))).toBe(10);
+  });
+
+  it('pauses before retrying a failed page instead of retrying instantly', async () => {
+    vi.useFakeTimers();
+    try {
+      const server = keysetServer({ 50000: [makeEvents(2, 0)] });
+      let failed = false;
+      mockFetch.mockImplementation(async (url) => {
+        if (!failed && params(url).get('volume_min') === '50000') { failed = true; return new Response('err', { status: 503 }); }
+        return server(url);
+      });
+      const done = fetchAllMarkets(vi.fn());
+      await vi.advanceTimersByTimeAsync(500);
+      const callsAt500 = mockFetch.mock.calls.filter(([u]) => params(u).get('volume_min') === '50000').length;
+      await vi.advanceTimersByTimeAsync(600);
+      const markets = await done;
+      expect(callsAt500).toBe(1);                  // retry not sent yet at 500ms
+      expect(markets).toHaveLength(2);             // retried after the pause and succeeded
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('handles events with multiple markets (fan-out)', async () => {
