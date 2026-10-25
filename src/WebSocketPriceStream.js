@@ -32,7 +32,7 @@ export class WebSocketPriceStream {
   /**
    * @param {object} opts
    * @param {function} opts.onPriceChange  — (assetId, {price, bestBid, bestAsk, timestamp}) => void
-   * @param {function} opts.onResolution   — (assetId, {price, timestamp}) => void
+   * @param {function} opts.onResolution   — (winningAssetId, {winningOutcome, assetIds, timestamp}) => void
    * @param {function} opts.onNewMarket    — (data) => void
    * @param {function} opts.onStatusChange — ('connecting'|'connected'|'disconnected'|'error') => void
    */
@@ -283,30 +283,42 @@ export class WebSocketPriceStream {
         case 'last_trade_price':
           this._handleLastTradePrice(evt);
           break;
+        case 'best_bid_ask':
+          this._emitQuote(evt.asset_id, evt.best_bid, evt.best_ask, evt.timestamp);
+          break;
         case 'market_resolved':
           this._handleResolution(evt);
           break;
         case 'new_market':
           if (this._onNewMarket) this._onNewMarket(evt);
           break;
-        // book, best_bid_ask, tick_size_change — ignored for now
+        // book, tick_size_change — ignored for now
       }
     }
   }
 
   _handlePriceChange(evt) {
     if (!evt.price_changes || !Array.isArray(evt.price_changes)) return;
-    const ts = evt.timestamp;
-
+    // NOTE: pc.price is the order-book LEVEL whose size changed (e.g. a
+    // resting bid deep in the book), not the market price. The market price
+    // is the mid of best_bid/best_ask, which each entry also carries.
     for (const pc of evt.price_changes) {
-      if (!pc.asset_id) continue;
-      this._onPriceChange(pc.asset_id, {
-        price: parseFloat(pc.price),
-        bestBid: pc.best_bid ? parseFloat(pc.best_bid) : null,
-        bestAsk: pc.best_ask ? parseFloat(pc.best_ask) : null,
-        timestamp: ts,
-      });
+      this._emitQuote(pc.asset_id, pc.best_bid, pc.best_ask, evt.timestamp);
     }
+  }
+
+  /** Emit a mid-price update from a best bid/ask pair; skip if either is missing/invalid. */
+  _emitQuote(assetId, rawBid, rawAsk, timestamp) {
+    if (!assetId) return;
+    const bestBid = parseFloat(rawBid);
+    const bestAsk = parseFloat(rawAsk);
+    if (!isFinite(bestBid) || !isFinite(bestAsk) || bestBid <= 0 || bestAsk >= 1 || bestAsk < bestBid) return;
+    this._onPriceChange(assetId, {
+      price: (bestBid + bestAsk) / 2,
+      bestBid,
+      bestAsk,
+      timestamp,
+    });
   }
 
   _handleLastTradePrice(evt) {
@@ -320,9 +332,11 @@ export class WebSocketPriceStream {
   }
 
   _handleResolution(evt) {
-    if (!evt.asset_id) return;
-    this._onResolution(evt.asset_id, {
-      price: parseFloat(evt.price),
+    // Payload: { winning_asset_id, winning_outcome, assets_ids: [...], market }
+    if (!evt.winning_asset_id) return;
+    this._onResolution(evt.winning_asset_id, {
+      winningOutcome: evt.winning_outcome ?? null,
+      assetIds: Array.isArray(evt.assets_ids) ? evt.assets_ids : [],
       timestamp: evt.timestamp,
     });
   }

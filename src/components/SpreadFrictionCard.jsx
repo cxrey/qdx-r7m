@@ -216,7 +216,7 @@ export default function SpreadFrictionCard({ market, bookData }) {
             ))}
           </div>
           <div className="mt-2 text-xs text-gray-500">
-            {edgeSurvival.survivingEdges}/{edgeSurvival.edges.length} edges survive the spread
+            {edgeSurvival.survivingEdges}/{edgeSurvival.edges.length} edges survive spread + fees
           </div>
         </div>
       )}

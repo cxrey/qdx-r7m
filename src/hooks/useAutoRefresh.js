@@ -137,8 +137,9 @@ export function useAutoRefresh({ rawMarkets, setRawMarkets, baseRatesRef, refres
       },
 
       onResolution: (marketId) => {
-        // Could remove or mark — for now, just log
-        console.log(`[AutoRefresh] Market resolved: ${marketId}`);
+        // Mark closed so the row stops looking tradeable; settled prices
+        // (1/0) arrive via onPriceUpdate. The next Tier-3 crawl removes it.
+        setRawMarkets((prev) => prev.map((m) => (m.id === marketId ? { ...m, closed: true, active: false } : m)));
       },
 
       onStatusChange: ({ ws, message }) => {

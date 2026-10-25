@@ -225,12 +225,15 @@ export class RefreshManager {
           this._batcher.enqueue(assetId, update);
         }
       },
-      onResolution: (assetId, data) => {
-        const mapping = this._assetToMarket.get(assetId);
-        if (mapping) {
-          this._opts.onResolution?.(mapping.marketId);
-          this._opts.onToast?.({ type: 'info', message: `Market resolved (price=${data.price})` });
-        }
+      onResolution: (winningAssetId, data) => {
+        const mapping = this._assetToMarket.get(winningAssetId);
+        if (!mapping) return;
+        // Settle prices: winning token → 1, losing token → 0
+        const yesPrice = mapping.side === 'yes' ? 1 : 0;
+        this._opts.onPriceUpdate?.(new Map([[mapping.marketId, { yesPrice, noPrice: 1 - yesPrice }]]));
+        this._opts.onResolution?.(mapping.marketId);
+        const outcome = data.winningOutcome || (mapping.side === 'yes' ? 'Yes' : 'No');
+        this._opts.onToast?.({ type: 'info', message: `Market resolved: ${outcome}` });
       },
       onNewMarket: () => {
         // WS new_market event — trigger an immediate Tier 2 check
@@ -520,23 +523,24 @@ export class RefreshManager {
   _flushPriceUpdates(batch) {
     // batch: Map<assetId, {price, bestBid, bestAsk, timestamp}>
     // Convert to Map<marketId, {yesPrice, noPrice}>
+    // YES and NO are complementary tokens: derive one from the other so the
+    // pair can't drift apart. When both sides update in one batch, the
+    // YES-token quote wins.
     const marketUpdates = new Map();
 
     for (const [assetId, update] of batch) {
       const mapping = this._assetToMarket.get(assetId);
-      if (!mapping) continue;
+      if (!mapping || !isFinite(update.price)) continue;
 
       const { marketId, side } = mapping;
-      if (!marketUpdates.has(marketId)) {
-        marketUpdates.set(marketId, {});
-      }
-      const entry = marketUpdates.get(marketId);
+      const existing = marketUpdates.get(marketId);
       if (side === 'yes') {
-        entry.yesPrice = update.price;
-      } else {
-        entry.noPrice = update.price;
+        marketUpdates.set(marketId, { yesPrice: update.price, noPrice: 1 - update.price, _fromYes: true });
+      } else if (!existing?._fromYes) {
+        marketUpdates.set(marketId, { yesPrice: 1 - update.price, noPrice: update.price });
       }
     }
+    for (const entry of marketUpdates.values()) delete entry._fromYes;
 
     if (marketUpdates.size > 0) {
       this._opts.onPriceUpdate?.(marketUpdates);

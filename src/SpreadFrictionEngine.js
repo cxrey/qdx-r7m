@@ -5,6 +5,8 @@
  * bid-ask spread, slippage from walking the order book, and depth metrics.
  */
 
+import { computeFeePP, computeRoundTripCostPP } from './feeCalculator';
+
 // --- Order Book Normalization ---
 
 /**
@@ -274,12 +276,17 @@ export function calculateEdgeSurvival(market, spreadData) {
   if (!spreadData) return { edges: [], survivingEdges: 0, killedEdges: 0 };
 
   const halfSpread = spreadData.absoluteSpread / 2; // one-way cost
+  const { gammaCategory, feesEnabled, feeSchedule } = market;
+  // One-way taker fee (decimal, per share) at a given share price
+  const takerFee = (price) => computeFeePP(price, gammaCategory, feesEnabled, feeSchedule) / 100;
   const edges = [];
 
-  // FLB edge
+  // FLB edge — one-way entry (half spread + taker fee), held to resolution.
+  // flb.takerFeePP is already computed at the best side's price.
   if (market.flb?.bestEdge != null) {
     const raw = market.flb.bestEdge;
-    const net = raw - halfSpread;
+    const fee = (market.flb.takerFeePP ?? 0) / 100;
+    const net = raw - halfSpread - fee;
     edges.push({
       source: 'FLB',
       rawEdge: raw,
@@ -289,26 +296,32 @@ export function calculateEdgeSurvival(market, spreadData) {
     });
   }
 
-  // Base rate gap
+  // Base rate gap — one-way entry on the suggested side
   if (market.baseRate?.absGapCents != null && market.baseRate.absGapCents > 0) {
     const raw = market.baseRate.absGapCents / 100; // convert cents to fraction
-    const net = raw - halfSpread;
+    const side = market.baseRate.gapType === 'NARRATIVE_PREMIUM' ? 'NO' : 'YES';
+    const sidePrice = side === 'YES' ? market.yesPrice : market.noPrice;
+    const net = raw - halfSpread - takerFee(sidePrice);
     edges.push({
       source: 'Base Rate',
       rawEdge: raw,
       netEdge: net,
       survives: net > 0,
-      side: market.baseRate.gapType === 'NARRATIVE_PREMIUM' ? 'NO' : 'YES',
+      side,
     });
   }
 
-  // Theta daily
-  if (market.theta?.bestTheta != null && Math.abs(market.theta.bestTheta) > 0) {
-    const raw = Math.abs(market.theta.bestTheta);
-    // Theta is daily, compare against one-way spread cost
-    const net = raw - halfSpread;
+  // Theta — cumulative decay over the remaining life vs a full round trip
+  // (enter + exit: full spread + two taker fees). Same cost basis as
+  // processMarket's thetaBreakEvenDays, but priced off the live book.
+  if (market.theta?.bestTheta != null && Math.abs(market.theta.bestTheta) > 0 && market.daysLeft > 0) {
+    const raw = Math.abs(market.theta.bestTheta) * market.daysLeft;
+    const roundTrip = computeRoundTripCostPP(
+      market.yesPrice, spreadData.absoluteSpread, gammaCategory, feesEnabled, feeSchedule,
+    ).totalCostPP / 100;
+    const net = raw - roundTrip;
     edges.push({
-      source: 'Theta (daily)',
+      source: 'Theta (to expiry)',
       rawEdge: raw,
       netEdge: net,
       survives: net > 0,
