@@ -171,29 +171,52 @@ function findLoadedMarket(mp, marketLookup) {
 // as-is. Positions must price from the CURRENT object, and the portfolio
 // should only recompute when a market someone holds actually changed.
 
+const EMPTY_LOOKUP = Object.freeze({ byId: new Map(), byCondition: new Map() });
+
 /**
- * Lookup ({ byId, byCondition }) of just the markets positions are in, taken
- * from the full catalog lookup. Returns `prev` unchanged when every held
- * market is the same object as before — a tick on a market nobody holds
- * then leaves the portfolio (and everything memoized on it) untouched.
+ * Lookup ({ byId, byCondition }) of just the markets positions are in, found
+ * in one pass over the loaded markets — no full-catalog maps. With no
+ * positions it does no work at all (the hook runs for every user).
  */
-export function buildHeldMarketLookup(walletPositions, manualPositions, marketLookup, prev) {
+export function findHeldMarkets(walletPositions, manualPositions, loadedMarkets) {
+  if (walletPositions.length === 0 && manualPositions.length === 0) return EMPTY_LOOKUP;
+  const wantedIds = new Set();
+  const wantedConditions = new Set();
+  for (const p of walletPositions) if (p.market) wantedIds.add(String(p.market.id));
+  for (const mp of manualPositions) {
+    if (mp.marketId != null) wantedIds.add(String(mp.marketId));
+    if (mp.conditionId) wantedConditions.add(mp.conditionId);
+  }
   const byId = new Map();
   const byCondition = new Map();
-  const add = (m) => {
-    byId.set(String(m.id), m);
+  for (const m of loadedMarkets) {
+    const id = String(m.id);
+    if (!wantedIds.has(id) && !(m.conditionId && wantedConditions.has(m.conditionId))) continue;
+    byId.set(id, m);
     if (m.conditionId) byCondition.set(m.conditionId, m);
-  };
-  for (const p of walletPositions) {
-    const m = p.market && marketLookup.byId.get(String(p.market.id));
-    if (m) add(m);
   }
-  for (const mp of manualPositions) {
-    const m = findLoadedMarket(mp, marketLookup);
-    if (m) add(m);
-  }
-  if (prev && prev.byId.size === byId.size && [...byId].every(([id, m]) => prev.byId.get(id) === m)) return prev;
   return { byId, byCondition };
+}
+
+/**
+ * True when both lookups hold the same market objects. Price ticks replace
+ * only the markets that changed, so an unchanged held set means no held
+ * price moved and the portfolio can keep its previous lookup.
+ */
+export function sameHeldMarkets(a, b) {
+  if (a === b) return true;
+  if (a.byId.size !== b.byId.size) return false;
+  for (const [id, m] of b.byId) if (a.byId.get(id) !== m) return false;
+  return true;
+}
+
+/**
+ * What table rows need to know about holdings: market, side and size — none
+ * of which change with price, so row-facing callbacks built from this stay
+ * stable across price ticks.
+ */
+export function holdingsKey(positions) {
+  return JSON.stringify(positions.map((p) => [String(p.market?.id ?? p.marketId), p.side ?? null, p.size ?? null, p.source ?? null]));
 }
 
 /**

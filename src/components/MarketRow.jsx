@@ -244,7 +244,7 @@ function PortfolioDot({ marketId, hasPortfolio, isMarketHeld, getHeldPosition })
 
 // ── MarketRow with React.memo ──
 const MarketRow = memo(function MarketRow({ market, expanded, onToggle, detailWidth, highlighted, cachedSpread, onBookData, cachedFlow, onFlowData, onLivePriceUpdate, filters, gridColumns, priceFlash }) {
-  const { hasPortfolio, isMarketHeld, getHeldPosition, addManualPosition, ...portfolio } = usePortfolioContext();
+  const { hasPortfolio, isMarketHeld, getHeldPosition, addManualPosition } = usePortfolioContext();
   const [showAddPopover, setShowAddPopover] = useState(false);
   const addBtnRef = useRef(null);
 
@@ -362,7 +362,7 @@ const MarketRow = memo(function MarketRow({ market, expanded, onToggle, detailWi
       {expanded && (
         <div className="sticky left-0" style={{ width: detailWidth || '100%' }}>
           <Suspense fallback={<div className="h-20 animate-pulse bg-gray-800/50 rounded" />}>
-            <MarketDetailPanel market={market} onBookData={onBookData} onFlowData={onFlowData} onLivePriceUpdate={onLivePriceUpdate} portfolio={portfolio} />
+            <MarketDetailPanel market={market} onBookData={onBookData} onFlowData={onFlowData} onLivePriceUpdate={onLivePriceUpdate} />
           </Suspense>
         </div>
       )}

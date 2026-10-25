@@ -27,7 +27,9 @@ import {
   pricesFromGammaMarket,
   unloadedManualMarketIds,
   priceManualPosition,
-  buildHeldMarketLookup,
+  findHeldMarkets,
+  sameHeldMarkets,
+  holdingsKey,
   repriceWalletPosition,
 } from '../PortfolioEngine';
 import { envelope, jsonResponse, v2Position, WALLET, YES_TOKEN, CONDITION } from './helpers/dataApiV2Fixtures';
@@ -531,20 +533,29 @@ describe('live prices: held-market lookup and wallet re-pricing', () => {
   const wallet = [{ market: a, side: 'YES', size: 10, entryPrice: 0.4 }];
   const manualPos = [{ marketId: 'x', conditionId: 'cb' }]; // matched by conditionId
 
-  it('holds only the markets positions are in, matched by id or conditionId', () => {
-    const held = buildHeldMarketLookup(wallet, manualPos, lookupOf([a, b, c]), null);
+  it('findHeldMarkets holds only the markets positions are in, matched by id or conditionId', () => {
+    const held = findHeldMarkets(wallet, manualPos, [a, b, c]);
     expect([...held.byId.keys()].sort()).toEqual(['a', 'b']);
     expect(held.byCondition.get('cb')).toBe(b);
   });
 
-  it('keeps its identity when no held market changed, and replaces it when one did', () => {
-    const first = buildHeldMarketLookup(wallet, manualPos, lookupOf([a, b, c]), null);
-    const untouched = buildHeldMarketLookup(wallet, manualPos, lookupOf([a, b, { ...c, yesPrice: 0.95 }]), first);
-    expect(untouched).toBe(first);
-    const a2 = { ...a, yesPrice: 0.6 };
-    const changed = buildHeldMarketLookup(wallet, manualPos, lookupOf([a2, b, c]), first);
-    expect(changed).not.toBe(first);
-    expect(changed.byId.get('a')).toBe(a2);
+  it('findHeldMarkets does no work without positions', () => {
+    const markets = new Proxy([a, b, c], { get: (t, k) => { if (k === Symbol.iterator) throw new Error('scanned'); return t[k]; } });
+    expect(findHeldMarkets([], [], markets).byId.size).toBe(0);
+  });
+
+  it('sameHeldMarkets: a tick on an unheld market is "same", a tick on a held one is not', () => {
+    const first = findHeldMarkets(wallet, manualPos, [a, b, c]);
+    expect(sameHeldMarkets(first, findHeldMarkets(wallet, manualPos, [a, b, { ...c, yesPrice: 0.95 }]))).toBe(true);
+    expect(sameHeldMarkets(first, findHeldMarkets(wallet, manualPos, [{ ...a, yesPrice: 0.6 }, b, c]))).toBe(false);
+    expect(sameHeldMarkets(first, findHeldMarkets(wallet, [], [a, b, c]))).toBe(false);
+  });
+
+  it('holdingsKey ignores prices and changes with market, side or size', () => {
+    const base = [{ market: a, side: 'YES', size: 10, source: 'manual', currentPrice: 0.5 }];
+    expect(holdingsKey([{ ...base[0], currentPrice: 0.9, market: { ...a, yesPrice: 0.9 } }])).toBe(holdingsKey(base));
+    expect(holdingsKey([{ ...base[0], size: 11 }])).not.toBe(holdingsKey(base));
+    expect(holdingsKey([{ ...base[0], side: 'NO' }])).not.toBe(holdingsKey(base));
   });
 
   it('repriceWalletPosition prices from the current market object', () => {
