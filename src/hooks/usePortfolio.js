@@ -3,7 +3,8 @@ import {
   fetchPositions,
   normalizePosition,
   matchPositionsToMarkets,
-  buildCorrelationClusters,
+  buildCorrelationStructure,
+  priceClusters,
   calculateConcentration,
   generateAlerts,
   getPositionSignals,
@@ -20,7 +21,10 @@ import {
   pricesFromGammaMarket,
   unloadedManualMarketIds,
   priceManualPosition,
-  buildHeldMarketLookup,
+  findHeldMarkets,
+  sameHeldMarkets,
+  holdingsKey,
+  structureKey,
   repriceWalletPosition,
 } from '../PortfolioEngine';
 import { fetchMarketById } from '../api';
@@ -115,29 +119,22 @@ export function usePortfolio(loadedMarkets) {
     setManualPositions([...updated]);
   }, []);
 
-  // O(1) lookup of the CURRENT market objects. Rebuilt whenever the markets
-  // array changes — price ticks replace changed market objects (Immer), so a
-  // lookup keyed on length alone kept positions on stale prices. Ticks are
-  // applied at most once a second (App's price throttle, which builds a
-  // same-sized index per tick itself).
-  const marketLookup = useMemo(() => {
-    const byId = new Map();
-    const byCondition = new Map();
-    for (const m of loadedMarkets) {
-      byId.set(String(m.id), m);
-      if (m.conditionId) byCondition.set(m.conditionId, m);
-    }
-    return { byId, byCondition };
-  }, [loadedMarkets]);
-
-  // Just the markets positions are in. Keeps its identity across ticks that
-  // don't touch a held market, so allPositions, the analysis and
-  // PortfolioContext consumers only update when a held price moved.
+  // The CURRENT objects of just the markets positions are in. Price ticks
+  // (at most once a second) replace changed market objects (Immer), so this
+  // is re-found whenever the markets array changes — one pass, and no work
+  // at all without positions.
+  // Keeps the previous lookup while no held market changed, so a tick on a
+  // market nobody holds leaves allPositions and the analysis untouched.
+  // A ref, not state adjusted during render: that loops forever if a caller
+  // passes a fresh markets array each render. Worst case for the ref (a
+  // discarded render) is reusing an equivalent lookup.
   const heldLookupRef = useRef(null);
   const heldLookup = useMemo(() => {
-    heldLookupRef.current = buildHeldMarketLookup(walletPositions, manualPositions, marketLookup, heldLookupRef.current);
+    const found = findHeldMarkets(walletPositions, manualPositions, loadedMarkets);
+    const prev = heldLookupRef.current;
+    heldLookupRef.current = prev && sameHeldMarkets(prev, found) ? prev : found;
     return heldLookupRef.current;
-  }, [walletPositions, manualPositions, marketLookup]);
+  }, [walletPositions, manualPositions, loadedMarkets]);
 
   // Manual positions whose market isn't in the catalog (resolved, or in an
   // event under the volume floor) would show the price saved when they were
@@ -154,11 +151,11 @@ export function usePortfolio(loadedMarkets) {
     return () => clearInterval(timer);
   }, []);
 
-  // A string, so price ticks (new marketLookup, same unloaded set) don't
-  // re-run the lookup effect below
+  // A string, so only a change in WHICH markets are unloaded re-runs the
+  // lookup effect below
   const unloadedIdsKey = useMemo(
-    () => unloadedManualMarketIds(manualPositions, marketLookup).join('\n'),
-    [manualPositions, marketLookup],
+    () => unloadedManualMarketIds(manualPositions, heldLookup).join('\n'),
+    [manualPositions, heldLookup],
   );
   const catalogSize = loadedMarkets.length;
 
@@ -191,7 +188,25 @@ export function usePortfolio(loadedMarkets) {
     return [...pricedWallet, ...matchedManual].filter((p) => p.market != null);
   }, [walletPositions, manualPositions, heldLookup, lookedUpPrices]);
 
-  // Correlation analysis
+  // Holdings as table rows see them: market, side, size. Keyed by content, so
+  // the row-facing values below keep their identity across price ticks —
+  // rows re-render when what you hold changes, not when its price moves.
+  const holdingsJson = useMemo(() => holdingsKey(allPositions), [allPositions]);
+  const holdings = useMemo(
+    () => JSON.parse(holdingsJson).map(([marketId, side, size, source]) => ({ marketId, side, size, source })),
+    [holdingsJson],
+  );
+
+  // Which markets on which side — what the correlation structure depends on
+  // (not size: see structureKey)
+  const structureJson = useMemo(() => structureKey(allPositions), [allPositions]);
+
+  // Correlation analysis. The O(n²) part (correlation matrix and cluster
+  // membership) doesn't depend on price or size, so it's rebuilt only when
+  // the held markets or sides change; a price tick only re-prices (O(n)). Ref-cached for the
+  // same reason as heldLookup above. Also rebuilt on a new day: its
+  // date-proximity term reads daysLeft, which a long session would leave stale.
+  const structureRef = useRef({ key: null, structure: null });
   const analysis = useMemo(() => {
     if (allPositions.length === 0) {
       return {
@@ -207,7 +222,12 @@ export function usePortfolio(loadedMarkets) {
       };
     }
 
-    const { clusters, correlationMatrix } = buildCorrelationClusters(allPositions);
+    const key = `${structureJson}|${Math.floor(Date.now() / 86_400_000)}`;
+    if (structureRef.current.key !== key) {
+      structureRef.current = { key, structure: buildCorrelationStructure(allPositions) };
+    }
+    const { structure } = structureRef.current;
+    const clusters = priceClusters(allPositions, structure);
     const concentration = calculateConcentration(allPositions, clusters);
     const alerts = generateAlerts(allPositions, clusters, concentration);
 
@@ -217,8 +237,8 @@ export function usePortfolio(loadedMarkets) {
       positionSignals.set(i, getPositionSignals(allPositions[i]));
     }
 
-    return { clusters, correlationMatrix, concentration, alerts, positionSignals };
-  }, [allPositions]);
+    return { clusters, correlationMatrix: structure.matrix, concentration, alerts, positionSignals };
+  }, [allPositions, structureJson]);
 
   // Filter out dismissed alerts
   const activeAlerts = useMemo(() => {
@@ -231,29 +251,44 @@ export function usePortfolio(loadedMarkets) {
     setDismissedAlerts((prev) => [...prev, alertText]);
   }, []);
 
-  // Screen a new trade
+  // Screen a new trade. The detail panel and the Kelly calculator both ask
+  // for the market on every render; results are cached per market until the
+  // portfolio changes (each call is O(positions), but renders are frequent).
+  // (analysis.clusters is rebuilt whenever allPositions changes, so it keys the cache.)
+  const screenCacheRef = useRef({ clusters: null, byMarket: new Map() });
   const screenTrade = useCallback((market) => {
-    return screenNewTrade(market, allPositions, analysis.clusters);
+    if (screenCacheRef.current.clusters !== analysis.clusters) {
+      screenCacheRef.current = { clusters: analysis.clusters, byMarket: new Map() };
+    }
+    // No ID → nothing safe to cache under (every such market would share 'undefined')
+    if (market?.id == null) return screenNewTrade(market, allPositions, analysis.clusters);
+    const { byMarket } = screenCacheRef.current;
+    const key = String(market.id);
+    if (!byMarket.has(key)) byMarket.set(key, screenNewTrade(market, allPositions, analysis.clusters));
+    return byMarket.get(key);
   }, [allPositions, analysis.clusters]);
 
   // O(1) set of held market IDs for fast filter checks
-  const heldMarketIds = useMemo(() => {
-    const set = new Set();
-    for (const p of allPositions) {
-      if (p.market) set.add(String(p.market.id));
-    }
-    return set;
-  }, [allPositions]);
+  const heldMarketIds = useMemo(() => new Set(holdings.map((h) => h.marketId)), [holdings]);
 
-  // Check if a market is held
+  // A held market's side and size (not prices — use allPositions for those)
   const getHeldPosition = useCallback((marketId) => {
-    return allPositions.find((p) => p.market && String(p.market.id) === String(marketId));
-  }, [allPositions]);
+    return holdings.find((h) => h.marketId === String(marketId)) || null;
+  }, [holdings]);
 
   // O(1) check — use this in hot paths (filtering)
   const isMarketHeld = useCallback((marketId) => {
     return heldMarketIds.has(String(marketId));
   }, [heldMarketIds]);
+
+  const hasPortfolio = allPositions.length > 0;
+
+  // What table rows read from PortfolioContext. Stable across price ticks
+  // (see holdings above); the full portfolio, which does change with
+  // prices, goes to the detail panel through its own context.
+  const rowContext = useMemo(() => ({
+    hasPortfolio, isMarketHeld, getHeldPosition, addManualPosition,
+  }), [hasPortfolio, isMarketHeld, getHeldPosition, addManualPosition]);
 
   // Summary stats
   const summary = useMemo(() => {
@@ -306,12 +341,13 @@ export function usePortfolio(loadedMarkets) {
     getHeldPosition,
     isMarketHeld,
     heldMarketIds,
-    hasPortfolio: allPositions.length > 0,
+    hasPortfolio,
+    rowContext,
   }), [
     walletAddress, connectWallet, disconnectWallet, loading, error,
     lastRefresh, refreshPositions, allPositions, walletPositions,
     manualPositions, addManualPosition, removeManualPosition, analysis,
     activeAlerts, handleDismissAlert, summary, screenTrade,
-    getHeldPosition, isMarketHeld, heldMarketIds,
+    getHeldPosition, isMarketHeld, heldMarketIds, hasPortfolio, rowContext,
   ]);
 }

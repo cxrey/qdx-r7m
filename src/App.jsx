@@ -420,7 +420,7 @@ function App() {
             categories={ALL_CATEGORIES}
             hasPortfolio={portfolio.hasPortfolio}
           />
-          <PortfolioProvider value={portfolio}>
+          <PortfolioProvider value={portfolio.rowContext} details={portfolio}>
             <ErrorBoundary name="ResultsTable">
               <ResultsTable
                 markets={filteredMarkets}

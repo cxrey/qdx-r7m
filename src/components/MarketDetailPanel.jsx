@@ -15,6 +15,7 @@ import PortfolioImpact from './PortfolioImpact';
 import TradeFlowPanel from './TradeFlowPanel';
 import { formatVolume } from '../formatters';
 import { computeRoundTripCostPP, computeFeePP } from '../feeCalculator';
+import { usePortfolioDetails } from '../contexts/PortfolioContext';
 
 // Code-split heavy components
 const KellyCalculator = lazy(() => import('./KellyCalculator'));
@@ -53,7 +54,11 @@ function Skeleton({ className }) {
   return <div className={`animate-pulse bg-gray-800 rounded ${className}`} />;
 }
 
-export default function MarketDetailPanel({ market, onBookData, onLivePriceUpdate, portfolio }) {
+export default function MarketDetailPanel({ market, onBookData, onLivePriceUpdate }) {
+  // Full portfolio (hasPortfolio, summary, screenTrade) for Portfolio Impact
+  // and the Kelly constraints. Read from its own context: MarketRow used to
+  // pass a copy with hasPortfolio stripped out, which silently disabled both.
+  const portfolio = usePortfolioDetails();
   const [side, setSide] = useState('yes'); // 'yes' or 'no'
   const [timeframe, setTimeframe] = useState(TIMEFRAMES[2]); // default 30D
 

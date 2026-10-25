@@ -23,8 +23,9 @@ export default function CorrelationMatrix({ positions, correlationMatrix, cluste
 
   const n = positions.length;
 
-  // For > 15 positions, show cluster summary instead
-  if (n > 15 && clusters && clusters.length > 1) {
+  // For > 15 positions, show cluster summary instead — even with a single
+  // cluster: the grid is n² cells (a million at 1,000 positions)
+  if (n > 15 && clusters && clusters.length > 0) {
     return (
       <div className="rounded-lg border border-[#1f2937] p-4" style={{ background: '#111827' }}>
         <div className="text-xs font-semibold text-gray-400 uppercase mb-3">

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { renderHook, waitFor } from '@testing-library/react';
+import { renderHook, waitFor, act } from '@testing-library/react';
 
 vi.mock('../api', () => ({ fetchMarketById: vi.fn() }));
 vi.mock('../dataApi', async (importOriginal) => ({ ...(await importOriginal()), dataApiGet: vi.fn() }));
@@ -74,6 +74,83 @@ describe('usePortfolio — positions follow live price ticks', () => {
     rerender({ markets: tick(before, 'other', 0.9) });
     expect(result.current.allPositions).toBe(portfolioBefore.allPositions);
     expect(result.current).toBe(portfolioBefore);
+  });
+
+  it('the row context stays the same object when a HELD market ticks (rows need side/size, not price)', () => {
+    localStorage.setItem(MANUAL_KEY, JSON.stringify([manual('live', 0.3)]));
+    const before = [loaded('live', 0.6), loaded('other', 0.5)];
+    const { result, rerender } = renderHook(({ markets }) => usePortfolio(markets), { initialProps: { markets: before } });
+    const rowBefore = result.current.rowContext;
+
+    rerender({ markets: tick(before, 'live', 0.7) });
+    expect(positionFor(result, 'live').currentPrice).toBe(0.7); // the full portfolio did update
+    expect(result.current.rowContext).toBe(rowBefore);
+    expect(result.current.rowContext.getHeldPosition('live')).toMatchObject({ marketId: 'live', side: 'YES', size: 100 });
+    expect(result.current.rowContext.isMarketHeld('live')).toBe(true);
+    expect(result.current.rowContext.isMarketHeld('other')).toBe(false);
+  });
+
+  it('the row context changes when holdings change', async () => {
+    const before = [loaded('live', 0.6), loaded('other', 0.5)];
+    const { result } = renderHook(() => usePortfolio(before));
+    const rowBefore = result.current.rowContext;
+    expect(rowBefore.hasPortfolio).toBe(false);
+
+    act(() => result.current.addManualPosition(manual('other', 0.5)));
+    expect(result.current.rowContext).not.toBe(rowBefore);
+    expect(result.current.rowContext.hasPortfolio).toBe(true);
+    expect(result.current.rowContext.isMarketHeld('other')).toBe(true);
+  });
+
+  it('a held-price tick re-prices the analysis without rebuilding its correlation structure', () => {
+    localStorage.setItem(MANUAL_KEY, JSON.stringify([manual('live', 0.3), manual('other', 0.5)]));
+    const before = [loaded('live', 0.6), loaded('other', 0.5)];
+    const { result, rerender } = renderHook(({ markets }) => usePortfolio(markets), { initialProps: { markets: before } });
+    const matrixBefore = result.current.analysis.correlationMatrix;
+    const valueBefore = result.current.analysis.clusters.reduce((s, c) => s + c.totalValue, 0);
+
+    rerender({ markets: tick(before, 'live', 0.9) });
+    expect(result.current.analysis.correlationMatrix).toBe(matrixBefore); // structure reused
+    expect(result.current.analysis.clusters.reduce((s, c) => s + c.totalValue, 0)).toBeCloseTo(valueBefore + 30);
+  });
+
+  it('rebuilds the correlation structure on a new day (its date term reads daysLeft)', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-10-25T12:00:00Z'));
+      localStorage.setItem(MANUAL_KEY, JSON.stringify([manual('live', 0.3), manual('other', 0.5)]));
+      const before = [loaded('live', 0.6), loaded('other', 0.5)];
+      const { result, rerender } = renderHook(({ markets }) => usePortfolio(markets), { initialProps: { markets: before } });
+      const matrixDay1 = result.current.analysis.correlationMatrix;
+
+      rerender({ markets: tick(before, 'live', 0.65) });
+      expect(result.current.analysis.correlationMatrix).toBe(matrixDay1);
+
+      vi.setSystemTime(new Date('2026-10-26T12:00:00Z'));
+      rerender({ markets: tick(before, 'live', 0.7) });
+      expect(result.current.analysis.correlationMatrix).not.toBe(matrixDay1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('screenTrade is computed once per market until the portfolio changes', () => {
+    localStorage.setItem(MANUAL_KEY, JSON.stringify([manual('live', 0.3)]));
+    const before = [loaded('live', 0.6), loaded('other', 0.5)];
+    const { result, rerender } = renderHook(({ markets }) => usePortfolio(markets), { initialProps: { markets: before } });
+    const first = result.current.screenTrade(loaded('other', 0.5));
+    expect(result.current.screenTrade(loaded('other', 0.5))).toBe(first);
+
+    rerender({ markets: tick(before, 'live', 0.7) }); // held price moved → portfolio changed
+    expect(result.current.screenTrade(loaded('other', 0.5))).not.toBe(first);
+  });
+
+  it('screenTrade does not cache markets without an ID under a shared key', () => {
+    localStorage.setItem(MANUAL_KEY, JSON.stringify([manual('live', 0.3)]));
+    const { result } = renderHook(() => usePortfolio([loaded('live', 0.6)]));
+    const noIdA = { question: 'A?', yesPrice: 0.5, noPrice: 0.5 };
+    const noIdB = { question: 'B?', yesPrice: 0.5, noPrice: 0.5 };
+    expect(result.current.screenTrade(noIdA)).not.toBe(result.current.screenTrade(noIdB));
   });
 
   it('price ticks do not re-trigger lookups for unloaded markets', async () => {

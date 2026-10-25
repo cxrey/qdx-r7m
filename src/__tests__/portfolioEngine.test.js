@@ -27,10 +27,16 @@ import {
   pricesFromGammaMarket,
   unloadedManualMarketIds,
   priceManualPosition,
-  buildHeldMarketLookup,
+  findHeldMarkets,
+  sameHeldMarkets,
+  holdingsKey,
+  structureKey,
   repriceWalletPosition,
+  buildCorrelationStructure,
+  priceClusters,
 } from '../PortfolioEngine';
 import { envelope, jsonResponse, v2Position, WALLET, YES_TOKEN, CONDITION } from './helpers/dataApiV2Fixtures';
+import { generateMarkets } from '../__benchmarks__/helpers/fixtures';
 
 // ── Helpers ──
 
@@ -383,6 +389,69 @@ describe('screenNewTrade', () => {
     const result = screenNewTrade(null, [], []);
     expect(result.fit).toBe('GOOD_FIT');
   });
+
+  it('reports a market you already hold as ALREADY_HELD, not as correlated with itself', () => {
+    const held = makePosition({ id: 'held', question: 'Steelers vs. Saints', slug: 'nfl', category: 'Sports' }, { side: 'YES', size: 100 });
+    const other = makePosition({ id: 'other', question: 'Will it rain in Paris?', description: 'Weather', slug: 'rain', category: 'Weather', daysLeft: 300 });
+    const { clusters } = buildCorrelationClusters([held, other]);
+    const result = screenNewTrade(held.market, [held, other], clusters);
+    expect(result.fit).toBe('ALREADY_HELD');
+    expect(result.alreadyHeld).toEqual({ yes: 100, no: 0 });
+    expect(result.text).toBe('You already hold this market (YES 100 shares). Buying more YES concentrates that position; buying NO offsets it.');
+    // Correlation is against OTHER positions only
+    expect(result.maxCorrelationMarket?.id).not.toBe('held');
+    expect(result.maxCorrelation).toBeLessThan(0.5);
+  });
+
+  it('totals each side separately when a market is held on both sides', () => {
+    const yes = makePosition({ id: 'both', slug: 'b' }, { side: 'YES', size: 100 });
+    const no = { ...makePosition({ id: 'both', slug: 'b' }, { side: 'NO', size: 40 }) };
+    const { clusters } = buildCorrelationClusters([yes, no]);
+    const result = screenNewTrade(yes.market, [yes, no], clusters);
+    expect(result.alreadyHeld).toEqual({ yes: 100, no: 40 });
+    expect(result.text).toBe('You already hold this market on both sides (YES 100, NO 40 shares).');
+  });
+
+  it('describes a NO holding with NO as the concentrating side', () => {
+    const held = makePosition({ id: 'n-held', slug: 'n' }, { side: 'NO', size: 25 });
+    const { clusters } = buildCorrelationClusters([held]);
+    expect(screenNewTrade(held.market, [held], clusters).text)
+      .toBe('You already hold this market (NO 25 shares). Buying more NO concentrates that position; buying YES offsets it.');
+  });
+
+  it('matches a full re-clustering on a realistic portfolio (the incremental path is not an approximation in practice)', () => {
+    const positions = generateMarkets(40, 11).slice(0, 39).map((m) => ({ market: m, side: 'YES', size: 50, currentValue: 50 * (m.yesPrice ?? 0.5) }));
+    const candidate = generateMarkets(40, 11)[39];
+    const { clusters } = buildCorrelationClusters(positions);
+    const result = screenNewTrade(candidate, positions, clusters);
+
+    const exactPositions = [...positions, { market: candidate, side: 'YES', size: 50, currentValue: 50, currentPrice: candidate.yesPrice }];
+    const { clusters: exactClusters } = buildCorrelationClusters(exactPositions);
+    expect(result.newDivScore).toBe(calculateConcentration(exactPositions, exactClusters).diversificationScore);
+  });
+});
+
+describe('clustering split: structure (price-independent) + pricing', () => {
+  const positions = [
+    makePosition({ id: 's1', question: 'Will Trump win?', slug: 'trump' }, { currentValue: 100 }),
+    makePosition({ id: 's2', question: 'Will Trump be nominated?', slug: 'trump' }, { currentValue: 300 }),
+    makePosition({ id: 's3', question: 'Will it rain in Paris?', description: 'Weather', slug: 'rain', category: 'Weather', daysLeft: 300 }, { currentValue: 100 }),
+  ];
+
+  it('structure + priceClusters equals buildCorrelationClusters', () => {
+    const structure = buildCorrelationStructure(positions);
+    expect(priceClusters(positions, structure)).toEqual(buildCorrelationClusters(positions).clusters);
+  });
+
+  it('a reused structure re-prices weights from the current values', () => {
+    const structure = buildCorrelationStructure(positions);
+    const ticked = positions.map((p, i) => (i === 2 ? { ...p, currentValue: 500 } : p));
+    const clusters = priceClusters(ticked, structure);
+    const rain = clusters.find((c) => c.positions[0].market.id === 's3');
+    expect(rain.portfolioWeight).toBeCloseTo(500 / 900);
+    expect(rain.positions[0]).toBe(ticked[2]);
+    expect(clusters).toEqual(buildCorrelationClusters(ticked).clusters);
+  });
 });
 
 // ═══════════════════════════════════════════════════════════
@@ -531,20 +600,36 @@ describe('live prices: held-market lookup and wallet re-pricing', () => {
   const wallet = [{ market: a, side: 'YES', size: 10, entryPrice: 0.4 }];
   const manualPos = [{ marketId: 'x', conditionId: 'cb' }]; // matched by conditionId
 
-  it('holds only the markets positions are in, matched by id or conditionId', () => {
-    const held = buildHeldMarketLookup(wallet, manualPos, lookupOf([a, b, c]), null);
+  it('findHeldMarkets holds only the markets positions are in, matched by id or conditionId', () => {
+    const held = findHeldMarkets(wallet, manualPos, [a, b, c]);
     expect([...held.byId.keys()].sort()).toEqual(['a', 'b']);
     expect(held.byCondition.get('cb')).toBe(b);
   });
 
-  it('keeps its identity when no held market changed, and replaces it when one did', () => {
-    const first = buildHeldMarketLookup(wallet, manualPos, lookupOf([a, b, c]), null);
-    const untouched = buildHeldMarketLookup(wallet, manualPos, lookupOf([a, b, { ...c, yesPrice: 0.95 }]), first);
-    expect(untouched).toBe(first);
-    const a2 = { ...a, yesPrice: 0.6 };
-    const changed = buildHeldMarketLookup(wallet, manualPos, lookupOf([a2, b, c]), first);
-    expect(changed).not.toBe(first);
-    expect(changed.byId.get('a')).toBe(a2);
+  it('findHeldMarkets does no work without positions', () => {
+    const markets = new Proxy([a, b, c], { get: (t, k) => { if (k === Symbol.iterator) throw new Error('scanned'); return t[k]; } });
+    expect(findHeldMarkets([], [], markets).byId.size).toBe(0);
+  });
+
+  it('sameHeldMarkets: a tick on an unheld market is "same", a tick on a held one is not', () => {
+    const first = findHeldMarkets(wallet, manualPos, [a, b, c]);
+    expect(sameHeldMarkets(first, findHeldMarkets(wallet, manualPos, [a, b, { ...c, yesPrice: 0.95 }]))).toBe(true);
+    expect(sameHeldMarkets(first, findHeldMarkets(wallet, manualPos, [{ ...a, yesPrice: 0.6 }, b, c]))).toBe(false);
+    expect(sameHeldMarkets(first, findHeldMarkets(wallet, [], [a, b, c]))).toBe(false);
+  });
+
+  it('structureKey ignores size (and price) but changes with market or side', () => {
+    const base = [{ market: a, side: 'YES', size: 10 }];
+    expect(structureKey([{ ...base[0], size: 999, currentPrice: 0.9 }])).toBe(structureKey(base));
+    expect(structureKey([{ ...base[0], side: 'NO' }])).not.toBe(structureKey(base));
+    expect(structureKey([{ ...base[0], market: b }])).not.toBe(structureKey(base));
+  });
+
+  it('holdingsKey ignores prices and changes with market, side or size', () => {
+    const base = [{ market: a, side: 'YES', size: 10, source: 'manual', currentPrice: 0.5 }];
+    expect(holdingsKey([{ ...base[0], currentPrice: 0.9, market: { ...a, yesPrice: 0.9 } }])).toBe(holdingsKey(base));
+    expect(holdingsKey([{ ...base[0], size: 11 }])).not.toBe(holdingsKey(base));
+    expect(holdingsKey([{ ...base[0], side: 'NO' }])).not.toBe(holdingsKey(base));
   });
 
   it('repriceWalletPosition prices from the current market object', () => {
