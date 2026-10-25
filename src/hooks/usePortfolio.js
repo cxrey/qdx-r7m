@@ -24,6 +24,7 @@ import {
   findHeldMarkets,
   sameHeldMarkets,
   holdingsKey,
+  structureKey,
   repriceWalletPosition,
 } from '../PortfolioEngine';
 import { fetchMarketById } from '../api';
@@ -196,9 +197,13 @@ export function usePortfolio(loadedMarkets) {
     [holdingsJson],
   );
 
+  // Which markets on which side — what the correlation structure depends on
+  // (not size: see structureKey)
+  const structureJson = useMemo(() => structureKey(allPositions), [allPositions]);
+
   // Correlation analysis. The O(n²) part (correlation matrix and cluster
-  // membership) doesn't depend on price, so it's rebuilt only when holdings
-  // change; a price tick only re-prices clusters (O(n)). Ref-cached for the
+  // membership) doesn't depend on price or size, so it's rebuilt only when
+  // the held markets or sides change; a price tick only re-prices (O(n)). Ref-cached for the
   // same reason as heldLookup above. Also rebuilt on a new day: its
   // date-proximity term reads daysLeft, which a long session would leave stale.
   const structureRef = useRef({ key: null, structure: null });
@@ -217,9 +222,9 @@ export function usePortfolio(loadedMarkets) {
       };
     }
 
-    const structureKey = `${holdingsJson}|${Math.floor(Date.now() / 86_400_000)}`;
-    if (structureRef.current.key !== structureKey) {
-      structureRef.current = { key: structureKey, structure: buildCorrelationStructure(allPositions) };
+    const key = `${structureJson}|${Math.floor(Date.now() / 86_400_000)}`;
+    if (structureRef.current.key !== key) {
+      structureRef.current = { key, structure: buildCorrelationStructure(allPositions) };
     }
     const { structure } = structureRef.current;
     const clusters = priceClusters(allPositions, structure);
@@ -233,7 +238,7 @@ export function usePortfolio(loadedMarkets) {
     }
 
     return { clusters, correlationMatrix: structure.matrix, concentration, alerts, positionSignals };
-  }, [allPositions, holdingsJson]);
+  }, [allPositions, structureJson]);
 
   // Filter out dismissed alerts
   const activeAlerts = useMemo(() => {
@@ -255,8 +260,10 @@ export function usePortfolio(loadedMarkets) {
     if (screenCacheRef.current.clusters !== analysis.clusters) {
       screenCacheRef.current = { clusters: analysis.clusters, byMarket: new Map() };
     }
+    // No ID → nothing safe to cache under (every such market would share 'undefined')
+    if (market?.id == null) return screenNewTrade(market, allPositions, analysis.clusters);
     const { byMarket } = screenCacheRef.current;
-    const key = String(market?.id);
+    const key = String(market.id);
     if (!byMarket.has(key)) byMarket.set(key, screenNewTrade(market, allPositions, analysis.clusters));
     return byMarket.get(key);
   }, [allPositions, analysis.clusters]);

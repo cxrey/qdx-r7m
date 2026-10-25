@@ -220,6 +220,15 @@ export function holdingsKey(positions) {
 }
 
 /**
+ * What the correlation structure depends on: which markets, on which side,
+ * in which order. Not size — an actively trading wallet changes sizes
+ * between refreshes, and that shouldn't force the O(n²) rebuild.
+ */
+export function structureKey(positions) {
+  return JSON.stringify(positions.map((p) => [String(p.market?.id ?? p.marketId), p.side ?? null]));
+}
+
+/**
  * Re-price a wallet position from the current object of its market. Wallet
  * positions are matched to markets once per wallet refresh (5 min); this
  * keeps them on live prices in between, without a request.

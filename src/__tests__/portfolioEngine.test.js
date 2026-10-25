@@ -30,6 +30,7 @@ import {
   findHeldMarkets,
   sameHeldMarkets,
   holdingsKey,
+  structureKey,
   repriceWalletPosition,
   buildCorrelationStructure,
   priceClusters,
@@ -615,6 +616,13 @@ describe('live prices: held-market lookup and wallet re-pricing', () => {
     expect(sameHeldMarkets(first, findHeldMarkets(wallet, manualPos, [a, b, { ...c, yesPrice: 0.95 }]))).toBe(true);
     expect(sameHeldMarkets(first, findHeldMarkets(wallet, manualPos, [{ ...a, yesPrice: 0.6 }, b, c]))).toBe(false);
     expect(sameHeldMarkets(first, findHeldMarkets(wallet, [], [a, b, c]))).toBe(false);
+  });
+
+  it('structureKey ignores size (and price) but changes with market or side', () => {
+    const base = [{ market: a, side: 'YES', size: 10 }];
+    expect(structureKey([{ ...base[0], size: 999, currentPrice: 0.9 }])).toBe(structureKey(base));
+    expect(structureKey([{ ...base[0], side: 'NO' }])).not.toBe(structureKey(base));
+    expect(structureKey([{ ...base[0], market: b }])).not.toBe(structureKey(base));
   });
 
   it('holdingsKey ignores prices and changes with market, side or size', () => {

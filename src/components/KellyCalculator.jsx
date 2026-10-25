@@ -63,7 +63,7 @@ function SensitivityTableView({ rows, side }) {
     <div className="rounded-lg border border-[#1f2937]" style={{ background: '#111827' }}>
       <div className="px-3 py-2 border-b border-gray-800">
         <span className="text-xs font-semibold text-gray-400 uppercase">Sensitivity Analysis</span>
-        <span className="text-[10px] text-gray-500 ml-2">How sizing changes with your probability estimate</span>
+        <span className="text-[10px] text-gray-500 ml-2">How sizing changes with your probability estimate (before portfolio limits)</span>
       </div>
       <div className="overflow-x-auto">
         <table className="w-full text-xs">
@@ -475,8 +475,10 @@ export default function KellyCalculator({ market, portfolio }) {
           <div className="flex items-center gap-2">
             <span className="text-xs font-semibold text-gray-400 uppercase">Position Sizer (Kelly)</span>
             {kelly.valid && !kelly.noEdge && (
+              // The constrained size — the same number the expanded view
+              // recommends (max-position cap and portfolio limits applied)
               <span className="text-[10px] text-gray-500">
-                ~${(kelly.fractionalKelly * settings.bankroll).toFixed(0)} suggested
+                ~${constrained.adjustedDollars.toFixed(0)} suggested
               </span>
             )}
           </div>

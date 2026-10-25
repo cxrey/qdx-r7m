@@ -145,6 +145,14 @@ describe('usePortfolio — positions follow live price ticks', () => {
     expect(result.current.screenTrade(loaded('other', 0.5))).not.toBe(first);
   });
 
+  it('screenTrade does not cache markets without an ID under a shared key', () => {
+    localStorage.setItem(MANUAL_KEY, JSON.stringify([manual('live', 0.3)]));
+    const { result } = renderHook(() => usePortfolio([loaded('live', 0.6)]));
+    const noIdA = { question: 'A?', yesPrice: 0.5, noPrice: 0.5 };
+    const noIdB = { question: 'B?', yesPrice: 0.5, noPrice: 0.5 };
+    expect(result.current.screenTrade(noIdA)).not.toBe(result.current.screenTrade(noIdB));
+  });
+
   it('price ticks do not re-trigger lookups for unloaded markets', async () => {
     localStorage.setItem(MANUAL_KEY, JSON.stringify([manual('under-floor', 0.2)]));
     fetchMarketById.mockResolvedValue(gamma('under-floor', '["0.25", "0.75"]', false));
