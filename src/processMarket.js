@@ -74,6 +74,12 @@ export const TAG_SLUG_TO_FEE_SLUG = {
   'economy':     'economics',
   'finance':     'business',
   'legal':       'other',
+  // Combos take the Combos rate whatever their legs' categories (docs). The
+  // tag slugs are INFERRED, not documented: the docs name the product, and
+  // live combo events were seen tagged `parlays`. Only matters for a
+  // fee-enabled market with no feeSchedule (none in the Oct 2026 catalog).
+  'combos':      'combos',
+  'parlays':     'combos',
 };
 
 // Last-resort fallback: map display category → fee slug for markets with no tags.
@@ -89,6 +95,37 @@ export const DISPLAY_TO_FEE_SLUG = {
   'Pop Culture': 'pop-culture',
   'Other':       'other',
 };
+
+/** A JSON-encoded array (Gamma's clobTokenIds) or a plain array (positionIds) → array of strings. */
+function decodeIdList(value) {
+  const list = typeof value === 'string' ? JSON.parse(value) : value;
+  if (!Array.isArray(list)) throw new Error('not an array');
+  return list.map(String);
+}
+
+/**
+ * The market's trading asset IDs ([YES, NO]) for its protocol version:
+ * "v2" → positionIds, "v1" → clobTokenIds (JSON text). A missing version is
+ * treated as v1 (older payloads and direct lookups predate the field). An
+ * unknown version yields no IDs rather than possibly-wrong ones — the docs
+ * say to reject it — so the market simply gets no book/WS data.
+ * @returns {{ ids: string[], failed: boolean }}
+ */
+export function tradingAssetIds(market) {
+  const version = market.version ?? 'v1';
+  const source = version === 'v2' ? market.positionIds : version === 'v1' ? market.clobTokenIds : undefined;
+  if (source === undefined) {
+    if (version !== 'v1' && version !== 'v2') console.warn(`[processMarket] Unsupported market version "${version}" for`, market.id);
+    return { ids: [], failed: version !== 'v1' && version !== 'v2' };
+  }
+  if (source == null) return { ids: [], failed: false };
+  try {
+    return { ids: decodeIdList(source), failed: false };
+  } catch (e) {
+    console.warn(`[processMarket] Malformed ${version === 'v2' ? 'positionIds' : 'clobTokenIds'} for`, market.id, e.message);
+    return { ids: [], failed: true };
+  }
+}
 
 /**
  * Extract fee category slug from event tags array.
@@ -109,7 +146,7 @@ function extractFeeCategoryFromTags(tags) {
 }
 
 const _loggedSlugs = new Set();
-let _feeEnabledSeen = false;
+let _feeFallbackLogged = false;
 
 /**
  * Run one analysis engine, isolating failures: on error, log it, record the
@@ -140,11 +177,14 @@ export function processMarket(market) {
     console.warn('[processMarket] Malformed outcomePrices for', market.id, e.message);
     _engineFailures.push('outcomePrices');
   }
-  let clobTokenIds = [];
-  try { if (market.clobTokenIds) clobTokenIds = JSON.parse(market.clobTokenIds); } catch (e) {
-    console.warn('[processMarket] Malformed clobTokenIds for', market.id, e.message);
-    _engineFailures.push('clobTokenIds');
-  }
+  // The outcome IDs used for order books, prices and WebSocket subscriptions.
+  // Kept under the historical name `clobTokenIds`, but per the Protocol V2
+  // migration (docs.polymarket.com/migrate/polymarket-v2/api-integrations)
+  // they depend on the market's `version`: CTF token IDs for "v1", position
+  // IDs for "v2". As of Oct 2026 every listed market is still "v1" (many
+  // already carry positionIds — not yet their trading IDs).
+  const { ids: clobTokenIds, failed: idsFailed } = tradingAssetIds(market);
+  if (idsFailed) _engineFailures.push('clobTokenIds');
 
   const yesPrice = safeNum(outcomePrices[0]);
   const noPrice = safeNum(outcomePrices[1]);
@@ -206,9 +246,11 @@ export function processMarket(market) {
   // Display category ('Crypto', 'Sports', ...) remains a separate concept
   // used for UI pills and filters.
   const feesEnabled = market.feesEnabled ?? false;
-  if (feesEnabled && !_feeEnabledSeen) {
-    _feeEnabledSeen = true;
-    console.info('[processMarket] feesEnabled=true detected on', market.id, '— verify FEE_PARAMS against live API');
+  // The live feeSchedule is authoritative; the FEE_PARAMS table is only a
+  // fallback. Flag (once) when that fallback is actually used.
+  if (feesEnabled && !market.feeSchedule && !_feeFallbackLogged) {
+    _feeFallbackLogged = true;
+    console.info('[processMarket] fee-enabled market without a feeSchedule:', market.id, '— using the FEE_PARAMS fallback table');
   }
   const feeType = market.feeType || null;
   const feeTypeSlug = feeType ? (FEETYPE_TO_FEE_SLUG[feeType] || null) : null;
@@ -292,7 +334,8 @@ export function processMarket(market) {
     baseRate,
     conjunction,
     conditionId: market.conditionId || market.condition_id || null,
-    clobTokenIds,
+    clobTokenIds, // trading asset IDs for `version` (see tradingAssetIds)
+    version: market.version ?? 'v1',
     active: market.active,
     closed: market.closed,
     gammaBestBid,

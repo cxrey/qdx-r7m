@@ -32,8 +32,7 @@ export const SPREAD_CACHE_CAP = 500;       // max entries in spread LRU cache
 
 // ── Hover prefetch tuning ───────────────────────────────────────
 export const HOVER_DEBOUNCE_DELAY = 400;   // ms before hover triggers fetch
-export const PREFETCH_CACHE_TTL = 30000;   // 30s cache lifetime per entry
-export const PREFETCH_LRU_CAP = 20;        // max entries in prefetch cache
+// (Prefetched data lives in the detail panel's cache — see detailPanelData.js for its TTLs)
 
 // ── Throttle tuning ──────────────────────────────────────────────
 export const PRICE_THROTTLE_MS = 1000;          // interval between price-tick filterAndSort checks

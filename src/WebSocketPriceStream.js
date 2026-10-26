@@ -2,7 +2,10 @@
  * WebSocketPriceStream — connects to Polymarket's market WebSocket
  * for real-time price streaming (Tier 1).
  *
- * Protocol (docs.polymarket.com/api-reference/wss/market, verified 2026-07-19):
+ * Protocol (docs.polymarket.com/market-data/realtime-data, re-verified 2026-10-26;
+ * unchanged since 2026-07-19). Asset IDs are the market's trading IDs —
+ * CTF token IDs for Protocol V1 markets, position IDs for V2 (processMarket
+ * picks them by market.version):
  *   URL: wss://ws-subscriptions-clob.polymarket.com/ws/market
  *   Handshake: { assets_ids: [], type: "market", initial_dump, custom_feature_enabled }
  *   Subscribe: { operation: "subscribe", assets_ids: [...], custom_feature_enabled }

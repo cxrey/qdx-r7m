@@ -24,7 +24,11 @@ export const GammaMarketSchema = z.object({
   endDate: z.string().optional(),
   createdAt: z.string().optional(),
   outcomePrices: z.string(),
-  clobTokenIds: z.string(),
+  // Protocol V2: "v1" markets trade by clobTokenIds (JSON text), "v2" by
+  // positionIds (array), so neither is guaranteed on every market
+  clobTokenIds: z.string().optional(),
+  positionIds: z.union([z.array(z.string()), z.string()]).optional(),
+  version: z.string().optional(),
   conditionId: z.string().optional(),
   condition_id: z.string().optional(),
 }).passthrough();
