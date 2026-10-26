@@ -1,4 +1,5 @@
 import { getVolEffSortValue } from '../VolumeEfficiencyEngine';
+import { marketYield } from '../yieldUtils';
 import { perfStart, perfEnd } from '../perfMonitor';
 
 /**
@@ -120,6 +121,12 @@ export function filterAndSort({ markets, filters, searchLower, lookupState, port
 
   // Sort
   const dir = filters.sortAsc ? 1 : -1;
+  // Yields depend on the current price and time: compute once per pass, not per comparison
+  let yields = null;
+  if (filters.sortBy === 'annualizedYield') {
+    const now = Date.now();
+    yields = new Map(result.map((m) => [m, marketYield(m, now)?.annualized ?? -1]));
+  }
   result.sort((a, b) => {
     if (isLookupFoundInLoaded) {
       if (a.id === foundInLoadedId) return -1;
@@ -146,6 +153,8 @@ export function filterAndSort({ markets, filters, searchLower, lookupState, port
         av = a.baseRate?.absGapCents ?? 0; bv = b.baseRate?.absGapCents ?? 0; break;
       case 'conjunctionGap':
         av = Math.abs(a.conjunction?.gapPp ?? 0); bv = Math.abs(b.conjunction?.gapPp ?? 0); break;
+      case 'annualizedYield':
+        av = yields.get(a); bv = yields.get(b); break;
       case 'walletImbalance':
         av = Math.abs(a._flowImbalance ?? 0); bv = Math.abs(b._flowImbalance ?? 0); break;
       case 'fee':
