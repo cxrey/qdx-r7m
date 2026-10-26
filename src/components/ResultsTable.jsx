@@ -389,7 +389,7 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, filt
         <div>Volume</div>
         <div>24hr Vol</div>
         <div>Days</div>
-        <div title="Annualized yield of the favourite (80¢+) held to resolution, if it wins (fees included)">Yield/yr</div>
+        <div title="Annualized yield of the favourite (80¢+) held to resolution, if it wins (bought at ~the ask, fees included)">Yield/yr</div>
         <div>Category</div>
         <div>Edge</div>
         <div>FLB Edge</div>

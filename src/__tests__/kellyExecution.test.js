@@ -3,7 +3,7 @@
  * fee): EV/share = p − c̄, f* = (p − c̄)/(1 − c̄), λ = min(your setting, tier).
  */
 import { describe, it, expect } from 'vitest';
-import { calculateKelly, calculateKellyAtExecution, calculateScenarios } from '../KellyEngine';
+import { calculateKelly, calculateKellyAtExecution, calculateScenarios, MAX_KELLY_FRACTION } from '../KellyEngine';
 import { allInCost } from '../executionCost';
 import { resolveFeeParams } from '../feeCalculator';
 
@@ -96,5 +96,19 @@ describe('calculateScenarios at the all-in cost', () => {
     const s = calculateScenarios(100, 0.5175, 'YES', 0.6, { bankroll: 1000 });
     expect(s.evPerShare).toBeCloseTo(0.6 - 0.5175, 10);
     expect(s.ev).toBeCloseTo(100 * (0.6 / 0.5175 - 1), 8);
+  });
+
+  it('price-move scenarios move from the market price, not the cost paid', () => {
+    const s = calculateScenarios(100, 0.5175, 'YES', 0.6, { bankroll: 1000 }, 0.5);
+    const up10 = s.partialScenarios.find((p) => p.label === 'Price +10c');
+    expect(up10.newPrice).toBeCloseTo(0.6, 10);
+    expect(up10.paperPnl).toBeCloseTo((100 / 0.5175) * 0.6 - 100, 8);
+  });
+});
+
+describe('λ setting', () => {
+  it('above the strongest tier (half Kelly) it has no further effect', () => {
+    expect(MAX_KELLY_FRACTION).toBe(0.5);
+    expect(calculateKelly(0.85, 0.5, 'YES', null, { maxFraction: 1 }).fractionMultiplier).toBe(MAX_KELLY_FRACTION);
   });
 });

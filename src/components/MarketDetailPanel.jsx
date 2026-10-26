@@ -47,11 +47,11 @@ function EdgeBadge({ score }) {
   return <span className={`px-2 py-0.5 rounded text-xs font-bold ${cls}`}>{score}</span>;
 }
 
-// Held-to-resolution yield of each side, if it wins (fees included)
+// Held-to-resolution yield of each side, if it wins (bought at ~the ask, fees included)
 function YieldLine({ market, yesPrice, noPrice }) {
   const days = daysToResolution(market);
-  const yes = annualizedYield(yesPrice, days, market.feeParams ?? null);
-  const no = annualizedYield(noPrice, days, market.feeParams ?? null);
+  const yes = annualizedYield(yesPrice, days, market.feeParams ?? null, market.spread ?? null);
+  const no = annualizedYield(noPrice, days, market.feeParams ?? null, market.spread ?? null);
   if (!yes && !no) return null;
   const fmt = (y) => (y ? `+${(y.simpleReturn * 100).toFixed(1)}% (${formatYield(y.annualized)}/yr)` : '—');
   return (

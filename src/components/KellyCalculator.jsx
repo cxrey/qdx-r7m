@@ -19,7 +19,10 @@ import {
   saveKellySettings,
   saveJournalEntry,
   calculateKellyAtExecution,
+  MAX_KELLY_FRACTION,
 } from '../KellyEngine';
+
+const MIN_KELLY_FRACTION = 0.05;
 import { allInCost } from '../executionCost';
 
 const CYAN = '#00d4aa';
@@ -338,7 +341,7 @@ function SettingsPopover({ settings, onSave, onClose }) {
         <SettingsField label="Max Position (%)" value={local.maxPositionPct} onChange={(v) => setLocal((s) => ({ ...s, maxPositionPct: v }))} min={1} max={100} step={1} />
         <SettingsField label="Max Total Exposure (%)" value={local.maxTotalExposure} onChange={(v) => setLocal((s) => ({ ...s, maxTotalExposure: v }))} min={1} max={100} step={5} />
         <SettingsField label="Min Bet ($)" value={local.minPracticalBet} onChange={(v) => setLocal((s) => ({ ...s, minPracticalBet: v }))} min={0} step={1} />
-        <SettingsField label="Kelly Fraction λ (max; weaker edges use less)" value={local.defaultFraction} onChange={(v) => setLocal((s) => ({ ...s, defaultFraction: Math.min(1, Math.max(0.05, v)) }))} min={0.05} max={1} step={0.05} />
+        <SettingsField label={`Kelly Fraction λ (${MIN_KELLY_FRACTION}–${MAX_KELLY_FRACTION}; weaker edges use less)`} value={local.defaultFraction} onChange={(v) => setLocal((s) => ({ ...s, defaultFraction: Math.min(MAX_KELLY_FRACTION, Math.max(MIN_KELLY_FRACTION, v)) }))} min={MIN_KELLY_FRACTION} max={MAX_KELLY_FRACTION} step={0.05} />
         <div className="flex items-center gap-2">
           <input
             type="checkbox"
@@ -463,9 +466,9 @@ export default function KellyCalculator({ market, portfolio, bookData = null, bo
 
   const scenarios = useMemo(
     () => constrained.adjustedDollars > 0
-      ? calculateScenarios(constrained.adjustedDollars, execQuote.cost, side, estProb, settings)
+      ? calculateScenarios(constrained.adjustedDollars, execQuote.cost, side, estProb, settings, marketPrice)
       : null,
-    [constrained.adjustedDollars, execQuote.cost, side, estProb, settings]
+    [constrained.adjustedDollars, execQuote.cost, side, estProb, settings, marketPrice]
   );
 
   const reEvalTriggers = useMemo(

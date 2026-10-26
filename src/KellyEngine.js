@@ -189,6 +189,10 @@ export function calculateKellyAtExecution({
   return { kelly, quote };
 }
 
+// The strongest robustness tier's fraction (half Kelly) — the most any edge
+// is sized at, so a λ setting above it has no effect
+export const MAX_KELLY_FRACTION = 0.5;
+
 /**
  * Assess robustness of the edge and determine Kelly fraction.
  */
@@ -200,7 +204,7 @@ function assessRobustness(gapPp, estProb) {
 
   if (gapPp >= 10 && distFromCenter > 0.2) {
     level = 'ROBUST';
-    kellyFraction = 0.5;  // half-Kelly
+    kellyFraction = MAX_KELLY_FRACTION;  // half-Kelly
     label = 'Robust edge - half Kelly';
   } else if (gapPp >= 5) {
     level = 'SOLID';
@@ -359,9 +363,12 @@ export function calculateSensitivityTable(marketPrice, centerProb, side = 'YES',
  * @param {string} side - 'YES' or 'NO'
  * @param {number} estProb - Estimated probability of YES (the event)
  * @param {Object} settings - Kelly settings
+ * @param {number} [markPrice] - the side's market price, which the "price moves"
+ *   scenarios move from (default: marketPrice). The cost paid includes fee and
+ *   slippage, so marking from it would overstate paper P&L by that much.
  * @returns {Object} Scenario analysis
  */
-export function calculateScenarios(betSize, marketPrice, side, estProb, settings = null) {
+export function calculateScenarios(betSize, marketPrice, side, estProb, settings = null, markPrice = marketPrice) {
   const s = settings || getKellySettings();
 
   // Shares purchased at the selected side's own price.
@@ -397,7 +404,7 @@ export function calculateScenarios(betSize, marketPrice, side, estProb, settings
     { label: 'Price -5c', priceMove: -0.05 },
     { label: 'Price -10c', priceMove: -0.10 },
   ].map((s) => {
-    const newPrice = Math.max(0.01, Math.min(0.99, entryPrice + s.priceMove));
+    const newPrice = Math.max(0.01, Math.min(0.99, markPrice + s.priceMove));
     const paperValue = shares * newPrice;
     const paperPnl = paperValue - betSize;
     return {

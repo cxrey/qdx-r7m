@@ -23,6 +23,21 @@ describe('annualizedYield', () => {
     expect(withFee.annualized).toBeLessThan(free.annualized);
   });
 
+  it('buys at the ask (mid + half the spread), not the mid', () => {
+    // 96.2¢ mid, 1¢ spread → 96.7¢; 248 days
+    const atMid = annualizedYield(0.962, 248);
+    const atAsk = annualizedYield(0.962, 248, null, 0.01);
+    expect(atAsk.buyPrice).toBeCloseTo(0.967, 12);
+    expect(atAsk.annualized).toBeCloseTo(Math.pow(1 / 0.967, 365 / 248) - 1, 12);
+    expect(atAsk.annualized).toBeLessThan(atMid.annualized);
+  });
+
+  it('marketYield uses the market spread', () => {
+    const end = new Date(NOW + 30 * DAY).toISOString();
+    const y = marketYield({ yesPrice: 0.9, noPrice: 0.1, spread: 0.02, endDateIso: end }, NOW);
+    expect(y.buyPrice).toBeCloseTo(0.91, 12);
+  });
+
   it('annualizes over at least one day', () => {
     expect(annualizedYield(0.99, 0.1).days).toBe(1);
     expect(annualizedYield(0.99, 0.1).annualized).toBeCloseTo(annualizedYield(0.99, 1).annualized, 12);

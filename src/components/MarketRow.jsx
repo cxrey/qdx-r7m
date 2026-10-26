@@ -61,9 +61,10 @@ function FeeCell({ market }) {
 function YieldCell({ market }) {
   const y = marketYield(market);
   if (!y) return <span className="text-gray-600 text-xs">&mdash;</span>;
-  const title = `${y.side} at ${(y.price * 100).toFixed(1)}c (${(y.cost * 100).toFixed(2)}c with fee): `
+  const title = `${y.side} at ${(y.price * 100).toFixed(1)}c — buying at ~${(y.buyPrice * 100).toFixed(1)}c, `
+    + `${(y.cost * 100).toFixed(2)}c with fee: `
     + `+${(y.simpleReturn * 100).toFixed(1)}% in ${y.days.toFixed(1)} days if ${y.side} wins — `
-    + `about a ${((1 - y.cost) * 100).toFixed(0)}% chance it doesn't, at this price.`;
+    + `about a ${((1 - y.price) * 100).toFixed(0)}% chance it doesn't, at this price.`;
   return <span className="text-xs text-gray-400" title={title}>{formatYield(y.annualized)}</span>;
 }
 
