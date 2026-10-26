@@ -11,9 +11,11 @@ import {
   addReEvaluation,
   computeCalibrationMetrics,
   autoResolveJournal,
+  updateMarkouts,
+  summarizeMarkouts,
   MIN_CALIBRATION_SAMPLE,
 } from '../KellyEngine';
-import { fetchMarketById } from '../api';
+import { fetchMarketById, fetchPriceHistory } from '../api';
 import {
   ResponsiveContainer,
   ScatterChart,
@@ -147,6 +149,35 @@ function MetricsSummary({ metrics }) {
   );
 }
 
+// ── Markouts: how the price moved after your entries ──
+const fmtCents = (v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)}c`;
+
+function MarkoutSummary({ markouts }) {
+  const d1 = markouts.markout1d;
+  const d7 = markouts.markout7d;
+  if (d1.n === 0 && d7.n === 0) return null;
+  const cell = (label, m) => (
+    <MetricCard
+      label={label}
+      value={m.n > 0 ? fmtCents(m.avg) : '--'}
+      subtitle={`${m.n} entr${m.n === 1 ? 'y' : 'ies'}`}
+      color={m.n === 0 ? undefined : m.avg > 0 ? CYAN : PINK}
+    />
+  );
+  return (
+    <div className="mb-3">
+      <div className="grid grid-cols-2 gap-2">
+        {cell('Markout +1 day', d1)}
+        {cell('Markout +7 days', d7)}
+      </div>
+      <div className="text-[9px] text-gray-500 mt-1.5 leading-relaxed">
+        Average move of the side you bet, from your entry price to its price 1 and 7 days later.
+        Positive = the market moved toward your view after you entered.
+      </div>
+    </div>
+  );
+}
+
 function MetricCard({ label, value, subtitle, color }) {
   return (
     <div className="rounded border border-[#1f2937] p-2" style={{ background: '#111827' }}>
@@ -207,6 +238,8 @@ function JournalRow({ entry, onResolve, onReEval, onDelete }) {
             <span>Mkt: {(entry.marketPrice * 100).toFixed(0)}%</span>
             <span>+{entry.gapPp?.toFixed(1) || '?'}pp</span>
             <span>${entry.betSize?.toFixed(0) || '?'}</span>
+            {Number.isFinite(entry.markout1d) && <span title="Price move 1 day after entry">1d {fmtCents(entry.markout1d)}</span>}
+            {Number.isFinite(entry.markout7d) && <span title="Price move 7 days after entry">7d {fmtCents(entry.markout7d)}</span>}
             {entry.reEvaluations?.length > 0 && (
               <span className="text-gray-600">
                 {entry.reEvaluations.length} re-eval{entry.reEvaluations.length > 1 ? 's' : ''}
@@ -307,13 +340,22 @@ export default function CalibrationTracker() {
 
   const metrics = useMemo(() => computeCalibrationMetrics(entries), [entries]);
 
-  // Resolve entries whose markets have settled (throttled; at most hourly per entry)
+  const markouts = useMemo(() => summarizeMarkouts(entries), [entries]);
+
+  // Resolve entries whose markets have settled (throttled; at most hourly per
+  // entry), then fill in due markouts from price history
   useEffect(() => {
     const controller = new AbortController();
-    const fetchRaw = async (id) => (await fetchMarketById(id, controller.signal))?.markets?.[0] ?? null;
-    autoResolveJournal(fetchRaw, { signal: controller.signal }).then((n) => {
-      if (!controller.signal.aborted && n > 0) setEntries(getJournalEntries());
-    });
+    const { signal } = controller;
+    const fetchRaw = async (id) => (await fetchMarketById(id, signal))?.markets?.[0] ?? null;
+    // 10-minute buckets over the few hours before each horizon
+    const fetchHistory = (tokenId, startTs, endTs) => fetchPriceHistory(tokenId, null, 10, startTs, endTs, signal);
+    (async () => {
+      const resolved = await autoResolveJournal(fetchRaw, { signal });
+      if (!signal.aborted && resolved > 0) setEntries(getJournalEntries());
+      const stored = await updateMarkouts(fetchHistory, { signal });
+      if (!signal.aborted && stored > 0) setEntries(getJournalEntries());
+    })().catch(() => { /* lookups are best-effort; retried next time the journal opens */ });
     return () => controller.abort();
   }, []);
 
@@ -365,6 +407,7 @@ export default function CalibrationTracker() {
       <div className="p-4 space-y-4">
         {/* Calibration metrics */}
         <MetricsSummary metrics={metrics} />
+        <MarkoutSummary markouts={markouts} />
 
         {/* Calibration chart */}
         {metrics.totalResolved >= 5 && (

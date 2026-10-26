@@ -840,6 +840,86 @@ export function computeCalibrationMetrics(entries = getJournalEntries()) {
   };
 }
 
+// ─── Markouts (line value) ──────────────────────────────────────────
+//
+// How far the price of the side you bet moved in your favour 1 and 7 days
+// after you recorded the decision, in cents: price(t + h) − entry price.
+// Unlike P&L this needs no resolution, so it gives skill feedback in days.
+// (A true "closing line" is ill-defined here: prices run to 0/1 at
+// settlement, and old price history gets pruned — so values are stored once
+// found.) A horizon at/after the market's end, or one where the price has
+// already settled, is not applicable (stored as null).
+
+export const MARKOUT_HORIZONS = [
+  { key: 'markout1d', days: 1 },
+  { key: 'markout7d', days: 7 },
+];
+const MARKOUT_WINDOW_S = 6 * 3600; // look back this far from t + h for the last price
+const MARKOUT_GIVE_UP_DAYS = 30; // no history this long after t + h → treat as unavailable
+const MARKOUT_MAX_FETCHES = 20; // per run
+const DAY_MS = 86_400_000;
+
+function sideTokenId(entry) {
+  return entry.side === 'NO' ? entry.noTokenId : entry.yesTokenId;
+}
+
+/** The markouts an entry is due for: horizon passed, not yet stored. */
+function dueMarkouts(entry, now) {
+  const created = Date.parse(entry.createdAt);
+  if (!Number.isFinite(created) || !sideTokenId(entry) || !Number.isFinite(entry.marketPrice)) return [];
+  return MARKOUT_HORIZONS.filter((h) => entry[h.key] === undefined && created + h.days * DAY_MS <= now);
+}
+
+/**
+ * Fill in due markouts from price history.
+ *
+ * @param {function} fetchHistory — async (tokenId, startTs, endTs) => { history: [{ t, p }] } | null
+ * @returns {Promise<number>} markouts stored (including not-applicable ones)
+ */
+export async function updateMarkouts(fetchHistory, { now = Date.now(), delayMs = AUTO_RESOLVE_DELAY_MS, signal } = {}) {
+  let stored = 0;
+  let fetches = 0;
+  for (const entry of getJournalEntries()) {
+    for (const h of dueMarkouts(entry, now)) {
+      if (signal?.aborted || fetches >= MARKOUT_MAX_FETCHES) return stored;
+      const at = Date.parse(entry.createdAt) + h.days * DAY_MS;
+      const end = entry.endDate ? Date.parse(entry.endDate) : NaN;
+      if (Number.isFinite(end) && at >= end) {
+        if (updateJournalEntry(entry.id, { [h.key]: null })) stored++;
+        continue;
+      }
+      if (fetches > 0 && delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
+      fetches++;
+      const endTs = Math.floor(at / 1000);
+      let res = null;
+      try { res = await fetchHistory(sideTokenId(entry), endTs - MARKOUT_WINDOW_S, endTs); } catch { res = null; }
+      const points = (res?.history ?? []).filter((pt) => pt.t <= endTs);
+      const last = points.length > 0 ? points[points.length - 1].p : null;
+      let value;
+      if (last != null) {
+        // Already settled (0/1) → the move is the resolution, not line movement
+        value = last >= SETTLED_HIGH || last <= SETTLED_LOW ? null : (last - entry.marketPrice) * 100;
+      } else if (now - at > MARKOUT_GIVE_UP_DAYS * DAY_MS) {
+        value = null; // history pruned or never recorded
+      } else {
+        continue; // nothing yet — retry next time
+      }
+      if (updateJournalEntry(entry.id, { [h.key]: value })) stored++;
+    }
+  }
+  return stored;
+}
+
+/** Average markout per horizon, in cents: { markout1d: { avg, n }, markout7d: { avg, n } }. */
+export function summarizeMarkouts(entries = getJournalEntries()) {
+  const out = {};
+  for (const h of MARKOUT_HORIZONS) {
+    const vals = entries.map((e) => e[h.key]).filter((v) => Number.isFinite(v));
+    out[h.key] = { avg: vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null, n: vals.length };
+  }
+  return out;
+}
+
 // ─── Auto-resolution ────────────────────────────────────────────────
 
 const SETTLED_HIGH = 0.99;
