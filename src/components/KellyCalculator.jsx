@@ -11,7 +11,6 @@
  */
 import { useState, useMemo, useCallback } from 'react';
 import {
-  calculateKelly,
   calculateSensitivityTable,
   calculateScenarios,
   calculateReEvalTrigger,
@@ -19,7 +18,9 @@ import {
   getKellySettings,
   saveKellySettings,
   saveJournalEntry,
+  calculateKellyAtExecution,
 } from '../KellyEngine';
+import { allInCost } from '../executionCost';
 
 const CYAN = '#00d4aa';
 const PINK = '#ff4d6a';
@@ -96,8 +97,9 @@ function SensitivityTableView({ rows, side }) {
                   </td>
                   <td className="px-3 py-1.5">
                     {hasEdge ? (
-                      <span style={{ color: row.kelly.edge > 3 ? CYAN : row.kelly.edge > 1 ? '#eab308' : '#9ca3af' }}>
-                        {row.kelly.edge.toFixed(1)}pp
+                      // Edge after fill and fee: your probability − all-in cost
+                      <span style={{ color: row.kelly.gapPp > 3 ? CYAN : row.kelly.gapPp > 1 ? '#eab308' : '#9ca3af' }}>
+                        {row.kelly.gapPp.toFixed(1)}pp
                       </span>
                     ) : (
                       <span className="text-gray-600">--</span>
@@ -143,7 +145,7 @@ function BreakEvenSection({ kelly, side, sideProb }) {
       <div className="text-xs font-semibold text-gray-400 uppercase mb-2">Break-Even Check</div>
       <div className="flex items-center gap-4 text-sm">
         <div>
-          <div className="text-[10px] text-gray-500 mb-0.5">Market implies</div>
+          <div className="text-[10px] text-gray-500 mb-0.5">All-in cost</div>
           <div className="text-gray-300 font-semibold">{bePct}%</div>
         </div>
         <div className="text-gray-600">vs</div>
@@ -159,8 +161,9 @@ function BreakEvenSection({ kelly, side, sideProb }) {
         </div>
       </div>
       <div className="text-[10px] text-gray-500 mt-2">
-        You need {side === 'YES' ? 'YES' : 'NO'} to happen at least {bePct}% of the time to break even at this price.
-        Your estimate of {estPct}% gives a {kelly.gapPp.toFixed(1)}pp edge.
+        You need {side === 'YES' ? 'YES' : 'NO'} to happen at least {bePct}% of the time to break even
+        at this fill price, fees included (quoted {(kelly.marketPrice * 100).toFixed(1)}%).
+        Your estimate of {estPct}% gives a {kelly.gapPp.toFixed(1)}pp edge after costs.
       </div>
     </div>
   );
@@ -193,6 +196,9 @@ function ScenarioSection({ scenarios }) {
         <span className="text-gray-500">Expected value:</span>
         <span className={scenarios.ev >= 0 ? 'text-emerald-400 font-semibold' : 'text-red-400 font-semibold'}>
           {scenarios.ev >= 0 ? '+' : ''}${scenarios.ev.toFixed(2)} ({scenarios.evPct >= 0 ? '+' : ''}{scenarios.evPct.toFixed(1)}%)
+        </span>
+        <span className="text-gray-500">
+          · {scenarios.evPerShare >= 0 ? '+' : ''}{(scenarios.evPerShare * 100).toFixed(2)}c/share after fill and fee
         </span>
       </div>
 
@@ -251,7 +257,7 @@ function ConstraintWarnings({ constraints }) {
 }
 
 // ── Final Sizing Output ──
-function FinalSizing({ kelly, constrained, settings, scenarios, onJournal }) {
+function FinalSizing({ kelly, constrained, settings, scenarios, quote, onJournal }) {
   if (!kelly || kelly.noEdge) return null;
 
   const betSize = constrained?.adjustedDollars || 0;
@@ -274,15 +280,18 @@ function FinalSizing({ kelly, constrained, settings, scenarios, onJournal }) {
             </span>
           </div>
           <div className="text-xs text-gray-400 mb-2">
-            ~{shares.toFixed(1)} shares at {(kelly.marketPrice * 100).toFixed(1)}c
+            ~{shares.toFixed(1)} shares at {(quote.cost * 100).toFixed(2)}c all-in
+            <span className="text-gray-500">
+              {' '}({(quote.fillPrice * 100).toFixed(2)}c fill{quote.fee > 0 ? ` + ${(quote.fee * 100).toFixed(2)}c fee` : ''}, {SOURCE_LABEL[quote.source]})
+            </span>
+            {quote.bookExhausted && <span className="text-amber-400"> — larger than the visible book</span>}
           </div>
           <div className="text-[10px] text-gray-500 mb-3">
-            {kelly.robustness.label}. Full Kelly would be {(kelly.fullKelly * 100).toFixed(1)}%
-            (${(kelly.fullKelly * settings.bankroll).toFixed(0)}).
-            {kelly.takerFeeRate > 0 && (
-              <> Sized on fee-adjusted edge of {kelly.feeAdjustedEdge.toFixed(1)}pp
-                (taker fee ≈{(kelly.takerFeeRate * 100).toFixed(2)}% of trade value).</>
-            )}
+            Full Kelly at this cost is {(kelly.fullKelly * 100).toFixed(1)}%
+            (${(kelly.fullKelly * settings.bankroll).toFixed(0)}); using {kelly.fractionMultiplier}×
+            {kelly.fractionMultiplier < settings.defaultFraction
+              ? ` (${kelly.robustness.label.toLowerCase()} — below your ${settings.defaultFraction}×)`
+              : ` (your setting)`}.
           </div>
           <ConstraintWarnings constraints={constrained} />
 
@@ -329,6 +338,7 @@ function SettingsPopover({ settings, onSave, onClose }) {
         <SettingsField label="Max Position (%)" value={local.maxPositionPct} onChange={(v) => setLocal((s) => ({ ...s, maxPositionPct: v }))} min={1} max={100} step={1} />
         <SettingsField label="Max Total Exposure (%)" value={local.maxTotalExposure} onChange={(v) => setLocal((s) => ({ ...s, maxTotalExposure: v }))} min={1} max={100} step={5} />
         <SettingsField label="Min Bet ($)" value={local.minPracticalBet} onChange={(v) => setLocal((s) => ({ ...s, minPracticalBet: v }))} min={0} step={1} />
+        <SettingsField label="Kelly Fraction λ (max; weaker edges use less)" value={local.defaultFraction} onChange={(v) => setLocal((s) => ({ ...s, defaultFraction: Math.min(1, Math.max(0.05, v)) }))} min={0.05} max={1} step={0.05} />
         <div className="flex items-center gap-2">
           <input
             type="checkbox"
@@ -368,7 +378,24 @@ function SettingsField({ label, value, onChange, min, max, step }) {
 // ── MAIN COMPONENT ──
 // ══════════════════════════════════════════════════════════════
 
-export default function KellyCalculator({ market, portfolio }) {
+// Default estimate for a side: the FLB-adjusted probability (the app's own
+// model of what the price implies), else the price itself — i.e. no edge until
+// you enter a view. (It used to default to price + 5pp, so every market opened
+// showing an edge nobody had claimed.)
+function modelEstimate(market, side) {
+  const adjusted = side === 'YES' ? market.flb?.adjustedYesProb : market.flb?.adjustedNoProb;
+  const price = side === 'YES' ? market.yesPrice : market.noPrice;
+  const p = Number.isFinite(adjusted) ? adjusted : (price ?? 0.5);
+  return Math.max(0.01, Math.min(0.99, p));
+}
+
+const SOURCE_LABEL = {
+  book: 'from the order book',
+  estimate: 'estimated: mid + half the spread',
+  quote: 'at the quoted price — no book or spread loaded',
+};
+
+export default function KellyCalculator({ market, portfolio, bookData = null, bookSide = 'YES' }) {
   const [collapsed, setCollapsed] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
   const [settings, setSettings] = useState(getKellySettings);
@@ -389,9 +416,7 @@ export default function KellyCalculator({ market, portfolio }) {
 
   // The slider represents the probability of the SELECTED side happening.
   // Internally, calculateKelly expects estProb = probability of YES (the event).
-  // Break-even: need side prob > marketPrice. Default starts 5pp above.
-  const defaultEstimate = Math.max(0.05, Math.min(0.95, marketPrice + 0.05));
-  const [sideProb, setSideProb] = useState(defaultEstimate);
+  const [sideProb, setSideProb] = useState(() => modelEstimate(market, defaultSide));
 
   // Convert slider value to YES probability for the engine
   const estProb = side === 'YES' ? sideProb : (1 - sideProb);
@@ -399,16 +424,23 @@ export default function KellyCalculator({ market, portfolio }) {
   // Fee context resolved once in processMarket — without it, calculateKelly
   // treats every market as fee-free and oversizes bets on fee-enabled categories.
   const feeParams = market.feeParams ?? null;
+  const spread = market.spread ?? null;
 
-  // Core calculations
-  const kelly = useMemo(
-    () => calculateKelly(estProb, marketPrice, side, feeParams),
-    [estProb, marketPrice, side, feeParams]
+  // Core calculations — priced at what you'd actually pay: the fill from the
+  // loaded order book (or mid + half spread) plus the taker fee
+  const { kelly, quote } = useMemo(
+    () => calculateKellyAtExecution({
+      estProb, side, marketPrice, feeParams, spread,
+      bankroll: settings.bankroll, maxFraction: settings.defaultFraction,
+      book: bookData, bookSide,
+    }),
+    [estProb, side, marketPrice, feeParams, spread, settings.bankroll, settings.defaultFraction, bookData, bookSide]
   );
 
   const sensitivity = useMemo(
-    () => calculateSensitivityTable(marketPrice, estProb, side, settings, feeParams),
-    [marketPrice, estProb, side, settings, feeParams]
+    () => calculateSensitivityTable(marketPrice, estProb, side, settings, feeParams,
+      { cost: quote.cost, maxFraction: settings.defaultFraction }),
+    [marketPrice, estProb, side, settings, feeParams, quote.cost]
   );
 
   const betDollars = kelly.valid && !kelly.noEdge
@@ -420,11 +452,20 @@ export default function KellyCalculator({ market, portfolio }) {
     [betDollars, market, portfolio, settings, side]
   );
 
+  // The cost of the size actually suggested (limits can make it smaller,
+  // and a smaller order fills at least as well)
+  const execQuote = useMemo(
+    () => constrained.adjustedDollars > 0
+      ? allInCost({ side, dollars: constrained.adjustedDollars, price: marketPrice, spread, book: bookData, bookSide, feeParams })
+      : quote,
+    [constrained.adjustedDollars, side, marketPrice, spread, bookData, bookSide, feeParams, quote]
+  );
+
   const scenarios = useMemo(
     () => constrained.adjustedDollars > 0
-      ? calculateScenarios(constrained.adjustedDollars, marketPrice, side, estProb, settings)
+      ? calculateScenarios(constrained.adjustedDollars, execQuote.cost, side, estProb, settings)
       : null,
-    [constrained.adjustedDollars, marketPrice, side, estProb, settings]
+    [constrained.adjustedDollars, execQuote.cost, side, estProb, settings]
   );
 
   const reEvalTriggers = useMemo(
@@ -445,7 +486,8 @@ export default function KellyCalculator({ market, portfolio }) {
       marketQuestion: market.question,
       side,
       estProb,
-      marketPrice,
+      marketPrice, // the quoted price — the market's probability, for the calibration benchmark
+      allInCost: execQuote.cost, // what the suggested size would have paid per share
       betSize: constrained.adjustedDollars,
       kellyFraction: kelly.fractionalKelly,
       robustness: kelly.robustness?.level,
@@ -461,13 +503,12 @@ export default function KellyCalculator({ market, portfolio }) {
       setJournalSaved(true);
       setTimeout(() => setJournalSaved(false), 2000);
     }
-  }, [market, side, estProb, marketPrice, constrained, kelly, settings]);
+  }, [market, side, estProb, marketPrice, constrained, kelly, settings, execQuote]);
 
-  // Handle side change — reset estimate
+  // Handle side change — reset estimate to the model's for that side
   const handleSideChange = useCallback((newSide) => {
     setSide(newSide);
-    const newPrice = newSide === 'YES' ? (market.yesPrice ?? 0.5) : (market.noPrice ?? 0.5);
-    setSideProb(Math.max(0.05, Math.min(0.95, newPrice + 0.05)));
+    setSideProb(modelEstimate(market, newSide));
   }, [market]);
 
   if (collapsed) {
@@ -602,6 +643,7 @@ export default function KellyCalculator({ market, portfolio }) {
               constrained={constrained}
               settings={settings}
               scenarios={scenarios}
+              quote={execQuote}
               onJournal={handleJournal}
             />
           </>

@@ -1,4 +1,5 @@
-import { computeEffectiveFeeRate } from './feeCalculator';
+import { computeEffectiveFeeRate, computeFeePerShare } from './feeCalculator';
+import { allInCost } from './executionCost';
 
 /**
  * KellyEngine.js — Pure JS utility for Kelly Criterion position sizing.
@@ -47,46 +48,56 @@ export function saveKellySettings(settings) {
 /**
  * Calculate Kelly fraction for a binary market.
  *
- * @param {number} estProb - Your estimated probability (0–1)
- * @param {number} marketPrice - Current market price / implied probability (0–1)
+ * Everything is priced at the ALL-IN cost per share c̄ — what you actually pay
+ * for a share that returns $1 if your side wins (fill price + taker fee):
+ *   EV per share   = p − c̄
+ *   EV per dollar  = p / c̄ − 1
+ *   full Kelly f*  = (p − c̄) / (1 − c̄)
+ * Without `opts.cost`, c̄ = quoted price + its taker fee (no slippage).
+ *
+ * @param {number} estProb - Your estimated probability of YES (0–1)
+ * @param {number} marketPrice - Quoted price of the selected side (0–1)
  * @param {string} side - 'YES' or 'NO'
+ * @param {Object} [feeParams] - market.feeParams; null = no fees
+ * @param {Object} [opts]
+ * @param {number} [opts.cost] - all-in cost per share (e.g. from allInCost)
+ * @param {number} [opts.maxFraction] - your Kelly fraction λ (settings.defaultFraction);
+ *   the robustness tier caps it further for weaker edges
  * @returns {Object} Kelly analysis result
  */
-export function calculateKelly(estProb, marketPrice, side = 'YES', feeParams = null) {
+export function calculateKelly(estProb, marketPrice, side = 'YES', feeParams = null, opts = {}) {
   // Validate inputs
   if (estProb < 0 || estProb > 1 || marketPrice <= 0 || marketPrice >= 1) {
     return { valid: false, reason: 'Invalid inputs' };
   }
 
-  // For both sides: you pay marketPrice per share, receive $1 if your side wins.
-  // Profit per dollar risked = (1 - marketPrice) / marketPrice
-  // This is the same formula regardless of side.
-  let p, q, b;
-  if (side === 'YES') {
-    p = estProb;              // prob of YES (winning)
-    q = 1 - p;                // prob of losing
-  } else {
-    p = 1 - estProb;          // prob of NO happening (winning)
-    q = estProb;               // prob of losing (YES happens)
-  }
-  b = (1 - marketPrice) / marketPrice;  // odds: profit per dollar risked
+  // p = probability the selected side wins
+  const p = side === 'YES' ? estProb : 1 - estProb;
+  const q = 1 - p;
 
-  // Edge = expected value per dollar
-  const edge = (b * p) - q;
-  // Fee adjustment: effectiveFeeRate is per-dollar like edge.
-  // feeParams comes from resolveFeeParams (market.feeParams); null = no fees.
+  // Raw edge at the quoted price, before any costs (per dollar)
+  const edge = p / marketPrice - 1;
+  // Fee as a fraction of trade value at the quoted price (for display)
   const takerFeeRate = computeEffectiveFeeRate(marketPrice, feeParams);
-  const feeAdjustedEdge = edge - takerFeeRate;
-  const edgePp = edge * 100;
 
-  // Break-even probability for the selected side
-  // Buying YES at yesPrice: need YES prob > yesPrice to profit
-  // Buying NO at noPrice: need NO prob > noPrice to profit
-  const breakEvenProb = marketPrice;
+  // All-in cost per share
+  const cost = Number.isFinite(opts.cost) && opts.cost > 0
+    ? opts.cost
+    : marketPrice + computeFeePerShare(marketPrice, feeParams);
+  if (cost >= 1) {
+    return {
+      valid: true, noEdge: true, side, estProb, marketPrice, cost, breakEvenProb: cost,
+      gapPp: (p - cost) * 100, edge: edge * 100, feeAdjustedEdge: -100, takerFeeRate, fullKelly: 0,
+      evPerShare: p - cost,
+      reason: 'Costs exceed the $1 payout',
+    };
+  }
+  const b = (1 - cost) / cost; // net odds: profit per dollar risked, after costs
+  const netEdge = p / cost - 1; // EV per dollar, after costs
 
-  // Gap between estimate and break-even (p = prob of the selected side winning)
-  const gapToBreakEven = p - breakEvenProb;
-  const gapPp = gapToBreakEven * 100;
+  // Break-even: your side must win more often than c̄
+  const breakEvenProb = cost;
+  const gapPp = (p - cost) * 100;
 
   // NO_EDGE_DETECTABLE check
   if (gapPp < 0.5) {
@@ -96,32 +107,31 @@ export function calculateKelly(estProb, marketPrice, side = 'YES', feeParams = n
       side,
       estProb,
       marketPrice,
+      cost,
       breakEvenProb,
       gapPp,
-      edge: edgePp,
-      feeAdjustedEdge: feeAdjustedEdge * 100,
+      edge: edge * 100,
+      feeAdjustedEdge: netEdge * 100,
       takerFeeRate,
       fullKelly: 0,
+      evPerShare: p - cost,
       reason: gapPp <= 0
-        ? 'Market price already reflects or exceeds your estimate'
+        ? (p > marketPrice
+          ? 'Fill price and fees use up your edge'
+          : 'Market price already reflects or exceeds your estimate')
         : 'Edge too small to be meaningful (< 0.5pp)',
     };
   }
 
-  // Full Kelly fraction: f* = (bp - q) / b
-  const fullKelly = Math.max(0, (b * p - q) / b);
+  // Full Kelly at the all-in cost: f* = (p − c̄) / (1 − c̄)
+  const fullKelly = (p - cost) / (1 - cost);
 
-  // Fee-adjusted Kelly: if fees consume the edge, fraction = 0
-  const feeAdjustedFullKelly = feeAdjustedEdge > 0
-    ? Math.max(0, feeAdjustedEdge / b)
-    : 0;
-
-  // Robustness assessment
+  // Fraction λ: your setting, capped by the robustness tier
   const robustness = assessRobustness(gapPp, estProb);
-
-  // Fractional Kelly based on robustness — use fee-adjusted full Kelly
-  const fractionMultiplier = robustness.kellyFraction;
-  const fractionalKelly = feeAdjustedFullKelly * fractionMultiplier;
+  const fractionMultiplier = Number.isFinite(opts.maxFraction) && opts.maxFraction > 0
+    ? Math.min(opts.maxFraction, robustness.kellyFraction)
+    : robustness.kellyFraction;
+  const fractionalKelly = fullKelly * fractionMultiplier;
 
   // Expected growth rate (log utility)
   const growthRate = fractionalKelly > 0
@@ -134,20 +144,49 @@ export function calculateKelly(estProb, marketPrice, side = 'YES', feeParams = n
     side,
     estProb,
     marketPrice,
+    cost,
     breakEvenProb,
     gapPp,
-    edge: edgePp,
-    feeAdjustedEdge: feeAdjustedEdge * 100,
+    edge: edge * 100,
+    feeAdjustedEdge: netEdge * 100,
     takerFeeRate,
     fullKelly,
-    feeAdjustedFullKelly,
+    feeAdjustedFullKelly: fullKelly, // kept for callers; costs are now in fullKelly
     fractionalKelly,
     fractionMultiplier,
     robustness,
     odds: b,
     growthRate,
-    expectedValue: edge,
+    expectedValue: netEdge,
+    evPerShare: p - cost,
   };
+}
+
+/**
+ * Kelly at the price you'd actually fill at. The fill depends on the order
+ * size and the size on the fill, so iterate: top-of-book cost → Kelly size →
+ * cost of that size → … (converges in a few steps: cost rises with size).
+ *
+ * @param {object} opts — calculateKelly's inputs plus allInCost's:
+ *   { estProb, side, marketPrice, feeParams, bankroll, maxFraction, book, bookSide, spread }
+ * @returns {{ kelly: object, quote: object }}
+ */
+export function calculateKellyAtExecution({
+  estProb, side, marketPrice, feeParams = null, bankroll, maxFraction,
+  book = null, bookSide = 'YES', spread = null, iterations = 4,
+}) {
+  const quoteFor = (dollars) => allInCost({ side, dollars, price: marketPrice, spread, book, bookSide, feeParams });
+  let quote = quoteFor(1);
+  let kelly = calculateKelly(estProb, marketPrice, side, feeParams, { cost: quote.cost, maxFraction });
+  for (let i = 0; i < iterations; i++) {
+    const dollars = kelly.valid && !kelly.noEdge ? kelly.fractionalKelly * bankroll : 0;
+    if (!(dollars > 1)) break;
+    const next = quoteFor(dollars);
+    if (Math.abs(next.cost - quote.cost) < 1e-7) break;
+    quote = next;
+    kelly = calculateKelly(estProb, marketPrice, side, feeParams, { cost: quote.cost, maxFraction });
+  }
+  return { kelly, quote };
 }
 
 /**
@@ -266,9 +305,11 @@ export function calculateMultiOutcomeKelly(outcomes, defaultFeeParams = null) {
  * @param {string} side - 'YES' or 'NO'
  * @param {Object} settings - Kelly settings
  * @param {Object} feeParams - market.feeParams, passed to calculateKelly
+ * @param {Object} [kellyOpts] - { cost, maxFraction }, passed to calculateKelly
+ *   (the cost is the center size's; rows at other sizes would fill slightly differently)
  * @returns {Array} Rows of sensitivity data
  */
-export function calculateSensitivityTable(marketPrice, centerProb, side = 'YES', settings = null, feeParams = null) {
+export function calculateSensitivityTable(marketPrice, centerProb, side = 'YES', settings = null, feeParams = null, kellyOpts = {}) {
   const s = settings || getKellySettings();
   const rows = [];
 
@@ -282,7 +323,7 @@ export function calculateSensitivityTable(marketPrice, centerProb, side = 'YES',
   }
 
   for (const prob of steps) {
-    const kelly = calculateKelly(prob, marketPrice, side, feeParams);
+    const kelly = calculateKelly(prob, marketPrice, side, feeParams, kellyOpts);
     const dollars = kelly.valid && !kelly.noEdge
       ? Math.max(0, kelly.fractionalKelly * s.bankroll)
       : 0;
@@ -300,7 +341,7 @@ export function calculateSensitivityTable(marketPrice, centerProb, side = 'YES',
       cappedDollars,
       capped: cappedDollars < dollars,
       belowMinimum: cappedDollars > 0 && cappedDollars < s.minPracticalBet,
-      shares: marketPrice > 0 ? cappedDollars / marketPrice : 0,
+      shares: kelly.cost > 0 ? cappedDollars / kelly.cost : 0,
     });
   }
 
@@ -313,8 +354,8 @@ export function calculateSensitivityTable(marketPrice, centerProb, side = 'YES',
  * Calculate outcomes under different scenarios.
  *
  * @param {number} betSize - Dollar amount of the bet
- * @param {number} marketPrice - Price paid per share of the SELECTED side
- *   (yesPrice for YES, noPrice for NO — same convention as calculateKelly)
+ * @param {number} marketPrice - Price paid per share of the SELECTED side —
+ *   pass the all-in cost (fill price + fee) so profit and EV are net of costs
  * @param {string} side - 'YES' or 'NO'
  * @param {number} estProb - Estimated probability of YES (the event)
  * @param {Object} settings - Kelly settings
@@ -342,6 +383,7 @@ export function calculateScenarios(betSize, marketPrice, side, estProb, settings
   const winProb = side === 'YES' ? estProb : (1 - estProb);
   const ev = winProb * winProfit - (1 - winProb) * lossAmount;
   const evPct = betSize > 0 ? (ev / betSize) * 100 : 0;
+  const evPerShare = winProb - entryPrice; // p − c̄
 
   // Impact on bankroll
   const bankrollAfterWin = s.bankroll - betSize + winPayout;
@@ -376,6 +418,7 @@ export function calculateScenarios(betSize, marketPrice, side, estProb, settings
     loss: { amount: lossAmount, prob: 1 - winProb },
     ev,
     evPct,
+    evPerShare,
     bankrollAfterWin,
     bankrollAfterLoss,
     expectedBankroll,

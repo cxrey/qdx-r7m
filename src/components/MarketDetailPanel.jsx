@@ -387,7 +387,7 @@ export default function MarketDetailPanel({ market, onBookData, onLivePriceUpdat
 
           {/* Kelly Position Sizer */}
           <Suspense fallback={LazyFallback}>
-            <KellyCalculator market={market} portfolio={portfolio} />
+            <KellyCalculator market={market} portfolio={portfolio} bookData={bookData} bookSide={side === 'yes' ? 'YES' : 'NO'} />
           </Suspense>
 
           {/* Portfolio Impact */}
