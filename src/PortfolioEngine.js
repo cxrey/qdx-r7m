@@ -336,6 +336,137 @@ function getMarketFeatures(market) {
 
 // ── Correlation Analysis ──
 
+/** At least 3 of `titleWords` (duplicates count) occur in `description`. */
+function mentionsKeyTerms(titleWords, description) {
+  if (titleWords.length < 3 || !description) return false;
+  let count = 0;
+  for (const w of titleWords) {
+    if (description.includes(w) && ++count >= 3) return true;
+  }
+  return false;
+}
+
+/**
+ * Aho–Corasick matcher: finds every one of `words` occurring anywhere in a
+ * text (as a substring, like String#includes) in a single pass over it.
+ * Returns scan(text, onMatch(wordIndex)).
+ */
+function buildSubstringMatcher(words) {
+  const next = [new Map()]; // state → (char code → state)
+  const fail = [0];
+  const out = [[]]; // state → word indices ending here (incl. via fail links)
+  words.forEach((w, id) => {
+    let s = 0;
+    for (let k = 0; k < w.length; k++) {
+      const ch = w.charCodeAt(k);
+      let t = next[s].get(ch);
+      if (t === undefined) {
+        t = next.length;
+        next.push(new Map());
+        fail.push(0);
+        out.push([]);
+        next[s].set(ch, t);
+      }
+      s = t;
+    }
+    out[s].push(id);
+  });
+  const queue = [...next[0].values()];
+  for (let q = 0; q < queue.length; q++) {
+    const r = queue[q];
+    for (const [ch, s] of next[r]) {
+      queue.push(s);
+      let f = fail[r];
+      while (f !== 0 && !next[f].has(ch)) f = fail[f];
+      fail[s] = next[f].get(ch) ?? 0;
+      if (out[fail[s]].length) out[s] = out[s].concat(out[fail[s]]);
+    }
+  }
+  return (text, onMatch) => {
+    let s = 0;
+    for (let k = 0; k < text.length; k++) {
+      const ch = text.charCodeAt(k);
+      while (s !== 0 && !next[s].has(ch)) s = fail[s];
+      s = next[s].get(ch) ?? 0;
+      for (const id of out[s]) onMatch(id);
+    }
+  };
+}
+
+/**
+ * mentionsKeyTerms for every ordered pair at once: rows[a][b] = 1 when at
+ * least 3 of position a's title words (duplicates count) occur in b's
+ * description. Same answers as calling mentionsKeyTerms n² times, but each
+ * description is scanned once (for all title words) instead of once per
+ * pair — that substring work was ~70% of building the structure.
+ */
+function keyTermMentionRows(feats) {
+  const n = feats.length;
+  const wordId = new Map();
+  const titleIds = feats.map((f) => (f ? f.titleWords.map((w) => {
+    if (!wordId.has(w)) wordId.set(w, wordId.size);
+    return wordId.get(w);
+  }) : []));
+  const rows = Array.from({ length: n }, () => new Uint8Array(n));
+  if (wordId.size === 0) return rows;
+
+  // postings[word] = positions whose description contains it
+  const scan = buildSubstringMatcher([...wordId.keys()]);
+  const postings = Array.from({ length: wordId.size }, () => []);
+  const seenIn = new Int32Array(wordId.size).fill(-1);
+  feats.forEach((f, b) => {
+    if (!f || !f.description) return;
+    scan(f.description, (id) => {
+      if (seenIn[id] !== b) { seenIn[id] = b; postings[id].push(b); }
+    });
+  });
+
+  const count = new Uint8Array(n);
+  const touched = [];
+  for (let a = 0; a < n; a++) {
+    if (titleIds[a].length < 3) continue;
+    for (const id of titleIds[a]) {
+      for (const b of postings[id]) {
+        if (count[b] === 0) touched.push(b);
+        if (count[b] < 3 && ++count[b] === 3) rows[a][b] = 1;
+      }
+    }
+    for (const b of touched) count[b] = 0;
+    touched.length = 0;
+  }
+  return rows;
+}
+
+function entitiesOverlap(e1, e2) {
+  for (const c of e1.countries) if (e2.countries.has(c)) return true;
+  for (const p of e1.people) if (e2.people.has(p)) return true;
+  for (const o of e1.orgs) if (e2.orgs.has(o)) return true;
+  return false;
+}
+
+/**
+ * calculatePairCorrelation's number, without its types/labels arrays, from
+ * precomputed features — the n² hot loop of buildCorrelationStructure.
+ * `mentions`: whether either market's title terms appear in the other's
+ * description (from keyTermMentionRows). Must stay in step with
+ * calculatePairCorrelation (a test checks they agree).
+ */
+function pairCorrelationValue(mA, fA, mB, fB, mentions) {
+  let max = 0;
+  let types = 0;
+  if (mA.category && mB.category && mA.category === mB.category) { types++; max = 0.2; }
+  if (entitiesOverlap(fA.entities, fB.entities)) { types++; if (max < 0.5) max = 0.5; }
+  if (mA.slug && mB.slug && mA.slug === mB.slug) { types++; if (max < 0.8) max = 0.8; }
+  if (mA.daysLeft != null && mB.daysLeft != null && Math.abs(mA.daysLeft - mB.daysLeft) <= 14) {
+    types++; if (max < 0.1) max = 0.1;
+  }
+  if (mentions) { types++; if (max < 0.7) max = 0.7; }
+  if (types === 0) return 0;
+  if (types === 2) max += 0.1;
+  else if (types >= 3) max += 0.15;
+  return Math.min(0.95, max);
+}
+
 function sharedEntities(e1, e2) {
   const shared = [];
   for (const c of e1.countries) { if (e2.countries.has(c)) shared.push(c); }
@@ -387,9 +518,7 @@ export function calculatePairCorrelation(posA, posB) {
 
   // RESOLUTION_DEPENDENCY (one market mentions the other's key terms):
   // significant words from A's title in B's description, or vice versa
-  const depAB = fA.titleWords.filter((w) => fB.description.includes(w)).length;
-  const depBA = fB.titleWords.filter((w) => fA.description.includes(w)).length;
-  if (depAB >= 3 || depBA >= 3) {
+  if (mentionsKeyTerms(fA.titleWords, fB.description) || mentionsKeyTerms(fB.titleWords, fA.description)) {
     types.push('RESOLUTION_DEPENDENCY');
     correlations.push(0.7);
   }
@@ -416,22 +545,133 @@ export function calculatePairCorrelation(posA, posB) {
 
 const CLUSTER_THRESHOLD = 0.4;
 
+// Label sources, as bits. A pair of members shares label L when both have L
+// from the same source: both in category L, both with entity L of the same
+// type, or both in event (slug) L — exactly calculatePairCorrelation's
+// sharedLabels.
+const SRC_CATEGORY = 1;
+const SRC_COUNTRY = 2;
+const SRC_PERSON = 4;
+const SRC_ORG = 8;
+const SRC_SLUG = 16;
+
+/**
+ * For each label, the number of member pairs in the cluster that share it —
+ * the counts the cluster name is picked from. Replaces summing per-pair
+ * label lists over all k² member pairs (which needed n² stored pair objects):
+ * members are bucketed by which sources give them the label, and pairs are
+ * counted per bucket pair.
+ *
+ * Keys are inserted in the order the old pairwise loop first met each label
+ * (first pair in join order; within a pair category, then the lower-indexed
+ * position's entities in their order, then slug), so ties in the name pick
+ * break the same way.
+ */
+function clusterLabelCounts(indices, positions, feats) {
+  // label → { members: [[joinOrder, sourceBits], …], entityRank: Map(joinOrder → rank) }
+  const byLabel = new Map();
+  const note = (label, ord, bit, entityRank) => {
+    let e = byLabel.get(label);
+    if (!e) byLabel.set(label, (e = { bits: new Map(), entityRank: new Map() }));
+    e.bits.set(ord, (e.bits.get(ord) || 0) | bit);
+    if (entityRank != null && !e.entityRank.has(ord)) e.entityRank.set(ord, entityRank);
+  };
+  indices.forEach((pi, ord) => {
+    const m = positions[pi].market;
+    const f = feats[pi];
+    if (!m || !f) return; // a pair with a missing market shares no labels
+    if (m.category) note(m.category, ord, SRC_CATEGORY);
+    let rank = 0;
+    for (const c of f.entities.countries) note(c, ord, SRC_COUNTRY, rank++);
+    for (const p of f.entities.people) note(p, ord, SRC_PERSON, rank++);
+    for (const o of f.entities.orgs) note(o, ord, SRC_ORG, rank++);
+    if (m.slug) note(m.slug, ord, SRC_SLUG);
+  });
+
+  const found = []; // [label, count, firstA, firstB, rankInPair]
+  for (const [label, { bits, entityRank }] of byLabel) {
+    const list = [...bits]; // ascending join order
+    // Count sharing pairs from per-bitmask bucket sizes
+    const sizes = new Map();
+    for (const [, mask] of list) sizes.set(mask, (sizes.get(mask) || 0) + 1);
+    let count = 0;
+    const masks = [...sizes.keys()];
+    for (let x = 0; x < masks.length; x++) {
+      const cx = sizes.get(masks[x]);
+      count += (cx * (cx - 1)) / 2; // same mask (non-zero) always shares
+      for (let y = x + 1; y < masks.length; y++) {
+        if (masks[x] & masks[y]) count += cx * sizes.get(masks[y]);
+      }
+    }
+    if (count === 0) continue;
+
+    // First sharing pair in join order: scan from the end, tracking the
+    // nearest later member per source bit
+    const nextWithBit = new Map();
+    let firstA = -1;
+    let firstB = -1;
+    let firstMask = 0;
+    for (let k = list.length - 1; k >= 0; k--) {
+      const [ord, mask] = list[k];
+      let b = -1;
+      let shared = 0;
+      for (let bit = 1; bit <= SRC_SLUG; bit <<= 1) {
+        if (!(mask & bit) || !nextWithBit.has(bit)) continue;
+        const cand = nextWithBit.get(bit);
+        if (b === -1 || cand.ord < b) { b = cand.ord; shared = mask & cand.mask; } else if (cand.ord === b) shared |= mask & cand.mask;
+      }
+      if (b !== -1) { firstA = ord; firstB = b; firstMask = shared; }
+      for (let bit = 1; bit <= SRC_SLUG; bit <<= 1) if (mask & bit) nextWithBit.set(bit, { ord, mask });
+    }
+    // Position within that pair's label list: category first, then entities
+    // in the lower-indexed position's order, then slug
+    const lower = indices[firstA] < indices[firstB] ? firstA : firstB;
+    const rankInPair = firstMask & SRC_CATEGORY ? -1
+      : firstMask & (SRC_COUNTRY | SRC_PERSON | SRC_ORG) ? entityRank.get(lower)
+      : Number.MAX_SAFE_INTEGER;
+    found.push([label, count, firstA, firstB, rankInPair]);
+  }
+
+  found.sort((p, q) => p[2] - q[2] || p[3] - q[3] || p[4] - q[4]);
+  const labelCounts = {};
+  for (const [label, count] of found) labelCounts[label] = count;
+  return labelCounts;
+}
+
 /** Price-independent part of clustering (see above). */
 export function buildCorrelationStructure(positions) {
   const n = positions.length;
   if (n === 0) return { matrix: [], groups: [] };
 
-  // Build full correlation matrix
-  const matrix = Array.from({ length: n }, () => Array(n).fill(0));
-  const pairData = Array.from({ length: n }, () => Array(n).fill(null));
+  // Features once per position (not twice per pair — at n=2,000 that was 4M
+  // cache lookups with LRU promotion, a third of the build time)
+  const feats = positions.map((p) => (p.market ? getMarketFeatures(p.market) : null));
+  const mentionRows = keyTermMentionRows(feats);
+
+  // Build full correlation matrix. Typed rows: n² plain numbers in nested
+  // arrays (and, before, n² pair objects kept only for naming) were mostly
+  // garbage-collector work.
+  const matrix = Array.from({ length: n }, () => new Float64Array(n));
+  // Pairs at or above the threshold, bucketed by correlation. Pair values
+  // come from a handful of fixed weights, so the buckets visited in
+  // descending order give the same order as a stable sort of all pairs
+  // (ties stay in i,j order) without building ~n²/2 pair objects.
+  const buckets = new Map(); // correlation → [i * n + j, …] in i,j order
   for (let i = 0; i < n; i++) {
     matrix[i][i] = 1;
+    const mA = positions[i].market;
     for (let j = i + 1; j < n; j++) {
-      const pair = calculatePairCorrelation(positions[i], positions[j]);
-      matrix[i][j] = pair.correlation;
-      matrix[j][i] = pair.correlation;
-      pairData[i][j] = pair;
-      pairData[j][i] = pair;
+      const mB = positions[j].market;
+      const corr = mA && mB
+        ? pairCorrelationValue(mA, feats[i], mB, feats[j], mentionRows[i][j] === 1 || mentionRows[j][i] === 1)
+        : 0;
+      matrix[i][j] = corr;
+      matrix[j][i] = corr;
+      if (corr >= CLUSTER_THRESHOLD) {
+        let bucket = buckets.get(corr);
+        if (!bucket) buckets.set(corr, (bucket = []));
+        bucket.push(i * n + j);
+      }
     }
   }
 
@@ -439,18 +679,9 @@ export function buildCorrelationStructure(positions) {
   const clusterOf = new Array(n).fill(-1); // position index → cluster index
   const members = []; // cluster index → position indices, in join order
 
-  // Collect all pairs above threshold, sorted by correlation desc
-  const pairs = [];
-  for (let i = 0; i < n; i++) {
-    for (let j = i + 1; j < n; j++) {
-      if (matrix[i][j] >= CLUSTER_THRESHOLD) {
-        pairs.push({ i, j, corr: matrix[i][j] });
-      }
-    }
-  }
-  pairs.sort((a, b) => b.corr - a.corr);
-
-  for (const { i, j } of pairs) {
+  for (const corr of [...buckets.keys()].sort((a, b) => b - a)) for (const key of buckets.get(corr)) {
+    const i = Math.floor(key / n);
+    const j = key - i * n;
     // Both already assigned (same cluster or not) — skip
     if (clusterOf[i] !== -1 && clusterOf[j] !== -1) continue;
 
@@ -491,13 +722,7 @@ export function buildCorrelationStructure(positions) {
     const averageCorrelation = countPairs > 0 ? sumCorr / countPairs : 0;
 
     // Auto-generate name from shared entities/categories
-    const labelCounts = {};
-    for (let a = 0; a < indices.length; a++) {
-      for (let b = a + 1; b < indices.length; b++) {
-        const pd = pairData[indices[a]][indices[b]];
-        if (pd) for (const l of pd.sharedLabels) labelCounts[l] = (labelCounts[l] || 0) + 1;
-      }
-    }
+    const labelCounts = clusterLabelCounts(indices, positions, feats);
     const cats = [...new Set(posArr.map((p) => p.market?.category).filter(Boolean))];
     const topLabels = Object.entries(labelCounts).sort((a, b) => b[1] - a[1]).slice(0, 2).map(([l]) => l);
     const name = topLabels.length > 0

@@ -431,6 +431,68 @@ describe('screenNewTrade', () => {
   });
 });
 
+describe('buildCorrelationStructure fast paths agree with the pairwise definitions', () => {
+  // Seeded random portfolios exercising every correlation source: categories,
+  // shared slugs, entities, dates, and title words found in other markets'
+  // descriptions — including words that contain each other, which the
+  // substring matcher must handle like String#includes.
+  let seed;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  const pick = (arr) => arr[Math.floor(rnd() * arr.length)];
+  const ENT = ['trump', 'biden', 'china', 'russia', 'ukraine', 'israel', 'fed', 'apple', 'tesla', 'putin'];
+  const WORDS = ['election', 'election?', 'lection', 'season', 'seasons', 'market', 'supermarket', 'reserve', 'reserves', 'ceasefire', 'tariffs', 'champion'];
+  const randomPositions = (n) => Array.from({ length: n }, (_, i) => {
+    const ents = Array.from({ length: Math.floor(rnd() * 3) }, () => pick(ENT));
+    const words = Array.from({ length: 2 + Math.floor(rnd() * 5) }, () => pick(WORDS));
+    const market = makeMarket({
+      id: `r${seed}-${i}`,
+      question: `Will ${ents.join(' and ') || 'it'} ${words.join(' ')}?`,
+      description: rnd() < 0.2 ? '' : Array.from({ length: Math.floor(rnd() * 10) }, () => pick([...WORDS, ...ENT, 'resolves'])).join(' '),
+      category: pick(['Politics', 'Crypto', 'Sports', undefined]),
+      slug: rnd() < 0.5 ? `event-${Math.floor(rnd() * 6)}` : `solo-${seed}-${i}`,
+      daysLeft: rnd() < 0.15 ? null : Math.floor(rnd() * 90),
+    });
+    return { market, side: rnd() < 0.6 ? 'YES' : 'NO', size: 10, currentValue: 10 };
+  });
+
+  // The original naming: sum each member pair's sharedLabels, insertion-ordered
+  function referenceName(indices, positions) {
+    const counts = {};
+    for (let a = 0; a < indices.length; a++) {
+      for (let b = a + 1; b < indices.length; b++) {
+        const [i, j] = indices[a] < indices[b] ? [indices[a], indices[b]] : [indices[b], indices[a]];
+        for (const l of calculatePairCorrelation(positions[i], positions[j]).sharedLabels) counts[l] = (counts[l] || 0) + 1;
+      }
+    }
+    const cats = [...new Set(indices.map((i) => positions[i].market?.category).filter(Boolean))];
+    const top = Object.entries(counts).sort((x, y) => y[1] - x[1]).slice(0, 2).map(([l]) => l);
+    return top.length > 0
+      ? top.map((l) => l.charAt(0).toUpperCase() + l.slice(1)).join('/') + (cats.length === 1 ? ` (${cats[0]})` : '')
+      : null;
+  }
+
+  it('every matrix entry equals calculatePairCorrelation, and cluster names match the pairwise reference', () => {
+    let namesChecked = 0;
+    for (const n of [2, 5, 12, 30, 60]) {
+      for (let t = 1; t <= 8; t++) {
+        seed = n * 100 + t;
+        const positions = randomPositions(n);
+        const { matrix, groups } = buildCorrelationStructure(positions);
+        for (let i = 0; i < n; i++) {
+          for (let j = i + 1; j < n; j++) {
+            expect(matrix[i][j]).toBe(calculatePairCorrelation(positions[i], positions[j]).correlation);
+          }
+        }
+        for (const g of groups) {
+          const ref = referenceName(g.indices, positions);
+          if (ref !== null) { expect(g.name).toBe(ref); namesChecked++; }
+        }
+      }
+    }
+    expect(namesChecked).toBeGreaterThan(50);
+  });
+});
+
 describe('clustering split: structure (price-independent) + pricing', () => {
   const positions = [
     makePosition({ id: 's1', question: 'Will Trump win?', slug: 'trump' }, { currentValue: 100 }),
