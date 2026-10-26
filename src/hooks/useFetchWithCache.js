@@ -30,7 +30,9 @@ export { cacheGet, cacheSet };
  * @param {number}   opts.cacheTtl   — TTL in ms (default 60000)
  * @param {function} opts.fetcher    — async () => data. Throw to signal error.
  * @param {function} [opts.onSuccess] — (data) => void, called after fetch succeeds
- * @param {boolean}  [opts.clobProtected] — if true, checks rate limit before fetch (default true)
+ * @param {boolean}  [opts.clobProtected] — CLOB requests (default true): skipped while the CLOB
+ *   rate-limit breaker is open, and a 429/403 opens it. Pass false for other APIs (e.g. the
+ *   Data API's price history), whose rate limits shouldn't pause CLOB requests.
  * @returns {{ data, loading, error, refetch }}
  */
 export function useFetchWithCache({
@@ -74,8 +76,12 @@ export function useFetchWithCache({
       onSuccess?.(result);
     } catch (err) {
       if (!mountedRef.current) return;
-      if (handleClobError(err)) {
+      if (clobProtected && handleClobError(err)) {
         setError(rateLimitMessage(err.status));
+        return;
+      }
+      if (err?.status === 429 || err?.status === 403) {
+        setError('Rate limited — try again shortly');
         return;
       }
       setError(err?.message || 'Request failed');

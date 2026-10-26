@@ -74,7 +74,10 @@ export const TAG_SLUG_TO_FEE_SLUG = {
   'economy':     'economics',
   'finance':     'business',
   'legal':       'other',
-  // Combos (parlays) take the Combos rate whatever their legs' categories
+  // Combos take the Combos rate whatever their legs' categories (docs). The
+  // tag slugs are INFERRED, not documented: the docs name the product, and
+  // live combo events were seen tagged `parlays`. Only matters for a
+  // fee-enabled market with no feeSchedule (none in the Oct 2026 catalog).
   'combos':      'combos',
   'parlays':     'combos',
 };
@@ -243,9 +246,11 @@ export function processMarket(market) {
   // Display category ('Crypto', 'Sports', ...) remains a separate concept
   // used for UI pills and filters.
   const feesEnabled = market.feesEnabled ?? false;
-  if (feesEnabled && !_feeEnabledSeen) {
+  // The live feeSchedule is authoritative; the FEE_PARAMS table is only a
+  // fallback. Flag (once) when that fallback is actually used.
+  if (feesEnabled && !market.feeSchedule && !_feeEnabledSeen) {
     _feeEnabledSeen = true;
-    console.info('[processMarket] feesEnabled=true detected on', market.id, '— verify FEE_PARAMS against live API');
+    console.info('[processMarket] fee-enabled market without a feeSchedule:', market.id, '— using the FEE_PARAMS fallback table');
   }
   const feeType = market.feeType || null;
   const feeTypeSlug = feeType ? (FEETYPE_TO_FEE_SLUG[feeType] || null) : null;

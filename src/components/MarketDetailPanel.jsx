@@ -1,5 +1,9 @@
 import { useState, useEffect, useCallback, lazy, Suspense } from 'react';
-import { fetchPriceHistory, fetchOrderBook } from '../api';
+import { fetchOrderBook } from '../api';
+import {
+  TIMEFRAMES, DEFAULT_TIMEFRAME, fetchTimeframeHistory,
+  priceCacheKey, bookCacheKey, PRICE_CACHE_TTL, BOOK_CACHE_TTL,
+} from '../detailPanelData';
 import { useFetchWithCache } from '../hooks/useFetchWithCache';
 import PriceChart from './PriceChart';
 import DepthChart from './DepthChart';
@@ -24,16 +28,6 @@ const LazyFallback = <div className="text-gray-500 text-xs p-2">Loading...</div>
 const CYAN = '#00d4aa';
 const PINK = '#ff4d6a';
 
-// fidelity = bucket size in minutes. The Data API's price history caps
-// buckets at 1 day (1440), so the long views use daily points.
-const TIMEFRAMES = [
-  { label: '1D', interval: '1d', fidelity: 60 },
-  { label: '7D', interval: '1w', fidelity: 1440 },
-  { label: '30D', interval: '1m', fidelity: 1440 },
-  { label: '90D', useTs: true, days: 90, fidelity: 1440 },
-  { label: '1Y', useTs: true, days: 365, fidelity: 1440 },
-  { label: 'Max', interval: 'max', fidelity: 1440 },
-];
 
 // Cache helpers moved to useFetchWithCache hook
 
@@ -62,7 +56,7 @@ export default function MarketDetailPanel({ market, onBookData, onLivePriceUpdat
   // pass a copy with hasPortfolio stripped out, which silently disabled both.
   const portfolio = usePortfolioDetails();
   const [side, setSide] = useState('yes'); // 'yes' or 'no'
-  const [timeframe, setTimeframe] = useState(TIMEFRAMES[2]); // default 30D
+  const [timeframe, setTimeframe] = useState(DEFAULT_TIMEFRAME);
 
   const yesTokenId = market.clobTokenIds?.[0];
   const noTokenId = market.clobTokenIds?.[1];
@@ -72,23 +66,21 @@ export default function MarketDetailPanel({ market, onBookData, onLivePriceUpdat
     ? `https://polymarket.com/event/${market.slug}`
     : 'https://polymarket.com';
 
-  // Fetch price history via shared hook
+  // Fetch price history via shared hook (keys/fetchers shared with the hover
+  // prefetch). It comes from the Data API, so it neither waits on nor trips
+  // the CLOB rate-limit breaker.
   const priceFetcher = useCallback(async () => {
     if (!tokenId) return null;
-    if (timeframe.useTs) {
-      const now = Math.floor(Date.now() / 1000);
-      const start = now - timeframe.days * 86400;
-      return fetchPriceHistory(tokenId, null, timeframe.fidelity, start, now);
-    }
-    return fetchPriceHistory(tokenId, timeframe.interval, timeframe.fidelity);
+    return fetchTimeframeHistory(tokenId, timeframe);
   }, [tokenId, timeframe]);
 
   const {
     data: priceData, loading: priceLoading, error: priceError, refetch: loadPriceHistory,
   } = useFetchWithCache({
-    cacheKey: tokenId ? `price-${tokenId}-${timeframe.label}` : null,
-    cacheTtl: 60000,
+    cacheKey: tokenId ? priceCacheKey(tokenId, timeframe) : null,
+    cacheTtl: PRICE_CACHE_TTL,
     fetcher: priceFetcher,
+    clobProtected: false,
   });
 
   // Fetch order book via shared hook
@@ -104,8 +96,8 @@ export default function MarketDetailPanel({ market, onBookData, onLivePriceUpdat
   const {
     data: bookData, loading: bookLoading, error: bookError, refetch: loadOrderBook,
   } = useFetchWithCache({
-    cacheKey: tokenId ? `book-${tokenId}` : null,
-    cacheTtl: 30000,
+    cacheKey: tokenId ? bookCacheKey(tokenId) : null,
+    cacheTtl: BOOK_CACHE_TTL,
     fetcher: bookFetcher,
     onSuccess: bookOnSuccess,
   });

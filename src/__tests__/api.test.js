@@ -139,6 +139,16 @@ describe('fetchPriceHistory (Data API /v2/prices-history since 2026-09-04)', () 
     expect(await fetchPriceHistory('tok-1', '1d')).toEqual({ history: [{ t: 1, p: 0.5 }] });
   });
 
+  it('follows next_cursor across pages and joins the rows in order', async () => {
+    mockFetch
+      .mockResolvedValueOnce(v2([{ timestamp: 1, price: 0.1 }, { timestamp: 2, price: 0.2 }], 'c1'))
+      .mockResolvedValueOnce(v2([{ timestamp: 3, price: 0.3 }]));
+    const result = await fetchPriceHistory('tok-1', 'all', 1440);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(q(1).searchParams.get('cursor')).toBe('c1');
+    expect(result.history.map((h) => h.t)).toEqual([1, 2, 3]);
+  });
+
   it('returns null on a 400 (e.g. a rejected parameter)', async () => {
     mockFetch.mockResolvedValue(new Response(JSON.stringify({ error: "'start' to 'end' must span at most 15 days" }), { status: 400 }));
     expect(await fetchPriceHistory('tok-1', '1d')).toBeNull();

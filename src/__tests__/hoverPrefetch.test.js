@@ -6,8 +6,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { fetchOrderBook, fetchPriceHistory } from '../api';
 import { triggerClobRateLimit } from '../clobRateLimit';
-import { HOVER_DEBOUNCE_DELAY, PREFETCH_CACHE_TTL, PREFETCH_LRU_CAP } from '../uiConfig';
+import { HOVER_DEBOUNCE_DELAY } from '../uiConfig';
 import { createHoverPrefetcher } from '../hoverPrefetchUtils';
+import { cacheGet, cacheSet } from '../hooks/useFetchWithCache';
+import { DEFAULT_TIMEFRAME, priceCacheKey, bookCacheKey, PRICE_CACHE_TTL, BOOK_CACHE_TTL } from '../detailPanelData';
 import { makePlainObjectCache } from '../batchFetchUtils';
 
 vi.mock('../api', () => ({
@@ -30,24 +32,28 @@ vi.mock('../clobErrorHandler', async () => {
       }
       return false;
     }),
+    rateLimitMessage: vi.fn(() => 'rate limited'),
   };
 });
+
+// The panel cache is module-level; use a fresh token per test to stay isolated
+let n = 0;
+const tok = () => `tok-${++n}`;
 
 beforeEach(() => {
   vi.useFakeTimers();
   vi.clearAllMocks();
   fetchOrderBook.mockResolvedValue({ bids: [], asks: [] });
-  fetchPriceHistory.mockResolvedValue({ history: [] });
+  fetchPriceHistory.mockResolvedValue({ history: [{ t: 1, p: 0.5 }] });
 });
 
 afterEach(() => { vi.useRealTimers(); });
 
-// ── Hover prefetch tests ───────────────────────────────────────────
-
 describe('hover prefetch', () => {
   it('HOVER_DEBOUNCE_DELAY before any fetch fires', async () => {
+    const t = tok();
     const { hover } = createHoverPrefetcher();
-    hover('m1', { clobTokenIds: ['tok1'] });
+    hover('m1', { clobTokenIds: [t] });
     await vi.advanceTimersByTimeAsync(HOVER_DEBOUNCE_DELAY - 1);
     expect(fetchOrderBook).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
@@ -56,105 +62,93 @@ describe('hover prefetch', () => {
 
   it('hoverEnd cancels pending fetch even after full debounce advance', async () => {
     const { hover, hoverEnd } = createHoverPrefetcher();
-    hover('m1', { clobTokenIds: ['tok1'] });
+    hover('m1', { clobTokenIds: [tok()] });
     hoverEnd();
     await vi.advanceTimersByTimeAsync(HOVER_DEBOUNCE_DELAY + 100);
     expect(fetchOrderBook).not.toHaveBeenCalled();
+    expect(fetchPriceHistory).not.toHaveBeenCalled();
   });
 
   it('moving to new row within debounce window aborts previous', async () => {
+    const t1 = tok();
+    const t2 = tok();
     const { hover } = createHoverPrefetcher();
-    hover('m1', { clobTokenIds: ['tok1'] });
+    hover('m1', { clobTokenIds: [t1] });
     await vi.advanceTimersByTimeAsync(HOVER_DEBOUNCE_DELAY / 2);
-    hover('m2', { clobTokenIds: ['tok2'] });
+    hover('m2', { clobTokenIds: [t2] });
     await vi.advanceTimersByTimeAsync(HOVER_DEBOUNCE_DELAY);
     expect(fetchOrderBook).toHaveBeenCalledTimes(1);
-    expect(fetchOrderBook).toHaveBeenCalledWith('tok2');
+    expect(fetchOrderBook).toHaveBeenCalledWith(t2);
   });
 
   it('rapid 10-row scan generates 0 completed fetches until settling', async () => {
     const { hover } = createHoverPrefetcher();
+    let last;
     for (let i = 0; i < 10; i++) {
-      hover(`m${i}`, { clobTokenIds: [`tok${i}`] });
+      last = tok();
+      hover(`m${i}`, { clobTokenIds: [last] });
       await vi.advanceTimersByTimeAsync(100); // 100ms < HOVER_DEBOUNCE_DELAY
     }
     expect(fetchOrderBook).not.toHaveBeenCalled();
-    // After settling on last row
     await vi.advanceTimersByTimeAsync(HOVER_DEBOUNCE_DELAY);
     expect(fetchOrderBook).toHaveBeenCalledTimes(1);
-    expect(fetchOrderBook).toHaveBeenCalledWith('tok9');
+    expect(fetchOrderBook).toHaveBeenCalledWith(last);
   });
 
-  it('settling past debounce triggers exactly 2 requests (orderBook + priceHistory)', async () => {
+  it("warms the detail panel's own cache with exactly the panel's default requests", async () => {
+    const t = tok();
     const { hover } = createHoverPrefetcher();
-    hover('m1', { clobTokenIds: ['tok1'] });
+    hover('m1', { clobTokenIds: [t] });
     await vi.advanceTimersByTimeAsync(HOVER_DEBOUNCE_DELAY);
-    expect(fetchOrderBook).toHaveBeenCalledTimes(1);
-    expect(fetchPriceHistory).toHaveBeenCalledTimes(1);
+    // Same request the panel makes for its default (30D) view
+    expect(fetchPriceHistory).toHaveBeenCalledWith(t, DEFAULT_TIMEFRAME.interval, DEFAULT_TIMEFRAME.fidelity, null, null, expect.anything());
+    // …stored under the keys the panel reads
+    expect(cacheGet(bookCacheKey(t))).toEqual({ bids: [], asks: [] });
+    expect(cacheGet(priceCacheKey(t, DEFAULT_TIMEFRAME))).toEqual({ history: [{ t: 1, p: 0.5 }] });
   });
 
-  it('cache hit within PREFETCH_CACHE_TTL skips fetch entirely', async () => {
-    const { hover, cache } = createHoverPrefetcher();
-    cache.set('m1', { bookData: {}, priceHistory: {}, timestamp: Date.now() });
-    hover('m1', { clobTokenIds: ['tok1'] });
-    await vi.advanceTimersByTimeAsync(200);
+  it('skips what the panel cache already holds', async () => {
+    const t = tok();
+    cacheSet(bookCacheKey(t), { bids: [], asks: [] }, BOOK_CACHE_TTL);
+    cacheSet(priceCacheKey(t, DEFAULT_TIMEFRAME), { history: [] }, PRICE_CACHE_TTL);
+    const { hover } = createHoverPrefetcher();
+    hover('m1', { clobTokenIds: [t] });
+    await vi.advanceTimersByTimeAsync(HOVER_DEBOUNCE_DELAY + 100);
     expect(fetchOrderBook).not.toHaveBeenCalled();
+    expect(fetchPriceHistory).not.toHaveBeenCalled();
   });
 
-  it(`cache evicts oldest at ${PREFETCH_LRU_CAP}-entry cap`, () => {
-    const { hover, cache } = createHoverPrefetcher();
-    for (let i = 0; i < PREFETCH_LRU_CAP; i++) {
-      cache.set(`old-${i}`, { timestamp: Date.now() - (PREFETCH_LRU_CAP - i) * 1000 });
-    }
-    expect(cache.size).toBe(PREFETCH_LRU_CAP);
-    // Hover on a new market triggers eviction before adding controller
-    hover('new-market', { clobTokenIds: ['tok-new'] });
-    expect(cache.has('old-0')).toBe(false); // oldest evicted
-    expect(cache.size).toBe(PREFETCH_LRU_CAP - 1); // evicted 1, new entry added async after fetch
-  });
-
-  it('cache miss after TTL expiry re-fetches', async () => {
-    const { hover, cache } = createHoverPrefetcher();
-    cache.set('m1', { timestamp: Date.now() - PREFETCH_CACHE_TTL - 1000 }); // expired
-    hover('m1', { clobTokenIds: ['tok1'] });
-    await vi.advanceTimersByTimeAsync(HOVER_DEBOUNCE_DELAY);
-    expect(fetchOrderBook).toHaveBeenCalledTimes(1);
-  });
-
-  it('prefetch stores result only in its own cache, not external state', async () => {
-    const { hover, cache } = createHoverPrefetcher();
-    hover('m1', { clobTokenIds: ['tok1'] });
-    await vi.advanceTimersByTimeAsync(HOVER_DEBOUNCE_DELAY);
-    // Only the internal prefetch cache has the data
-    expect(cache.has('m1')).toBe(true);
-    expect(cache.get('m1').bookData).toEqual({ bids: [], asks: [] });
-  });
-
-  it('skips order book fetch when spread cache already has data', async () => {
-    // Spread effect already cached market m1's spread
+  it('skips the order book (a CLOB request) when the spread is already cached, as before', async () => {
     const { hover } = createHoverPrefetcher({ spreadCache: makePlainObjectCache({ m1: 0.02 }) });
-    hover('m1', { clobTokenIds: ['tok1'] });
+    hover('m1', { clobTokenIds: [tok()] });
     await vi.advanceTimersByTimeAsync(HOVER_DEBOUNCE_DELAY);
-    // Order book skipped, only price history fetched
     expect(fetchOrderBook).not.toHaveBeenCalled();
     expect(fetchPriceHistory).toHaveBeenCalledTimes(1);
   });
 
-  it('fetches order book when spread cache has no entry', async () => {
-    const { hover } = createHoverPrefetcher({ spreadCache: makePlainObjectCache({}) });
-    hover('m1', { clobTokenIds: ['tok1'] });
-    await vi.advanceTimersByTimeAsync(HOVER_DEBOUNCE_DELAY);
-    expect(fetchOrderBook).toHaveBeenCalledTimes(1);
-    expect(fetchPriceHistory).toHaveBeenCalledTimes(1);
-  });
-
-  it('429 from prefetch triggers triggerClobRateLimit', async () => {
-    const err = new Error('Rate limited');
-    err.status = 429;
+  it('a 429 on the order book opens the CLOB breaker', async () => {
+    const err = Object.assign(new Error('Rate limited'), { status: 429 });
     fetchOrderBook.mockRejectedValue(err);
     const { hover } = createHoverPrefetcher();
-    hover('m1', { clobTokenIds: ['tok1'] });
+    hover('m1', { clobTokenIds: [tok()] });
     await vi.advanceTimersByTimeAsync(HOVER_DEBOUNCE_DELAY);
     expect(triggerClobRateLimit).toHaveBeenCalledWith(429);
+  });
+
+  it('a 429 on price history (Data API) does NOT open the CLOB breaker', async () => {
+    fetchPriceHistory.mockRejectedValue(Object.assign(new Error('Rate limited'), { status: 429 }));
+    vi.spyOn(console, 'debug').mockImplementation(() => {});
+    const { hover } = createHoverPrefetcher();
+    hover('m1', { clobTokenIds: [tok()] });
+    await vi.advanceTimersByTimeAsync(HOVER_DEBOUNCE_DELAY);
+    expect(triggerClobRateLimit).not.toHaveBeenCalled();
+  });
+
+  it('price history is still prefetched while the CLOB breaker is open (it is not a CLOB request)', async () => {
+    const { hover } = createHoverPrefetcher({ isRateLimited: () => true });
+    hover('m1', { clobTokenIds: [tok()] });
+    await vi.advanceTimersByTimeAsync(HOVER_DEBOUNCE_DELAY);
+    expect(fetchOrderBook).not.toHaveBeenCalled();
+    expect(fetchPriceHistory).toHaveBeenCalledTimes(1);
   });
 });
