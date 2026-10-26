@@ -23,6 +23,9 @@ export const DEFAULT_TIMEFRAME = TIMEFRAMES[2];
 
 export const PRICE_CACHE_TTL = 60_000;
 export const BOOK_CACHE_TTL = 30_000;
+// A book the hover prefetch fetched before the panel was even opened is kept
+// briefly: hover-to-open takes seconds, and an order book ages fast.
+export const PREFETCHED_BOOK_TTL = 10_000;
 
 export const priceCacheKey = (tokenId, timeframe) => `price-${tokenId}-${timeframe.label}`;
 export const bookCacheKey = (tokenId) => `book-${tokenId}`;

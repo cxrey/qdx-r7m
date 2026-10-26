@@ -146,7 +146,7 @@ function extractFeeCategoryFromTags(tags) {
 }
 
 const _loggedSlugs = new Set();
-let _feeEnabledSeen = false;
+let _feeFallbackLogged = false;
 
 /**
  * Run one analysis engine, isolating failures: on error, log it, record the
@@ -248,8 +248,8 @@ export function processMarket(market) {
   const feesEnabled = market.feesEnabled ?? false;
   // The live feeSchedule is authoritative; the FEE_PARAMS table is only a
   // fallback. Flag (once) when that fallback is actually used.
-  if (feesEnabled && !market.feeSchedule && !_feeEnabledSeen) {
-    _feeEnabledSeen = true;
+  if (feesEnabled && !market.feeSchedule && !_feeFallbackLogged) {
+    _feeFallbackLogged = true;
     console.info('[processMarket] fee-enabled market without a feeSchedule:', market.id, '— using the FEE_PARAMS fallback table');
   }
   const feeType = market.feeType || null;

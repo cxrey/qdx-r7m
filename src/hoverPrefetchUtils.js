@@ -14,7 +14,7 @@ import { handleClobError } from './clobErrorHandler';
 import { cacheGet, cacheSet } from './hooks/useFetchWithCache';
 import {
   DEFAULT_TIMEFRAME, fetchTimeframeHistory,
-  priceCacheKey, bookCacheKey, PRICE_CACHE_TTL, BOOK_CACHE_TTL,
+  priceCacheKey, bookCacheKey, PRICE_CACHE_TTL, PREFETCHED_BOOK_TTL,
 } from './detailPanelData';
 import { HOVER_DEBOUNCE_DELAY } from './uiConfig';
 
@@ -77,7 +77,7 @@ export function createHoverPrefetcher(opts = {}) {
               if (signal.aborted) return;
             }
             const data = await fetchOrderBook(yesTokenId);
-            if (data) cacheSet(bookKey, data, BOOK_CACHE_TTL);
+            if (data) cacheSet(bookKey, data, PREFETCHED_BOOK_TTL);
           } catch (err) {
             if (err?.name !== 'AbortError') onError(err);
           } finally {

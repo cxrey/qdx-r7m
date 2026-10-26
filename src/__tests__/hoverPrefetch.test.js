@@ -9,7 +9,7 @@ import { triggerClobRateLimit } from '../clobRateLimit';
 import { HOVER_DEBOUNCE_DELAY } from '../uiConfig';
 import { createHoverPrefetcher } from '../hoverPrefetchUtils';
 import { cacheGet, cacheSet } from '../hooks/useFetchWithCache';
-import { DEFAULT_TIMEFRAME, priceCacheKey, bookCacheKey, PRICE_CACHE_TTL, BOOK_CACHE_TTL } from '../detailPanelData';
+import { DEFAULT_TIMEFRAME, priceCacheKey, bookCacheKey, PRICE_CACHE_TTL, BOOK_CACHE_TTL, PREFETCHED_BOOK_TTL } from '../detailPanelData';
 import { makePlainObjectCache } from '../batchFetchUtils';
 
 vi.mock('../api', () => ({
@@ -105,6 +105,17 @@ describe('hover prefetch', () => {
     // …stored under the keys the panel reads
     expect(cacheGet(bookCacheKey(t))).toEqual({ bids: [], asks: [] });
     expect(cacheGet(priceCacheKey(t, DEFAULT_TIMEFRAME))).toEqual({ history: [{ t: 1, p: 0.5 }] });
+  });
+
+  it('keeps a prefetched order book only briefly (books age fast); the history keeps its normal TTL', async () => {
+    const t = tok();
+    const { hover } = createHoverPrefetcher();
+    hover('m1', { clobTokenIds: [t] });
+    await vi.advanceTimersByTimeAsync(HOVER_DEBOUNCE_DELAY);
+    expect(cacheGet(bookCacheKey(t))).not.toBeNull();
+    await vi.advanceTimersByTimeAsync(PREFETCHED_BOOK_TTL + 1);
+    expect(cacheGet(bookCacheKey(t))).toBeNull();
+    expect(cacheGet(priceCacheKey(t, DEFAULT_TIMEFRAME))).not.toBeNull(); // 60s TTL
   });
 
   it('skips what the panel cache already holds', async () => {

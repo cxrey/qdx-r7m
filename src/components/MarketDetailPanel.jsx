@@ -117,7 +117,9 @@ export default function MarketDetailPanel({ market, onBookData, onLivePriceUpdat
     onLivePriceUpdate(market.id, yesPrice, noPrice);
   }, [priceData, side, market.id, onLivePriceUpdate]);
 
-  const refreshBook = loadOrderBook;
+  // ↻ must fetch a new book: a plain load serves the cache (up to 30 s old,
+  // possibly filled by the hover prefetch)
+  const refreshBook = useCallback(() => loadOrderBook({ force: true }), [loadOrderBook]);
 
   // Price delta
   const history = priceData?.history || [];

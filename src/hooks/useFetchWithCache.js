@@ -33,7 +33,8 @@ export { cacheGet, cacheSet };
  * @param {boolean}  [opts.clobProtected] — CLOB requests (default true): skipped while the CLOB
  *   rate-limit breaker is open, and a 429/403 opens it. Pass false for other APIs (e.g. the
  *   Data API's price history), whose rate limits shouldn't pause CLOB requests.
- * @returns {{ data, loading, error, refetch }}
+ * @returns {{ data, loading, error, refetch }} — refetch({ force: true }) skips the cache
+ *   (e.g. a Refresh button); plain refetch() serves a fresh cache entry.
  */
 export function useFetchWithCache({
   cacheKey, cacheTtl = 60000, fetcher, onSuccess, clobProtected = true,
@@ -48,9 +49,11 @@ export function useFetchWithCache({
     return () => { mountedRef.current = false; };
   }, []);
 
-  const refetch = useCallback(async () => {
-    // Check cache first
-    if (cacheKey) {
+  const refetch = useCallback(async (opts) => {
+    // Check cache first, unless forced. (`opts` may be a click event when
+    // refetch is used directly as a handler — only an explicit force counts.)
+    const force = opts?.force === true;
+    if (cacheKey && !force) {
       const cached = cacheGet(cacheKey);
       if (cached) {
         setData(cached);
