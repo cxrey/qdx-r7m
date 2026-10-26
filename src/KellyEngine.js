@@ -537,14 +537,29 @@ export function applyPortfolioConstraints(rawDollars, market, portfolio = null, 
           label: `Offsets your existing ${otherSide} position in this market (${heldOnOtherSide.toFixed(0)} shares) — no concentration penalty`,
         });
       }
-      if (screening?.maxCorrelation > 0.5) {
-        // Correlations are unsigned: whether this bet moves with or against
-        // that position isn't modelled, so the penalty applies either way
-        const penalty = 1 - (screening.maxCorrelation - 0.5); // 0.5 corr = no penalty, 1.0 = 50% reduction
+      // With the side known, use the screening's per-side view: positions on
+      // other outcomes of a mutually exclusive event carry their exact,
+      // price-implied payoff correlation — strongly negative ones are hedges
+      // (noted, not penalized), strongly positive ones are penalized, and
+      // near-zero ones (e.g. two longshots) are neither. Other correlations
+      // are unsigned, so they're penalized either way.
+      const risk = betSide ? screening?.sideRisk?.[betSide] : null;
+      for (const h of risk?.hedges ?? []) {
+        constraints.push({
+          type: 'OFFSET',
+          label: `Hedges your ${h.side} position in "${h.question.slice(0, 40)}" (outcomes of one event; r=${h.correlation.toFixed(2)}) — no correlation penalty`,
+        });
+      }
+      const correlation = risk ? risk.correlation : screening?.maxCorrelation;
+      if (correlation > 0.5) {
+        const penalty = 1 - (correlation - 0.5); // 0.5 corr = no penalty, 1.0 = 50% reduction
         const penalizedDollars = adjustedDollars * penalty;
+        const pct = ((1 - penalty) * 100).toFixed(0);
         constraints.push({
           type: 'CORRELATION',
-          label: `Correlated with another position (r=${screening.maxCorrelation.toFixed(2)}; direction not modelled), reduced by ${((1 - penalty) * 100).toFixed(0)}%`,
+          label: risk?.directionKnown
+            ? `Moves with your ${risk.side} position in "${risk.question.slice(0, 40)}" (outcomes of one event; r=${correlation.toFixed(2)}), reduced by ${pct}%`
+            : `Correlated with another position (r=${correlation.toFixed(2)}; direction not modelled), reduced by ${pct}%`,
           original: adjustedDollars,
         });
         adjustedDollars = penalizedDollars;

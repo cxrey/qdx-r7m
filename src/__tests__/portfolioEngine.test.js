@@ -34,6 +34,8 @@ import {
   repriceWalletPosition,
   buildCorrelationStructure,
   priceClusters,
+  mutuallyExclusive,
+  exclusiveOutcomeCorrelation,
 } from '../PortfolioEngine';
 import { envelope, jsonResponse, v2Position, WALLET, YES_TOKEN, CONDITION } from './helpers/dataApiV2Fixtures';
 import { generateMarkets } from '../__benchmarks__/helpers/fixtures';
@@ -373,7 +375,7 @@ describe('screenNewTrade', () => {
 
     // Same slug => EVENT overlap (0.8 corr), candidate side defaults to YES but we check opposing logic
     // screenNewTrade creates candidatePos with side 'YES', so for OPPOSING we need existing side !== 'YES'
-    // Actually: isOpposingSide checks p.side !== candidatePos.side. candidatePos.side is always 'YES'.
+    // For markets that aren't exclusive outcomes, opposing is a guess: the most-correlated market held on the other side. candidatePos.side is always 'YES'.
     // So existing position must have side 'NO' on the same highly-correlated market.
     const existingPosNo = { market: sharedMarket, side: 'NO', currentValue: 200, size: 200, currentPrice: 0.45 };
     const { clusters: clusters2 } = buildCorrelationClusters([existingPosNo]);
@@ -403,6 +405,84 @@ describe('screenNewTrade', () => {
     expect(result.maxCorrelation).toBeLessThan(0.5);
   });
 
+  describe('direction: mutually exclusive outcomes of one event (negRisk)', () => {
+    const outcome = (id, q, yesPrice) => makeMarket({ id, question: q, description: '', slug: 'election-2028', category: 'Politics', negRisk: true, yesPrice, noPrice: 1 - yesPrice });
+    const screen = (candidate, held) => screenNewTrade(candidate, [held], buildCorrelationClusters([held]).clusters);
+
+    it('mutuallyExclusive needs negRisk on both, the same event, and different markets', () => {
+      const a = outcome('a', 'Will Alice win?', 0.6);
+      const b = outcome('b', 'Will Bob win?', 0.4);
+      expect(mutuallyExclusive(a, b)).toBe(true);
+      expect(mutuallyExclusive(a, a)).toBe(false);
+      expect(mutuallyExclusive(a, { ...b, negRisk: false })).toBe(false);
+      expect(mutuallyExclusive(a, { ...b, slug: 'other-event' })).toBe(false);
+    });
+
+    it('exclusiveOutcomeCorrelation: −√(pA·pB/((1−pA)(1−pB))), sign by side, clamped, 0 when settled', () => {
+      expect(exclusiveOutcomeCorrelation(0.6, 0.4, true)).toBeCloseTo(-1);   // two-way race
+      expect(exclusiveOutcomeCorrelation(0.6, 0.4, false)).toBeCloseTo(1);
+      expect(exclusiveOutcomeCorrelation(0.3, 0.25, true)).toBeCloseTo(-0.378, 3); // front-runners
+      expect(exclusiveOutcomeCorrelation(0.03, 0.02, true)).toBeCloseTo(-0.025, 3); // longshots: ~independent
+      expect(exclusiveOutcomeCorrelation(0.7, 0.6, true)).toBe(-1); // prices summing past 1 → clamped
+      expect(exclusiveOutcomeCorrelation(1, 0.3, false)).toBe(0);   // settled
+      expect(exclusiveOutcomeCorrelation(null, 0.3, true)).toBe(0); // no price
+    });
+
+    it('two-way race: YES on the other outcome hedges a YES holding (r≈−1); NO moves with it', () => {
+      const held = { market: outcome('a', 'Will Alice win?', 0.6), side: 'YES', size: 100, currentValue: 60 };
+      const r = screen(outcome('b', 'Will Bob win?', 0.4), held);
+      expect(r.sideRisk.YES.correlation).toBe(0);
+      expect(r.sideRisk.YES.hedges).toHaveLength(1);
+      expect(r.sideRisk.YES.hedges[0]).toMatchObject({ question: 'Will Alice win?', side: 'YES', size: 100 });
+      expect(r.sideRisk.YES.hedges[0].correlation).toBeCloseTo(-1);
+      expect(r.sideRisk.NO).toMatchObject({ side: 'YES', directionKnown: true, hedges: [] });
+      expect(r.sideRisk.NO.correlation).toBeCloseTo(1);
+      // Portfolio Impact (screens buying YES): a hedge, with the correlation
+      expect(r.fit).toBe('OPPOSING');
+      expect(r.text).toContain('move against each other (r=-1.00)');
+    });
+
+    it('a NO holding flips it: YES on the other outcome moves with it', () => {
+      const held = { market: outcome('a', 'Will Alice win?', 0.6), side: 'NO', size: 100, currentValue: 40 };
+      const r = screen(outcome('b', 'Will Bob win?', 0.4), held);
+      expect(r.sideRisk.YES).toMatchObject({ side: 'NO', directionKnown: true, hedges: [] });
+      expect(r.sideRisk.YES.correlation).toBeCloseTo(1);
+      expect(r.sideRisk.NO.hedges).toHaveLength(1);
+      expect(r.fit).not.toBe('OPPOSING');
+    });
+
+    it('two longshots are nearly independent: no hedge and no correlation on either side', () => {
+      const held = { market: outcome('a', 'Will Alice win?', 0.03), side: 'YES', size: 100, currentValue: 3 };
+      const r = screen(outcome('b', 'Will Bob win?', 0.02), held);
+      for (const s of ['YES', 'NO']) {
+        expect(r.sideRisk[s].hedges).toHaveLength(0);
+        expect(r.sideRisk[s].correlation).toBeLessThan(0.05);
+      }
+      expect(r.fit).toBe('GOOD_FIT');
+    });
+
+    it('a settled outcome carries no correlation (e.g. the other side of a decided race)', () => {
+      const held = { market: outcome('a', 'Will Alice win?', 0.001), side: 'YES', size: 100, currentValue: 0.1 };
+      const r = screen(outcome('b', 'Will Bob win?', 1), held);
+      for (const s of ['YES', 'NO']) {
+        expect(r.sideRisk[s].correlation).toBe(0);
+        expect(r.sideRisk[s].hedges).toHaveLength(0);
+      }
+    });
+
+    it('related markets that are not exclusive keep the unsigned, conservative reading on both sides', () => {
+      const a = { market: makeMarket({ id: 'btc1', question: 'Bitcoin above 100k?', slug: 'btc-2026', negRisk: false }), side: 'YES', size: 10, currentValue: 10 };
+      const c = makeMarket({ id: 'btc2', question: 'Bitcoin above 120k?', slug: 'btc-2026', negRisk: false });
+      const { clusters } = buildCorrelationClusters([a]);
+      const r = screenNewTrade(c, [a], clusters);
+      for (const s of ['YES', 'NO']) {
+        expect(r.sideRisk[s].directionKnown).toBe(false);
+        expect(r.sideRisk[s].correlation).toBeGreaterThan(0.5);
+        expect(r.sideRisk[s].hedges).toHaveLength(0);
+      }
+    });
+  });
+
   it('totals each side separately when a market is held on both sides', () => {
     const yes = makePosition({ id: 'both', slug: 'b' }, { side: 'YES', size: 100 });
     const no = { ...makePosition({ id: 'both', slug: 'b' }, { side: 'NO', size: 40 }) };
@@ -428,6 +508,68 @@ describe('screenNewTrade', () => {
     const exactPositions = [...positions, { market: candidate, side: 'YES', size: 50, currentValue: 50, currentPrice: candidate.yesPrice }];
     const { clusters: exactClusters } = buildCorrelationClusters(exactPositions);
     expect(result.newDivScore).toBe(calculateConcentration(exactPositions, exactClusters).diversificationScore);
+  });
+});
+
+describe('buildCorrelationStructure fast paths agree with the pairwise definitions', () => {
+  // Seeded random portfolios exercising every correlation source: categories,
+  // shared slugs, entities, dates, and title words found in other markets'
+  // descriptions — including words that contain each other, which the
+  // substring matcher must handle like String#includes.
+  let seed;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  const pick = (arr) => arr[Math.floor(rnd() * arr.length)];
+  const ENT = ['trump', 'biden', 'china', 'russia', 'ukraine', 'israel', 'fed', 'apple', 'tesla', 'putin'];
+  const WORDS = ['election', 'election?', 'lection', 'season', 'seasons', 'market', 'supermarket', 'reserve', 'reserves', 'ceasefire', 'tariffs', 'champion'];
+  const randomPositions = (n) => Array.from({ length: n }, (_, i) => {
+    const ents = Array.from({ length: Math.floor(rnd() * 3) }, () => pick(ENT));
+    const words = Array.from({ length: 2 + Math.floor(rnd() * 5) }, () => pick(WORDS));
+    const market = makeMarket({
+      id: `r${seed}-${i}`,
+      question: `Will ${ents.join(' and ') || 'it'} ${words.join(' ')}?`,
+      description: rnd() < 0.2 ? '' : Array.from({ length: Math.floor(rnd() * 10) }, () => pick([...WORDS, ...ENT, 'resolves'])).join(' '),
+      category: pick(['Politics', 'Crypto', 'Sports', undefined]),
+      slug: rnd() < 0.5 ? `event-${Math.floor(rnd() * 6)}` : `solo-${seed}-${i}`,
+      daysLeft: rnd() < 0.15 ? null : Math.floor(rnd() * 90),
+    });
+    return { market, side: rnd() < 0.6 ? 'YES' : 'NO', size: 10, currentValue: 10 };
+  });
+
+  // The original naming: sum each member pair's sharedLabels, insertion-ordered
+  function referenceName(indices, positions) {
+    const counts = {};
+    for (let a = 0; a < indices.length; a++) {
+      for (let b = a + 1; b < indices.length; b++) {
+        const [i, j] = indices[a] < indices[b] ? [indices[a], indices[b]] : [indices[b], indices[a]];
+        for (const l of calculatePairCorrelation(positions[i], positions[j]).sharedLabels) counts[l] = (counts[l] || 0) + 1;
+      }
+    }
+    const cats = [...new Set(indices.map((i) => positions[i].market?.category).filter(Boolean))];
+    const top = Object.entries(counts).sort((x, y) => y[1] - x[1]).slice(0, 2).map(([l]) => l);
+    return top.length > 0
+      ? top.map((l) => l.charAt(0).toUpperCase() + l.slice(1)).join('/') + (cats.length === 1 ? ` (${cats[0]})` : '')
+      : null;
+  }
+
+  it('every matrix entry equals calculatePairCorrelation, and cluster names match the pairwise reference', () => {
+    let namesChecked = 0;
+    for (const n of [2, 5, 12, 30, 60]) {
+      for (let t = 1; t <= 8; t++) {
+        seed = n * 100 + t;
+        const positions = randomPositions(n);
+        const { matrix, groups } = buildCorrelationStructure(positions);
+        for (let i = 0; i < n; i++) {
+          for (let j = i + 1; j < n; j++) {
+            expect(matrix[i][j]).toBe(calculatePairCorrelation(positions[i], positions[j]).correlation);
+          }
+        }
+        for (const g of groups) {
+          const ref = referenceName(g.indices, positions);
+          if (ref !== null) { expect(g.name).toBe(ref); namesChecked++; }
+        }
+      }
+    }
+    expect(namesChecked).toBeGreaterThan(50);
   });
 });
 

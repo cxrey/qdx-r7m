@@ -255,6 +255,9 @@ export function usePortfolio(loadedMarkets) {
   // for the market on every render; results are cached per market until the
   // portfolio changes (each call is O(positions), but renders are frequent).
   // (analysis.clusters is rebuilt whenever allPositions changes, so it keys the cache.)
+  // The screened market's own YES price matters too (exclusive outcomes'
+  // correlation is price-implied), so an entry is reused only at that price —
+  // one entry per market, replaced when its price moves.
   const screenCacheRef = useRef({ clusters: null, byMarket: new Map() });
   const screenTrade = useCallback((market) => {
     if (screenCacheRef.current.clusters !== analysis.clusters) {
@@ -264,8 +267,11 @@ export function usePortfolio(loadedMarkets) {
     if (market?.id == null) return screenNewTrade(market, allPositions, analysis.clusters);
     const { byMarket } = screenCacheRef.current;
     const key = String(market.id);
-    if (!byMarket.has(key)) byMarket.set(key, screenNewTrade(market, allPositions, analysis.clusters));
-    return byMarket.get(key);
+    const cached = byMarket.get(key);
+    if (cached && cached.yesPrice === market.yesPrice) return cached.result;
+    const result = screenNewTrade(market, allPositions, analysis.clusters);
+    byMarket.set(key, { yesPrice: market.yesPrice, result });
+    return result;
   }, [allPositions, analysis.clusters]);
 
   // O(1) set of held market IDs for fast filter checks
