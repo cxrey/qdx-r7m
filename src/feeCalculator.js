@@ -136,10 +136,15 @@ export function isFeeFree(feeParams) {
   return !feeParams?.enabled || !(feeParams.feeRate > 0);
 }
 
-/** Per-share fee in dollars: feeRate × (p(1−p))^exponent. Internal helper. */
+/** Per-share fee in dollars: feeRate × (p(1−p))^exponent. */
 function feePerShare(price, feeParams) {
   if (isFeeFree(feeParams) || price == null || price <= 0 || price >= 1) return 0;
   return feeParams.feeRate * Math.pow(price * (1 - price), feeParams.exponent);
+}
+
+/** Taker fee in dollars per share bought at `price` (0 when fee-free). */
+export function computeFeePerShare(price, feeParams) {
+  return feePerShare(price, feeParams);
 }
 
 /**

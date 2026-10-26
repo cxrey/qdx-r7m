@@ -12,6 +12,7 @@ import { FlowCell } from './TradeFlowPanel';
 import { ROW_HEIGHT, CYAN, PINK, AMBER } from '../uiConfig';
 import { formatVolume, formatPrice } from '../formatters';
 import { FEE_DISPLAY_YELLOW_PCT, FEE_DISPLAY_RED_PCT } from '../scoringConfig';
+import { marketYield, formatYield } from '../yieldUtils';
 
 // Pre-warm: download + parse chunk during idle time so first expand is instant
 if (typeof window !== 'undefined') {
@@ -55,6 +56,16 @@ function FeeCell({ market }) {
   if (pct > FEE_DISPLAY_RED_PCT) colorClass = 'text-red-400';
   else if (pct >= FEE_DISPLAY_YELLOW_PCT) colorClass = 'text-yellow-400';
   return <span className={`text-xs ${colorClass}`}>{pct.toFixed(2)}%</span>;
+}
+
+function YieldCell({ market }) {
+  const y = marketYield(market);
+  if (!y) return <span className="text-gray-600 text-xs">&mdash;</span>;
+  const title = `${y.side} at ${(y.price * 100).toFixed(1)}c — buying at ~${(y.buyPrice * 100).toFixed(1)}c, `
+    + `${(y.cost * 100).toFixed(2)}c with fee: `
+    + `+${(y.simpleReturn * 100).toFixed(1)}% in ${y.days.toFixed(1)} days if ${y.side} wins — `
+    + `about a ${((1 - y.price) * 100).toFixed(0)}% chance it doesn't, at this price.`;
+  return <span className="text-xs text-gray-400" title={title}>{formatYield(y.annualized)}</span>;
 }
 
 function FLBEdgeCell({ flb }) {
@@ -325,6 +336,7 @@ const MarketRow = memo(function MarketRow({ market, expanded, onToggle, detailWi
         <div className="text-gray-400">{formatVolume(market.volume)}</div>
         <div className="text-gray-400">{formatVolume(market.volume24hr)}</div>
         <div className="text-gray-400">{market.daysLeft ?? '\u2014'}</div>
+        <div><YieldCell market={market} /></div>
         <div className="truncate text-xs text-gray-500">{market.category || '\u2014'}</div>
         <div><EdgeBadge score={market.edgeScore} failures={market._engineFailures} /></div>
         <div>

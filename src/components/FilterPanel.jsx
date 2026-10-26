@@ -12,6 +12,7 @@ const SORT_OPTIONS = [
   { value: 'theta', label: 'Daily Theta' },
   { value: 'strictness', label: 'Strictness Score' },
   { value: 'impliedDailyRate', label: 'Implied Daily Rate' },
+  { value: 'annualizedYield', label: 'Annualized Yield' },
   { value: 'volEfficiency', label: 'Volume Efficiency' },
   { value: 'effectiveVolume', label: 'Effective Volume' },
   { value: 'volVelocity', label: 'Volume Velocity' },

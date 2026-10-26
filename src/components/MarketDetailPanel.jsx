@@ -5,6 +5,7 @@ import {
   priceCacheKey, bookCacheKey, PRICE_CACHE_TTL, BOOK_CACHE_TTL,
 } from '../detailPanelData';
 import { useFetchWithCache } from '../hooks/useFetchWithCache';
+import { annualizedYield, daysToResolution, formatYield } from '../yieldUtils';
 import PriceChart from './PriceChart';
 import DepthChart from './DepthChart';
 import OrderBookTable from './OrderBookTable';
@@ -44,6 +45,20 @@ function EdgeBadge({ score }) {
   if (score >= 70) cls = 'bg-emerald-900/60 text-emerald-300';
   else if (score >= 40) cls = 'bg-yellow-900/60 text-yellow-300';
   return <span className={`px-2 py-0.5 rounded text-xs font-bold ${cls}`}>{score}</span>;
+}
+
+// Held-to-resolution yield of each side, if it wins (bought at ~the ask, fees included)
+function YieldLine({ market, yesPrice, noPrice }) {
+  const days = daysToResolution(market);
+  const yes = annualizedYield(yesPrice, days, market.feeParams ?? null, market.spread ?? null);
+  const no = annualizedYield(noPrice, days, market.feeParams ?? null, market.spread ?? null);
+  if (!yes && !no) return null;
+  const fmt = (y) => (y ? `+${(y.simpleReturn * 100).toFixed(1)}% (${formatYield(y.annualized)}/yr)` : '—');
+  return (
+    <div className="text-[10px] text-gray-500 mt-2">
+      If held to resolution and it wins: Yes {fmt(yes)} · No {fmt(no)}
+    </div>
+  );
 }
 
 function Skeleton({ className }) {
@@ -325,6 +340,7 @@ export default function MarketDetailPanel({ market, onBookData, onLivePriceUpdat
                 </div>
               </div>
             </div>
+            <YieldLine market={market} yesPrice={displayYesPrice} noPrice={displayNoPrice} />
           </div>
 
           {/* Details Card */}
@@ -387,7 +403,7 @@ export default function MarketDetailPanel({ market, onBookData, onLivePriceUpdat
 
           {/* Kelly Position Sizer */}
           <Suspense fallback={LazyFallback}>
-            <KellyCalculator market={market} portfolio={portfolio} />
+            <KellyCalculator market={market} portfolio={portfolio} bookData={bookData} bookSide={side === 'yes' ? 'YES' : 'NO'} />
           </Suspense>
 
           {/* Portfolio Impact */}

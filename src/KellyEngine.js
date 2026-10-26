@@ -1,4 +1,5 @@
-import { computeEffectiveFeeRate } from './feeCalculator';
+import { computeEffectiveFeeRate, computeFeePerShare } from './feeCalculator';
+import { allInCost } from './executionCost';
 
 /**
  * KellyEngine.js — Pure JS utility for Kelly Criterion position sizing.
@@ -47,46 +48,56 @@ export function saveKellySettings(settings) {
 /**
  * Calculate Kelly fraction for a binary market.
  *
- * @param {number} estProb - Your estimated probability (0–1)
- * @param {number} marketPrice - Current market price / implied probability (0–1)
+ * Everything is priced at the ALL-IN cost per share c̄ — what you actually pay
+ * for a share that returns $1 if your side wins (fill price + taker fee):
+ *   EV per share   = p − c̄
+ *   EV per dollar  = p / c̄ − 1
+ *   full Kelly f*  = (p − c̄) / (1 − c̄)
+ * Without `opts.cost`, c̄ = quoted price + its taker fee (no slippage).
+ *
+ * @param {number} estProb - Your estimated probability of YES (0–1)
+ * @param {number} marketPrice - Quoted price of the selected side (0–1)
  * @param {string} side - 'YES' or 'NO'
+ * @param {Object} [feeParams] - market.feeParams; null = no fees
+ * @param {Object} [opts]
+ * @param {number} [opts.cost] - all-in cost per share (e.g. from allInCost)
+ * @param {number} [opts.maxFraction] - your Kelly fraction λ (settings.defaultFraction);
+ *   the robustness tier caps it further for weaker edges
  * @returns {Object} Kelly analysis result
  */
-export function calculateKelly(estProb, marketPrice, side = 'YES', feeParams = null) {
+export function calculateKelly(estProb, marketPrice, side = 'YES', feeParams = null, opts = {}) {
   // Validate inputs
   if (estProb < 0 || estProb > 1 || marketPrice <= 0 || marketPrice >= 1) {
     return { valid: false, reason: 'Invalid inputs' };
   }
 
-  // For both sides: you pay marketPrice per share, receive $1 if your side wins.
-  // Profit per dollar risked = (1 - marketPrice) / marketPrice
-  // This is the same formula regardless of side.
-  let p, q, b;
-  if (side === 'YES') {
-    p = estProb;              // prob of YES (winning)
-    q = 1 - p;                // prob of losing
-  } else {
-    p = 1 - estProb;          // prob of NO happening (winning)
-    q = estProb;               // prob of losing (YES happens)
-  }
-  b = (1 - marketPrice) / marketPrice;  // odds: profit per dollar risked
+  // p = probability the selected side wins
+  const p = side === 'YES' ? estProb : 1 - estProb;
+  const q = 1 - p;
 
-  // Edge = expected value per dollar
-  const edge = (b * p) - q;
-  // Fee adjustment: effectiveFeeRate is per-dollar like edge.
-  // feeParams comes from resolveFeeParams (market.feeParams); null = no fees.
+  // Raw edge at the quoted price, before any costs (per dollar)
+  const edge = p / marketPrice - 1;
+  // Fee as a fraction of trade value at the quoted price (for display)
   const takerFeeRate = computeEffectiveFeeRate(marketPrice, feeParams);
-  const feeAdjustedEdge = edge - takerFeeRate;
-  const edgePp = edge * 100;
 
-  // Break-even probability for the selected side
-  // Buying YES at yesPrice: need YES prob > yesPrice to profit
-  // Buying NO at noPrice: need NO prob > noPrice to profit
-  const breakEvenProb = marketPrice;
+  // All-in cost per share
+  const cost = Number.isFinite(opts.cost) && opts.cost > 0
+    ? opts.cost
+    : marketPrice + computeFeePerShare(marketPrice, feeParams);
+  if (cost >= 1) {
+    return {
+      valid: true, noEdge: true, side, estProb, marketPrice, cost, breakEvenProb: cost,
+      gapPp: (p - cost) * 100, edge: edge * 100, feeAdjustedEdge: -100, takerFeeRate, fullKelly: 0,
+      evPerShare: p - cost,
+      reason: 'Costs exceed the $1 payout',
+    };
+  }
+  const b = (1 - cost) / cost; // net odds: profit per dollar risked, after costs
+  const netEdge = p / cost - 1; // EV per dollar, after costs
 
-  // Gap between estimate and break-even (p = prob of the selected side winning)
-  const gapToBreakEven = p - breakEvenProb;
-  const gapPp = gapToBreakEven * 100;
+  // Break-even: your side must win more often than c̄
+  const breakEvenProb = cost;
+  const gapPp = (p - cost) * 100;
 
   // NO_EDGE_DETECTABLE check
   if (gapPp < 0.5) {
@@ -96,32 +107,31 @@ export function calculateKelly(estProb, marketPrice, side = 'YES', feeParams = n
       side,
       estProb,
       marketPrice,
+      cost,
       breakEvenProb,
       gapPp,
-      edge: edgePp,
-      feeAdjustedEdge: feeAdjustedEdge * 100,
+      edge: edge * 100,
+      feeAdjustedEdge: netEdge * 100,
       takerFeeRate,
       fullKelly: 0,
+      evPerShare: p - cost,
       reason: gapPp <= 0
-        ? 'Market price already reflects or exceeds your estimate'
+        ? (p > marketPrice
+          ? 'Fill price and fees use up your edge'
+          : 'Market price already reflects or exceeds your estimate')
         : 'Edge too small to be meaningful (< 0.5pp)',
     };
   }
 
-  // Full Kelly fraction: f* = (bp - q) / b
-  const fullKelly = Math.max(0, (b * p - q) / b);
+  // Full Kelly at the all-in cost: f* = (p − c̄) / (1 − c̄)
+  const fullKelly = (p - cost) / (1 - cost);
 
-  // Fee-adjusted Kelly: if fees consume the edge, fraction = 0
-  const feeAdjustedFullKelly = feeAdjustedEdge > 0
-    ? Math.max(0, feeAdjustedEdge / b)
-    : 0;
-
-  // Robustness assessment
+  // Fraction λ: your setting, capped by the robustness tier
   const robustness = assessRobustness(gapPp, estProb);
-
-  // Fractional Kelly based on robustness — use fee-adjusted full Kelly
-  const fractionMultiplier = robustness.kellyFraction;
-  const fractionalKelly = feeAdjustedFullKelly * fractionMultiplier;
+  const fractionMultiplier = Number.isFinite(opts.maxFraction) && opts.maxFraction > 0
+    ? Math.min(opts.maxFraction, robustness.kellyFraction)
+    : robustness.kellyFraction;
+  const fractionalKelly = fullKelly * fractionMultiplier;
 
   // Expected growth rate (log utility)
   const growthRate = fractionalKelly > 0
@@ -134,21 +144,54 @@ export function calculateKelly(estProb, marketPrice, side = 'YES', feeParams = n
     side,
     estProb,
     marketPrice,
+    cost,
     breakEvenProb,
     gapPp,
-    edge: edgePp,
-    feeAdjustedEdge: feeAdjustedEdge * 100,
+    edge: edge * 100,
+    feeAdjustedEdge: netEdge * 100,
     takerFeeRate,
     fullKelly,
-    feeAdjustedFullKelly,
+    feeAdjustedFullKelly: fullKelly, // kept for callers; costs are now in fullKelly
     fractionalKelly,
     fractionMultiplier,
     robustness,
     odds: b,
     growthRate,
-    expectedValue: edge,
+    expectedValue: netEdge,
+    evPerShare: p - cost,
   };
 }
+
+/**
+ * Kelly at the price you'd actually fill at. The fill depends on the order
+ * size and the size on the fill, so iterate: top-of-book cost → Kelly size →
+ * cost of that size → … (converges in a few steps: cost rises with size).
+ *
+ * @param {object} opts — calculateKelly's inputs plus allInCost's:
+ *   { estProb, side, marketPrice, feeParams, bankroll, maxFraction, book, bookSide, spread }
+ * @returns {{ kelly: object, quote: object }}
+ */
+export function calculateKellyAtExecution({
+  estProb, side, marketPrice, feeParams = null, bankroll, maxFraction,
+  book = null, bookSide = 'YES', spread = null, iterations = 4,
+}) {
+  const quoteFor = (dollars) => allInCost({ side, dollars, price: marketPrice, spread, book, bookSide, feeParams });
+  let quote = quoteFor(1);
+  let kelly = calculateKelly(estProb, marketPrice, side, feeParams, { cost: quote.cost, maxFraction });
+  for (let i = 0; i < iterations; i++) {
+    const dollars = kelly.valid && !kelly.noEdge ? kelly.fractionalKelly * bankroll : 0;
+    if (!(dollars > 1)) break;
+    const next = quoteFor(dollars);
+    if (Math.abs(next.cost - quote.cost) < 1e-7) break;
+    quote = next;
+    kelly = calculateKelly(estProb, marketPrice, side, feeParams, { cost: quote.cost, maxFraction });
+  }
+  return { kelly, quote };
+}
+
+// The strongest robustness tier's fraction (half Kelly) — the most any edge
+// is sized at, so a λ setting above it has no effect
+export const MAX_KELLY_FRACTION = 0.5;
 
 /**
  * Assess robustness of the edge and determine Kelly fraction.
@@ -161,7 +204,7 @@ function assessRobustness(gapPp, estProb) {
 
   if (gapPp >= 10 && distFromCenter > 0.2) {
     level = 'ROBUST';
-    kellyFraction = 0.5;  // half-Kelly
+    kellyFraction = MAX_KELLY_FRACTION;  // half-Kelly
     label = 'Robust edge - half Kelly';
   } else if (gapPp >= 5) {
     level = 'SOLID';
@@ -266,9 +309,11 @@ export function calculateMultiOutcomeKelly(outcomes, defaultFeeParams = null) {
  * @param {string} side - 'YES' or 'NO'
  * @param {Object} settings - Kelly settings
  * @param {Object} feeParams - market.feeParams, passed to calculateKelly
+ * @param {Object} [kellyOpts] - { cost, maxFraction }, passed to calculateKelly
+ *   (the cost is the center size's; rows at other sizes would fill slightly differently)
  * @returns {Array} Rows of sensitivity data
  */
-export function calculateSensitivityTable(marketPrice, centerProb, side = 'YES', settings = null, feeParams = null) {
+export function calculateSensitivityTable(marketPrice, centerProb, side = 'YES', settings = null, feeParams = null, kellyOpts = {}) {
   const s = settings || getKellySettings();
   const rows = [];
 
@@ -282,7 +327,7 @@ export function calculateSensitivityTable(marketPrice, centerProb, side = 'YES',
   }
 
   for (const prob of steps) {
-    const kelly = calculateKelly(prob, marketPrice, side, feeParams);
+    const kelly = calculateKelly(prob, marketPrice, side, feeParams, kellyOpts);
     const dollars = kelly.valid && !kelly.noEdge
       ? Math.max(0, kelly.fractionalKelly * s.bankroll)
       : 0;
@@ -300,7 +345,7 @@ export function calculateSensitivityTable(marketPrice, centerProb, side = 'YES',
       cappedDollars,
       capped: cappedDollars < dollars,
       belowMinimum: cappedDollars > 0 && cappedDollars < s.minPracticalBet,
-      shares: marketPrice > 0 ? cappedDollars / marketPrice : 0,
+      shares: kelly.cost > 0 ? cappedDollars / kelly.cost : 0,
     });
   }
 
@@ -313,14 +358,17 @@ export function calculateSensitivityTable(marketPrice, centerProb, side = 'YES',
  * Calculate outcomes under different scenarios.
  *
  * @param {number} betSize - Dollar amount of the bet
- * @param {number} marketPrice - Price paid per share of the SELECTED side
- *   (yesPrice for YES, noPrice for NO — same convention as calculateKelly)
+ * @param {number} marketPrice - Price paid per share of the SELECTED side —
+ *   pass the all-in cost (fill price + fee) so profit and EV are net of costs
  * @param {string} side - 'YES' or 'NO'
  * @param {number} estProb - Estimated probability of YES (the event)
  * @param {Object} settings - Kelly settings
+ * @param {number} [markPrice] - the side's market price, which the "price moves"
+ *   scenarios move from (default: marketPrice). The cost paid includes fee and
+ *   slippage, so marking from it would overstate paper P&L by that much.
  * @returns {Object} Scenario analysis
  */
-export function calculateScenarios(betSize, marketPrice, side, estProb, settings = null) {
+export function calculateScenarios(betSize, marketPrice, side, estProb, settings = null, markPrice = marketPrice) {
   const s = settings || getKellySettings();
 
   // Shares purchased at the selected side's own price.
@@ -342,6 +390,7 @@ export function calculateScenarios(betSize, marketPrice, side, estProb, settings
   const winProb = side === 'YES' ? estProb : (1 - estProb);
   const ev = winProb * winProfit - (1 - winProb) * lossAmount;
   const evPct = betSize > 0 ? (ev / betSize) * 100 : 0;
+  const evPerShare = winProb - entryPrice; // p − c̄
 
   // Impact on bankroll
   const bankrollAfterWin = s.bankroll - betSize + winPayout;
@@ -355,7 +404,7 @@ export function calculateScenarios(betSize, marketPrice, side, estProb, settings
     { label: 'Price -5c', priceMove: -0.05 },
     { label: 'Price -10c', priceMove: -0.10 },
   ].map((s) => {
-    const newPrice = Math.max(0.01, Math.min(0.99, entryPrice + s.priceMove));
+    const newPrice = Math.max(0.01, Math.min(0.99, markPrice + s.priceMove));
     const paperValue = shares * newPrice;
     const paperPnl = paperValue - betSize;
     return {
@@ -376,6 +425,7 @@ export function calculateScenarios(betSize, marketPrice, side, estProb, settings
     loss: { amount: lossAmount, prob: 1 - winProb },
     ev,
     evPct,
+    evPerShare,
     bankrollAfterWin,
     bankrollAfterLoss,
     expectedBankroll,
@@ -637,7 +687,7 @@ export function addReEvaluation(entryId, reEval) {
   } catch { return false; }
 }
 
-export function resolveJournalEntry(entryId, outcome) {
+export function resolveJournalEntry(entryId, outcome, { auto = false } = {}) {
   try {
     const entries = getJournalEntries();
     const entry = entries.find((e) => e.id === entryId);
@@ -645,6 +695,19 @@ export function resolveJournalEntry(entryId, outcome) {
     entry.resolved = true;
     entry.outcome = outcome; // 'WIN', 'LOSS', or 'SCRATCH'
     entry.resolvedAt = new Date().toISOString();
+    if (auto) entry.autoResolved = true; // from the market's settlement, not by hand
+    localStorage.setItem(JOURNAL_KEY, JSON.stringify(entries));
+    return true;
+  } catch { return false; }
+}
+
+/** Merge fields into an entry (auto-resolution check stamps, markouts). */
+export function updateJournalEntry(entryId, patch) {
+  try {
+    const entries = getJournalEntries();
+    const entry = entries.find((e) => e.id === entryId);
+    if (!entry) return false;
+    Object.assign(entry, patch);
     localStorage.setItem(JOURNAL_KEY, JSON.stringify(entries));
     return true;
   } catch { return false; }
@@ -681,33 +744,65 @@ export function addCalibrationPoint(point) {
   } catch { return false; }
 }
 
-/**
- * Compute calibration metrics: bucket predictions by confidence level
- * and see how often they actually came true.
- */
-export function computeCalibrationMetrics() {
-  const journal = getJournalEntries().filter((e) => e.resolved && e.outcome !== 'SCRATCH');
-  if (journal.length === 0) return { buckets: [], totalResolved: 0 };
+// Fewer resolved entries than this and the scores are mostly noise
+export const MIN_CALIBRATION_SAMPLE = 30;
+const LOG_LOSS_CLIP = 0.01;
 
-  // Bucket by predicted probability (in 10% bands)
+/**
+ * Whether the event (YES) happened, from a resolved entry: 1, 0, or null
+ * (unresolved / scratched). `estProb` is P(YES) whichever side was bet, so it
+ * must be scored against YES — not against "the chosen side won", which
+ * mis-scored every NO bet (a winning NO at P(YES)=0.2 scored 0.64, not 0.04).
+ */
+export function yesOutcome(entry) {
+  if (!entry?.resolved || (entry.outcome !== 'WIN' && entry.outcome !== 'LOSS')) return null;
+  return (entry.side === 'YES') === (entry.outcome === 'WIN') ? 1 : 0;
+}
+
+/** The market's P(YES) when the entry was recorded (marketPrice is the chosen side's price). */
+export function marketYesProb(entry) {
+  if (!Number.isFinite(entry?.marketPrice)) return null;
+  return entry.side === 'NO' ? 1 - entry.marketPrice : entry.marketPrice;
+}
+
+const brier = (p, y) => (p - y) ** 2;
+function logLoss(p, y) {
+  const q = Math.min(1 - LOG_LOSS_CLIP, Math.max(LOG_LOSS_CLIP, p));
+  return -(y * Math.log(q) + (1 - y) * Math.log(1 - q));
+}
+
+/**
+ * Compute calibration metrics: bucket predictions of P(YES) and see how often
+ * YES actually happened; score them (Brier, log loss) and benchmark them
+ * against the market price at the time of the bet.
+ *
+ * @param {object[]} [entries] — journal entries (default: the stored journal)
+ */
+export function computeCalibrationMetrics(entries = getJournalEntries()) {
+  const scored = entries
+    .map((e) => ({ e, y: yesOutcome(e) }))
+    .filter(({ e, y }) => y != null && Number.isFinite(e.estProb));
+  if (scored.length === 0) return { buckets: [], totalResolved: 0 };
+
+  // Bucket by predicted P(YES) (in 10% bands)
   const buckets = [];
   for (let lower = 0; lower < 100; lower += 10) {
     const upper = lower + 10;
-    const inBucket = journal.filter((e) => {
-      const pct = (e.estProb || 0) * 100;
-      return pct >= lower && pct < upper;
+    const inBucket = scored.filter(({ e }) => {
+      const pct = e.estProb * 100;
+      return pct >= lower && (pct < upper || (upper === 100 && pct <= 100));
     });
     if (inBucket.length === 0) continue;
 
-    const wins = inBucket.filter((e) => e.outcome === 'WIN').length;
-    const actualRate = wins / inBucket.length;
+    const yesCount = inBucket.filter(({ y }) => y === 1).length;
+    const actualRate = yesCount / inBucket.length;
     const midpoint = (lower + upper) / 2 / 100;
 
     buckets.push({
       range: `${lower}-${upper}%`,
       midpoint,
       count: inBucket.length,
-      wins,
+      wins: yesCount, // YES outcomes in the bucket
       actualRate,
       calibrationError: actualRate - midpoint,
       overconfident: actualRate < midpoint,
@@ -715,16 +810,27 @@ export function computeCalibrationMetrics() {
   }
 
   // Overall metrics
-  const totalResolved = journal.length;
-  const totalWins = journal.filter((e) => e.outcome === 'WIN').length;
+  const totalResolved = scored.length;
+  const totalWins = scored.filter(({ e }) => e.outcome === 'WIN').length;
   const overallWinRate = totalWins / totalResolved;
 
-  // Brier score
-  const brierScore = journal.reduce((sum, e) => {
-    const predicted = e.estProb || 0.5;
-    const actual = e.outcome === 'WIN' ? 1 : 0;
-    return sum + Math.pow(predicted - actual, 2);
-  }, 0) / totalResolved;
+  const mean = (fn) => scored.reduce((sum, s) => sum + fn(s), 0) / totalResolved;
+  const brierScore = mean(({ e, y }) => brier(e.estProb, y));
+  const logLossScore = mean(({ e, y }) => logLoss(e.estProb, y));
+
+  // Benchmark: the market's own P(YES) at entry, on the entries that have it
+  const benchmarked = scored.filter(({ e }) => marketYesProb(e) != null);
+  let marketBrier = null;
+  let marketLogLoss = null;
+  let skillScore = null;
+  if (benchmarked.length > 0) {
+    const n = benchmarked.length;
+    const youBrier = benchmarked.reduce((s, { e, y }) => s + brier(e.estProb, y), 0) / n;
+    marketBrier = benchmarked.reduce((s, { e, y }) => s + brier(marketYesProb(e), y), 0) / n;
+    marketLogLoss = benchmarked.reduce((s, { e, y }) => s + logLoss(marketYesProb(e), y), 0) / n;
+    // Brier skill score: > 0 = better than the price you bet against
+    skillScore = marketBrier > 0 ? 1 - youBrier / marketBrier : null;
+  }
 
   return {
     buckets,
@@ -732,5 +838,152 @@ export function computeCalibrationMetrics() {
     totalWins,
     overallWinRate,
     brierScore,
+    logLoss: logLossScore,
+    marketBrier,
+    marketLogLoss,
+    skillScore,
+    benchmarkCount: benchmarked.length,
+    smallSample: totalResolved < MIN_CALIBRATION_SAMPLE,
   };
+}
+
+// ─── Markouts (line value) ──────────────────────────────────────────
+//
+// How far the price of the side you bet moved in your favour 1 and 7 days
+// after you recorded the decision, in cents: price(t + h) − entry price.
+// Unlike P&L this needs no resolution, so it gives skill feedback in days.
+// (A true "closing line" is ill-defined here: prices run to 0/1 at
+// settlement, and old price history gets pruned — so values are stored once
+// found.) A horizon at/after the market's end, or one where the price has
+// already settled, is not applicable (stored as null).
+
+export const MARKOUT_HORIZONS = [
+  { key: 'markout1d', days: 1 },
+  { key: 'markout7d', days: 7 },
+];
+const MARKOUT_WINDOW_S = 6 * 3600; // look back this far from t + h for the last price
+const MARKOUT_GIVE_UP_DAYS = 30; // no history this long after t + h → treat as unavailable
+const MARKOUT_MAX_FETCHES = 20; // per run
+const DAY_MS = 86_400_000;
+
+function sideTokenId(entry) {
+  return entry.side === 'NO' ? entry.noTokenId : entry.yesTokenId;
+}
+
+/** The markouts an entry is due for: horizon passed, not yet stored. */
+function dueMarkouts(entry, now) {
+  const created = Date.parse(entry.createdAt);
+  if (!Number.isFinite(created) || !sideTokenId(entry) || !Number.isFinite(entry.marketPrice)) return [];
+  return MARKOUT_HORIZONS.filter((h) => entry[h.key] === undefined && created + h.days * DAY_MS <= now);
+}
+
+/**
+ * Fill in due markouts from price history.
+ *
+ * @param {function} fetchHistory — async (tokenId, startTs, endTs) => { history: [{ t, p }] } | null
+ * @returns {Promise<number>} markouts stored (including not-applicable ones)
+ */
+export async function updateMarkouts(fetchHistory, { now = Date.now(), delayMs = AUTO_RESOLVE_DELAY_MS, signal } = {}) {
+  let stored = 0;
+  let fetches = 0;
+  for (const entry of getJournalEntries()) {
+    for (const h of dueMarkouts(entry, now)) {
+      if (signal?.aborted || fetches >= MARKOUT_MAX_FETCHES) return stored;
+      const at = Date.parse(entry.createdAt) + h.days * DAY_MS;
+      const end = entry.endDate ? Date.parse(entry.endDate) : NaN;
+      if (Number.isFinite(end) && at >= end) {
+        if (updateJournalEntry(entry.id, { [h.key]: null })) stored++;
+        continue;
+      }
+      if (fetches > 0 && delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
+      fetches++;
+      const endTs = Math.floor(at / 1000);
+      let res = null;
+      try { res = await fetchHistory(sideTokenId(entry), endTs - MARKOUT_WINDOW_S, endTs); } catch { res = null; }
+      const points = (res?.history ?? []).filter((pt) => pt.t <= endTs);
+      const last = points.length > 0 ? points[points.length - 1].p : null;
+      let value;
+      if (last != null) {
+        // Already settled (0/1) → the move is the resolution, not line movement
+        value = last >= SETTLED_HIGH || last <= SETTLED_LOW ? null : (last - entry.marketPrice) * 100;
+      } else if (now - at > MARKOUT_GIVE_UP_DAYS * DAY_MS) {
+        value = null; // history pruned or never recorded
+      } else {
+        continue; // nothing yet — retry next time
+      }
+      if (updateJournalEntry(entry.id, { [h.key]: value })) stored++;
+    }
+  }
+  return stored;
+}
+
+/** Average markout per horizon, in cents: { markout1d: { avg, n }, markout7d: { avg, n } }. */
+export function summarizeMarkouts(entries = getJournalEntries()) {
+  const out = {};
+  for (const h of MARKOUT_HORIZONS) {
+    const vals = entries.map((e) => e[h.key]).filter((v) => Number.isFinite(v));
+    out[h.key] = { avg: vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null, n: vals.length };
+  }
+  return out;
+}
+
+// ─── Auto-resolution ────────────────────────────────────────────────
+
+const SETTLED_HIGH = 0.99;
+const SETTLED_LOW = 0.01;
+const AUTO_RESOLVE_DELAY_MS = 250;
+const AUTO_RESOLVE_MAX = 20; // lookups per run
+const AUTO_RESOLVE_RECHECK_MS = 60 * 60 * 1000; // an unsettled market is looked up at most hourly
+
+/**
+ * The journal outcome a settled market implies for an entry, from a raw
+ * Gamma market (as /markets/{id} returns it): 'WIN' / 'LOSS' for the entry's
+ * side, 'SCRATCH' for a 50/50 (void) settlement, null while unsettled.
+ */
+export function outcomeFromSettledMarket(entry, rawMarket) {
+  if (!rawMarket || rawMarket.closed !== true) return null;
+  let prices = rawMarket.outcomePrices;
+  if (typeof prices === 'string') {
+    try { prices = JSON.parse(prices); } catch { return null; }
+  }
+  const yes = parseFloat(prices?.[0]);
+  const no = parseFloat(prices?.[1]);
+  if (!Number.isFinite(yes) || !Number.isFinite(no)) return null;
+  let yesWon;
+  if (yes >= SETTLED_HIGH && no <= SETTLED_LOW) yesWon = true;
+  else if (no >= SETTLED_HIGH && yes <= SETTLED_LOW) yesWon = false;
+  else if (Math.abs(yes - 0.5) < 0.01 && Math.abs(no - 0.5) < 0.01) return 'SCRATCH';
+  else return null; // closed but not settled yet
+  return (entry.side === 'YES') === yesWon ? 'WIN' : 'LOSS';
+}
+
+/** Unresolved entries that may have settled: past their end date, or with none recorded. */
+function dueForResolution(entry, now) {
+  if (entry.resolved || !entry.marketId) return false;
+  if (entry.resolutionCheckedAt && now - entry.resolutionCheckedAt < AUTO_RESOLVE_RECHECK_MS) return false;
+  if (!entry.endDate) return true;
+  const end = Date.parse(entry.endDate);
+  return !Number.isFinite(end) || end <= now;
+}
+
+/**
+ * Look up due, unresolved entries and resolve those whose market has settled.
+ * Sequential and throttled (it runs when the journal is opened).
+ *
+ * @param {function} fetchMarket — async (marketId) => raw Gamma market | null
+ * @returns {Promise<number>} entries resolved
+ */
+export async function autoResolveJournal(fetchMarket, { now = Date.now(), delayMs = AUTO_RESOLVE_DELAY_MS, signal } = {}) {
+  const due = getJournalEntries().filter((e) => dueForResolution(e, now)).slice(0, AUTO_RESOLVE_MAX);
+  let resolved = 0;
+  for (let i = 0; i < due.length; i++) {
+    if (signal?.aborted) break;
+    if (i > 0 && delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
+    let raw = null;
+    try { raw = await fetchMarket(due[i].marketId); } catch { raw = null; }
+    const outcome = outcomeFromSettledMarket(due[i], raw);
+    if (outcome && resolveJournalEntry(due[i].id, outcome, { auto: true })) resolved++;
+    else if (raw) updateJournalEntry(due[i].id, { resolutionCheckedAt: now }); // a failed lookup is retried next time
+  }
+  return resolved;
 }

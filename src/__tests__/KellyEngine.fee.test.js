@@ -34,8 +34,10 @@ describe('calculateKelly with fee options', () => {
     expect(withFee.takerFeeRate).toBeCloseTo(0.035, 6);
     // feeAdjustedEdge should be less than raw edge (both in pp)
     expect(withFee.feeAdjustedEdge).toBeLessThan(noFee.edge);
-    // Difference in pp should be ~3.5pp (takerFeeRate * 100)
-    expect(noFee.edge - withFee.feeAdjustedEdge).toBeCloseTo(3.5, 1);
+    // Exact: all-in cost 0.50 + 0.0175 fee → EV per dollar 0.60/0.5175 − 1
+    // (the old "edge − fee rate" approximation gave a 3.5pp difference)
+    expect(withFee.cost).toBeCloseTo(0.5175, 10);
+    expect(withFee.feeAdjustedEdge).toBeCloseTo((0.60 / 0.5175 - 1) * 100, 8);
   });
 
   it('uses a live feeSchedule over the category table', () => {
