@@ -145,6 +145,24 @@ describe('usePortfolio — positions follow live price ticks', () => {
     expect(result.current.screenTrade(loaded('other', 0.5))).not.toBe(first);
   });
 
+  it("screenTrade re-screens when the screened market's own price moves (exclusive-outcome correlation is price-implied)", () => {
+    // Held: YES on one outcome of an exclusive event; screened: another outcome
+    const outcome = (id, yesPrice) => ({ ...loaded(id, yesPrice), slug: 'race', negRisk: true, question: `Will ${id} win?` });
+    localStorage.setItem(MANUAL_KEY, JSON.stringify([{ ...manual('alice', 0.6), market: outcome('alice', 0.6) }]));
+    const { result } = renderHook(() => usePortfolio([outcome('alice', 0.6), outcome('bob', 0.4)]));
+
+    const at40 = result.current.screenTrade(outcome('bob', 0.4));
+    expect(result.current.screenTrade(outcome('bob', 0.4))).toBe(at40); // same price → cached
+    expect(at40.sideRisk.YES.hedges[0].correlation).toBeCloseTo(-1); // two-way race
+
+    // Bob's price fell to 5¢; the portfolio didn't change. r = −√(0.6·0.05 / (0.4·0.95)) ≈ −0.28:
+    // too weak to be a hedge any more, and the NO side's correlation is +0.28
+    const at5 = result.current.screenTrade(outcome('bob', 0.05));
+    expect(at5).not.toBe(at40);
+    expect(at5.sideRisk.YES.hedges).toHaveLength(0);
+    expect(at5.sideRisk.NO.correlation).toBeCloseTo(0.281, 2);
+  });
+
   it('screenTrade does not cache markets without an ID under a shared key', () => {
     localStorage.setItem(MANUAL_KEY, JSON.stringify([manual('live', 0.3)]));
     const { result } = renderHook(() => usePortfolio([loaded('live', 0.6)]));
