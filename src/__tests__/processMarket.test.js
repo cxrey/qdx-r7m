@@ -220,13 +220,54 @@ describe('processMarket', () => {
     expect(m.baseRate).toBeNull();
   });
 
+  describe('trading asset IDs by protocol version (Polymarket Protocol V2)', () => {
+    const POSITION_IDS = ['811235123633258705301780890373429000680764202292718869287415774592351862784', '811235123633258705301780890373429000680764202292718869287415774592351862785'];
+
+    it('"v1" markets trade by clobTokenIds, even when positionIds are already present (live Oct 2026)', () => {
+      const m = processMarket(makeRawMarket({ version: 'v1', positionIds: POSITION_IDS }));
+      expect(m.clobTokenIds).toEqual(['tok-a', 'tok-b']);
+      expect(m.version).toBe('v1');
+    });
+
+    it('"v2" markets trade by positionIds', () => {
+      const m = processMarket(makeRawMarket({ version: 'v2', positionIds: POSITION_IDS }));
+      expect(m.clobTokenIds).toEqual(POSITION_IDS);
+      expect(m._engineFailures).not.toContain('clobTokenIds');
+    });
+
+    it('a missing version is treated as v1 (older payloads, direct lookups)', () => {
+      const m = processMarket(makeRawMarket());
+      expect(m.clobTokenIds).toEqual(['tok-a', 'tok-b']);
+      expect(m.version).toBe('v1');
+    });
+
+    it('an unsupported version gets no IDs (no book/WS data) rather than possibly wrong ones', () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const m = processMarket(makeRawMarket({ version: 'v3', positionIds: POSITION_IDS }));
+      expect(m.clobTokenIds).toEqual([]);
+      expect(m._engineFailures).toContain('clobTokenIds');
+    });
+
+    it('a v2 market without positionIds has no IDs, without counting as malformed', () => {
+      const m = processMarket(makeRawMarket({ version: 'v2', clobTokenIds: undefined }));
+      expect(m.clobTokenIds).toEqual([]);
+      expect(m._engineFailures).not.toContain('clobTokenIds');
+    });
+
+    it('malformed IDs are flagged', () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      expect(processMarket(makeRawMarket({ clobTokenIds: 'not json' }))._engineFailures).toContain('clobTokenIds');
+      expect(processMarket(makeRawMarket({ version: 'v2', positionIds: '{"a":1}' }))._engineFailures).toContain('clobTokenIds');
+    });
+  });
+
   it('includes all expected fields', () => {
     const m = processMarket(makeRawMarket());
     const expectedKeys = [
       'id', 'question', 'slug', 'description', 'yesPrice', 'noPrice',
       'volume', 'volume24hr', 'daysLeft', 'endDate', 'category', 'edgeScore',
       'spread', 'flb', 'theta', 'resolutionAnalysis', 'volumeEfficiency',
-      'baseRate', 'conjunction', 'conditionId', 'clobTokenIds', 'active',
+      'baseRate', 'conjunction', 'conditionId', 'clobTokenIds', 'version', 'active',
       'closed', 'gammaBestBid', 'gammaBestAsk', 'gammaSpread',
       'oneDayPriceChange', 'lastTradePrice',
       'liquidityClob', 'liquidityAmm', 'competitive', 'negRisk',

@@ -5,6 +5,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 vi.mock('../fetchUtils', () => ({
   withTimeout: vi.fn((callerSignal) => callerSignal || new AbortController().signal),
   TIMEOUT_GAMMA_PAGE: 10000,
+  TIMEOUT_DATA_API: 8000, // price history goes through the Data API client
 }));
 
 // Use real truncateSlugNumerics — it's a pure function with no dependencies
@@ -85,30 +86,62 @@ describe('fetchOrderBook', () => {
 
 // ── fetchPriceHistory ──────────────────────────────────────────────
 
-describe('fetchPriceHistory', () => {
-  it('uses interval param when no start/end timestamps', async () => {
-    mockFetch.mockResolvedValue(new Response(JSON.stringify({ history: [] }), { status: 200 }));
+describe('fetchPriceHistory (Data API /v2/prices-history since 2026-09-04)', () => {
+  const v2 = (rows, nextCursor = null) => new Response(JSON.stringify({ data: rows, pagination: { has_more: nextCursor != null, next_cursor: nextCursor } }), { status: 200 });
+  const q = (call = 0) => new URL(mockFetch.mock.calls[call][0], 'http://localhost');
+
+  it('calls the Data API route with token_id and the interval (not the CLOB route or `market`)', async () => {
+    mockFetch.mockResolvedValue(v2([]));
     await fetchPriceHistory('tok-1', '1d', null, null, null);
-    const url = mockFetch.mock.calls[0][0];
-    expect(url).toContain('market=tok-1');
-    expect(url).toContain('interval=1d');
-    expect(url).not.toContain('startTs');
+    const url = q();
+    expect(url.pathname).toBe('/data-api/v2/prices-history');
+    expect(url.searchParams.get('token_id')).toBe('tok-1');
+    expect(url.searchParams.get('interval')).toBe('1d');
+    expect(url.searchParams.has('market')).toBe(false);
+    expect(url.searchParams.has('startTs')).toBe(false);
   });
 
-  it('uses startTs and endTs when provided', async () => {
-    mockFetch.mockResolvedValue(new Response(JSON.stringify({ history: [] }), { status: 200 }));
-    await fetchPriceHistory('tok-1', '1d', null, 1000, 2000);
-    const url = mockFetch.mock.calls[0][0];
-    expect(url).toContain('startTs=1000');
-    expect(url).toContain('endTs=2000');
-    expect(url).not.toContain('interval=');
-  });
-
-  it('appends fidelity when provided', async () => {
-    mockFetch.mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
+  it('maps fidelity (minutes) to bucket_seconds, clamped to 60–86,400', async () => {
+    mockFetch.mockResolvedValue(v2([]));
     await fetchPriceHistory('tok-1', '1d', 60, null, null);
-    const url = mockFetch.mock.calls[0][0];
-    expect(url).toContain('fidelity=60');
+    await fetchPriceHistory('tok-1', 'max', 4320, null, null);
+    expect(q(0).searchParams.get('bucket_seconds')).toBe('3600');
+    expect(q(1).searchParams.get('bucket_seconds')).toBe('86400');
+    expect(q(1).searchParams.get('interval')).toBe('all'); // 'max' → 'all'
+    expect(q(0).searchParams.has('fidelity')).toBe(false);
+  });
+
+  it('sends start/end for spans of up to 15 days', async () => {
+    mockFetch.mockResolvedValue(v2([]));
+    await fetchPriceHistory('tok-1', null, null, 1000, 1000 + 15 * 86400);
+    expect(q().searchParams.get('start')).toBe('1000');
+    expect(q().searchParams.get('end')).toBe(String(1000 + 15 * 86400));
+    expect(q().searchParams.has('interval')).toBe(false);
+  });
+
+  it('longer spans fetch interval=all and are trimmed to the range', async () => {
+    const start = 2_000_000;
+    const end = start + 90 * 86400;
+    mockFetch.mockResolvedValue(v2([
+      { timestamp: start - 86400, price: 0.1 }, // before the range
+      { timestamp: start + 86400, price: 0.2 },
+      { timestamp: end, price: 0.3 },
+      { timestamp: end + 86400, price: 0.4 }, // after the range
+    ]));
+    const result = await fetchPriceHistory('tok-1', null, 1440, start, end);
+    expect(q().searchParams.get('interval')).toBe('all');
+    expect(q().searchParams.has('start')).toBe(false);
+    expect(result.history).toEqual([{ t: start + 86400, p: 0.2 }, { t: end, p: 0.3 }]);
+  });
+
+  it('returns rows in the { history: [{ t, p }] } shape the chart reads, skipping malformed rows', async () => {
+    mockFetch.mockResolvedValue(v2([{ timestamp: 1, price: 0.5, resolution_seconds: 60 }, { timestamp: 2 }, null]));
+    expect(await fetchPriceHistory('tok-1', '1d')).toEqual({ history: [{ t: 1, p: 0.5 }] });
+  });
+
+  it('returns null on a 400 (e.g. a rejected parameter)', async () => {
+    mockFetch.mockResolvedValue(new Response(JSON.stringify({ error: "'start' to 'end' must span at most 15 days" }), { status: 400 }));
+    expect(await fetchPriceHistory('tok-1', '1d')).toBeNull();
   });
 
   it('throws on 429 with .status', async () => {
@@ -127,12 +160,6 @@ describe('fetchPriceHistory', () => {
     expect(result).toBeNull();
   });
 
-  it('returns parsed JSON on 200', async () => {
-    const data = { history: [{ t: 1, p: 0.5 }] };
-    mockFetch.mockResolvedValue(new Response(JSON.stringify(data), { status: 200 }));
-    const result = await fetchPriceHistory('tok-1', '1d');
-    expect(result).toEqual(data);
-  });
 });
 
 // ── fetchAllMarkets ────────────────────────────────────────────────
@@ -722,5 +749,20 @@ describe('fetchMarketByTokenId', () => {
     mockFetch.mockResolvedValue(new Response('Not Found', { status: 404 }));
     const result = await fetchMarketByTokenId('tok-456');
     expect(result).toBeNull();
+  });
+
+  it('falls back to position_ids (Protocol V2 position IDs) when no CTF token matches', async () => {
+    mockFetch
+      .mockResolvedValueOnce(new Response(JSON.stringify([]), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify([{ id: 'm-v2' }]), { status: 200 }));
+    const result = await fetchMarketByTokenId('pos-789');
+    expect(mockFetch.mock.calls[1][0]).toContain('position_ids=pos-789');
+    expect(result).toEqual({ markets: [{ id: 'm-v2' }], event: null });
+  });
+
+  it('does not try position_ids once clob_token_ids matched', async () => {
+    mockFetch.mockResolvedValue(new Response(JSON.stringify([{ id: 'm1' }]), { status: 200 }));
+    await fetchMarketByTokenId('tok-456');
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 });

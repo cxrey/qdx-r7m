@@ -24,13 +24,15 @@ const LazyFallback = <div className="text-gray-500 text-xs p-2">Loading...</div>
 const CYAN = '#00d4aa';
 const PINK = '#ff4d6a';
 
+// fidelity = bucket size in minutes. The Data API's price history caps
+// buckets at 1 day (1440), so the long views use daily points.
 const TIMEFRAMES = [
   { label: '1D', interval: '1d', fidelity: 60 },
   { label: '7D', interval: '1w', fidelity: 1440 },
   { label: '30D', interval: '1m', fidelity: 1440 },
-  { label: '90D', useTs: true, days: 90, fidelity: 4320 },
-  { label: '1Y', useTs: true, days: 365, fidelity: 4320 },
-  { label: 'Max', interval: 'max', fidelity: 4320 },
+  { label: '90D', useTs: true, days: 90, fidelity: 1440 },
+  { label: '1Y', useTs: true, days: 365, fidelity: 1440 },
+  { label: 'Max', interval: 'max', fidelity: 1440 },
 ];
 
 // Cache helpers moved to useFetchWithCache hook

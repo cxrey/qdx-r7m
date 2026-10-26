@@ -4,6 +4,7 @@ import { throwIfRateLimited } from './clobErrorHandler';
 import { parseGammaMarkets, parseOrderBook } from './schemas';
 
 import { GAMMA_API, CLOB_API } from './apiConfig';
+import { dataApiGet } from './dataApi';
 import { CATALOG_MIN_VOLUME } from './engineConfig';
 
 const PAGE_SIZE = 100;
@@ -36,7 +37,6 @@ const VOLUME_BANDS = [
 // Prevents hung fetches from blocking a band's cursor chain indefinitely.
 // TIMEOUT_GAMMA_PAGE (10s) imported from fetchUtils.js
 const TIMEOUT_ORDER_BOOK = 5_000;    // 5s per order book request
-const TIMEOUT_PRICE_HISTORY = 8_000; // 8s per price history request
 const TIMEOUT_LOOKUP = 8_000;        // 8s per direct lookup request
 
 /**
@@ -196,19 +196,52 @@ export async function fetchOrderBook(tokenId, signal) {
   }
 }
 
+// Price history moved off the CLOB host to the Data API on 2026-09-04
+// (GET /v2/prices-history — docs.polymarket.com/changelog/predictions). Its
+// rules differ from the old CLOB route: `token_id` (not `market`),
+// `bucket_seconds` of 60–86,400 (not `fidelity` in minutes), intervals
+// 1h/6h/1d/1w/1m/all, and start–end spans of at most 15 days — longer ranges
+// fetch interval=all and are trimmed here. Rows come back as
+// { timestamp, price } and are returned in the old CLOB shape,
+// { history: [{ t, p }] }, which the chart and theta card read.
+const PRICE_HISTORY_MAX_SPAN_S = 15 * 86_400;
+const PRICE_HISTORY_INTERVAL_ALIASES = { max: 'all' };
+
+/**
+ * @param {string} tokenId — the outcome's trading asset ID
+ * @param {string} [interval] — 1h, 6h, 1d, 1w, 1m, all (or max)
+ * @param {number} [fidelity] — bucket size in MINUTES (CLOB convention), clamped to the Data API's 1 min–1 day
+ * @param {number} [startTs] / [endTs] — unix seconds; used instead of interval when both are set
+ * @returns {Promise<{ history: { t: number, p: number }[] } | null>}
+ */
 export async function fetchPriceHistory(tokenId, interval, fidelity, startTs, endTs, signal) {
   try {
-    let url = `${CLOB_API}/prices-history?market=${tokenId}`;
+    const params = { token_id: tokenId };
+    if (fidelity) params.bucket_seconds = Math.min(86_400, Math.max(60, Math.round(fidelity * 60)));
+    let range = null; // trimmed client-side when the span is too long to request
     if (startTs && endTs) {
-      url += `&startTs=${startTs}&endTs=${endTs}`;
-    } else {
-      url += `&interval=${interval}`;
+      if (endTs - startTs <= PRICE_HISTORY_MAX_SPAN_S) {
+        params.start = startTs;
+        params.end = endTs;
+      } else {
+        params.interval = 'all';
+        range = [startTs, endTs];
+      }
+    } else if (interval) {
+      params.interval = PRICE_HISTORY_INTERVAL_ALIASES[interval] ?? interval;
     }
-    if (fidelity) url += `&fidelity=${fidelity}`;
-    const res = await fetch(url, { signal: withTimeout(signal, TIMEOUT_PRICE_HISTORY) });
-    throwIfRateLimited(res);
-    if (!res.ok) return null;
-    return await res.json();
+    const res = await dataApiGet('/v2/prices-history', params, { maxPages: 5, signal });
+    if (!res.ok) {
+      if (res.error) console.warn(`[fetchPriceHistory] /v2/prices-history ${res.status}: ${res.error}`);
+      return null;
+    }
+    const history = [];
+    for (const r of res.rows) {
+      if (!r || !Number.isFinite(r.timestamp) || !Number.isFinite(r.price)) continue;
+      if (range && (r.timestamp < range[0] || r.timestamp > range[1])) continue;
+      history.push({ t: r.timestamp, p: r.price });
+    }
+    return { history };
   } catch (e) {
     if (e?.status === 429 || e?.status === 403) throw e;
     if (e.name !== 'AbortError') console.warn('[fetchPriceHistory] Failed:', e.message);
@@ -319,18 +352,24 @@ export async function fetchMarketByConditionId(conditionId, signal) {
 }
 
 /**
- * Fetch a market by clob_token_ids.
+ * Fetch a market by an outcome's asset ID: a CTF token ID (clob_token_ids)
+ * or, for Protocol V2, a position ID (position_ids). Gamma ignores filter
+ * names it doesn't know and returns unrelated markets, so only these two
+ * verified names are used (2026-10-26: `positionIds` / `position_id` are
+ * ignored; `position_ids` filters).
  */
 export async function fetchMarketByTokenId(tokenId, signal) {
-  try {
-    const res = await fetch(`${GAMMA_API}/markets?clob_token_ids=${encodeURIComponent(tokenId)}`, { signal: withTimeout(signal, TIMEOUT_LOOKUP) });
-    if (!res.ok) return null;
-    const data = await res.json();
-    if (Array.isArray(data) && data.length > 0) return { markets: data, event: null };
-    return null;
-  } catch (e) {
-    if (e.name !== 'AbortError') console.warn('[fetchMarketByTokenId] Failed:', e.message);
-    return null;
+  for (const param of ['clob_token_ids', 'position_ids']) {
+    try {
+      const res = await fetch(`${GAMMA_API}/markets?${param}=${encodeURIComponent(tokenId)}`, { signal: withTimeout(signal, TIMEOUT_LOOKUP) });
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (Array.isArray(data) && data.length > 0) return { markets: data, event: null };
+    } catch (e) {
+      if (e.name === 'AbortError') return null;
+      console.warn(`[fetchMarketByTokenId] ${param} lookup failed:`, e.message);
+    }
   }
+  return null;
 }
 

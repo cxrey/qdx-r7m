@@ -311,13 +311,48 @@ describe('fee slug mapping sync', () => {
       expect(FEE_PARAM_SLUGS.has(feeSlug), `FEETYPE_TO_FEE_SLUG["${feeType}"] maps to "${feeSlug}" which is not in FEE_PARAM_SLUGS`).toBe(true);
     }
   });
+
+  it('covers every fee-charging feeType in the live catalog (2026-10-26)', () => {
+    const live = {
+      crypto_fees_v2: 'crypto', crypto_15_min: 'crypto',
+      sports_fees_v2: 'sports', sports_fees_v3: 'sports', sports_fees_nfl_cfb_oct26: 'sports',
+      general_fees: 'other', politics_fees: 'us-politics', weather_fees: 'weather', finance_prices_fees: 'business',
+    };
+    for (const [feeType, slug] of Object.entries(live)) expect(FEETYPE_TO_FEE_SLUG[feeType]).toBe(slug);
+    // zero_fees markets carry a 0-rate schedule; their category comes from tags
+    expect(FEETYPE_TO_FEE_SLUG.zero_fees).toBeUndefined();
+  });
+});
+
+describe('live feeSchedule shapes (full catalog, 2026-10-26)', () => {
+  const live = (feeSchedule) => resolveFeeParams({ gammaCategory: 'pop-culture', feesEnabled: true, feeSchedule });
+
+  it('zero_fees schedule (rate 0) is fee-free, overriding the category table', () => {
+    const p = live({ exponent: 1, rate: 0, takerOnly: true, rebateRate: 0 });
+    expect(computeFeePP(0.5, p)).toBe(0);
+  });
+
+  it('sports_fees_nfl_cfb_oct26 (0.03) wins over the 0.05 sports table rate', () => {
+    expect(computeFeePP(0.5, resolveFeeParams({ gammaCategory: 'sports', feesEnabled: true, feeSchedule: { exponent: 1, rate: 0.03, takerOnly: true, rebateRate: 0.15 } }))).toBeCloseTo(0.75, 6);
+  });
+
+  it('crypto_15_min (rate 0.25, exponent 2): 0.25 × 0.25² × 100 = 1.5625¢ at 50¢', () => {
+    expect(computeFeePP(0.5, live({ exponent: 2, rate: 0.25, takerOnly: true, rebateRate: 0.2 }))).toBeCloseTo(1.5625, 6);
+  });
+
+  it('docs worked examples: crypto 100 shares at 0.10 and 0.90 → $0.63 (symmetric)', () => {
+    const crypto = live({ exponent: 1, rate: 0.07, takerOnly: true, rebateRate: 0.2 });
+    expect(computeFeePP(0.1, crypto)).toBeCloseTo(0.63, 6);
+    expect(computeFeePP(0.9, crypto)).toBeCloseTo(0.63, 6);
+  });
 });
 
 describe('per-share fees at p=0.50 (regression guard vs docs fee table)', () => {
   // At p=0.50, p×(1−p) = 0.25. feePP = rate × 0.25 × 100.
-  // Values from docs.polymarket.com/trading/fees + live feeSchedule
-  // sample, both checked 2026-07-19. If FEE_PARAMS changes, these break.
+  // Values from the docs.polymarket.com/trading/fees category table, checked
+  // 2026-10-26. If FEE_PARAMS changes, these break.
   const cases = [
+    ['combos',             1.25,   '0.05 × 0.25 × 100'],
     // category,           feePP,  formula
     ['crypto',             1.75,   '0.07 × 0.25 × 100'],
     ['sports',             1.25,   '0.05 × 0.25 × 100'],
