@@ -12,6 +12,10 @@ import { computeFeePerShare } from './feeCalculator';
 import { MS_PER_DAY } from './engineConfig';
 
 const MIN_DAYS = 1; // annualizing a few hours' hold gives meaningless numbers
+// The table's yield is for favourites only. "Yield if it wins" means little
+// for a coin flip: a 50¢ market resolving tomorrow "yields" +100% in a day
+// (>999%/yr) half the time, and such markets would top every sort.
+export const YIELD_MIN_PRICE = 0.8;
 
 /**
  * @param {number} price — the side's price (0–1)
@@ -37,14 +41,16 @@ export function daysToResolution(market, now = Date.now()) {
 }
 
 /**
- * Yield of the market's favourite (higher-priced side) at its current price.
- * Computed on demand, so live price ticks are reflected.
+ * Yield of the market's favourite (higher-priced side) at its current price,
+ * when it is priced at YIELD_MIN_PRICE or more. Computed on demand, so live
+ * price ticks are reflected.
  */
 export function marketYield(market, now = Date.now()) {
   const { yesPrice, noPrice } = market ?? {};
   if (yesPrice == null && noPrice == null) return null;
   const side = (yesPrice ?? -1) >= (noPrice ?? -1) ? 'YES' : 'NO';
   const price = side === 'YES' ? yesPrice : noPrice;
+  if (!(price >= YIELD_MIN_PRICE)) return null;
   const y = annualizedYield(price, daysToResolution(market, now), market.feeParams ?? null);
   return y ? { ...y, side, price } : null;
 }

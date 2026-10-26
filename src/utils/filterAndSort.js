@@ -125,7 +125,7 @@ export function filterAndSort({ markets, filters, searchLower, lookupState, port
   let yields = null;
   if (filters.sortBy === 'annualizedYield') {
     const now = Date.now();
-    yields = new Map(result.map((m) => [m, marketYield(m, now)?.annualized ?? -1]));
+    yields = new Map(result.map((m) => [m, marketYield(m, now)?.annualized ?? null]));
   }
   result.sort((a, b) => {
     if (isLookupFoundInLoaded) {
@@ -154,7 +154,10 @@ export function filterAndSort({ markets, filters, searchLower, lookupState, port
       case 'conjunctionGap':
         av = Math.abs(a.conjunction?.gapPp ?? 0); bv = Math.abs(b.conjunction?.gapPp ?? 0); break;
       case 'annualizedYield':
-        av = yields.get(a); bv = yields.get(b); break;
+        av = yields.get(a); bv = yields.get(b);
+        // Markets without a yield (not a favourite, no end date) go last either way
+        if (av == null || bv == null) return (av == null) - (bv == null);
+        break;
       case 'walletImbalance':
         av = Math.abs(a._flowImbalance ?? 0); bv = Math.abs(b._flowImbalance ?? 0); break;
       case 'fee':

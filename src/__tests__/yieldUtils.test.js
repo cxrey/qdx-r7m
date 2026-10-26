@@ -44,6 +44,13 @@ describe('marketYield', () => {
     expect(y.days).toBeCloseTo(10.5, 10);
     expect(daysToResolution({ daysLeft: 11 }, NOW)).toBe(11); // fallback without an ISO date
   });
+
+  it('is only for favourites (≥ 80¢): a coin flip resolving tomorrow has none', () => {
+    const tomorrow = new Date(NOW + DAY).toISOString();
+    expect(marketYield({ yesPrice: 0.5, noPrice: 0.5, endDateIso: tomorrow }, NOW)).toBeNull();
+    expect(marketYield({ yesPrice: 0.79, noPrice: 0.21, endDateIso: tomorrow }, NOW)).toBeNull();
+    expect(marketYield({ yesPrice: 0.8, noPrice: 0.2, endDateIso: tomorrow }, NOW)).not.toBeNull();
+  });
 });
 
 describe('formatYield', () => {
@@ -63,16 +70,17 @@ describe('sorting by annualized yield', () => {
       makeProcessedMarket({ id: 'fast', yesPrice: 0.95, noPrice: 0.05, endDateIso: end(10) }),
       makeProcessedMarket({ id: 'none', yesPrice: 0.95, noPrice: 0.05, endDateIso: null, daysLeft: null }),
     ];
-    const out = filterAndSort({
+    const sort = (sortAsc) => filterAndSort({
       markets,
       filters: {
         volumeRange: [0, Infinity], yesPriceRange: [0, 100], noPriceRange: [0, 100], daysLeftRange: [0, 10_000],
-        categories: [], sortBy: 'annualizedYield', sortAsc: false,
+        categories: [], sortBy: 'annualizedYield', sortAsc,
       },
       searchLower: '',
       lookupState: { isLookupActive: false, fetchedMarkets: [], foundInLoadedId: null },
       portfolio: { hasPortfolio: false, isMarketHeld: () => false },
-    });
-    expect(out.map((m) => m.id)).toEqual(['fast', 'slow', 'none']);
+    }).map((m) => m.id);
+    expect(sort(false)).toEqual(['fast', 'slow', 'none']);
+    expect(sort(true)).toEqual(['slow', 'fast', 'none']);
   });
 });
