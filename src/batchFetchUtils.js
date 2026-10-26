@@ -1,5 +1,6 @@
 /**
- * Shared batch fetch utilities for background CLOB data fetching.
+ * Shared batch fetch utilities for background fetching: order books (CLOB)
+ * and trade flow (Data API, with its own rate-limit pause).
  *
  * Extracted from ResultsTable.jsx (TD-1) to eliminate test replica drift.
  * Both production (ResultsTable) and tests import from this module.
@@ -190,9 +191,9 @@ export async function runSpreadBatch(markets, opts = {}) {
  * @param {{ has: function, set: function }} opts.cache — flow cache adapter
  * @param {AbortSignal} [opts.signal]
  * @param {function} [opts.cancelled]
- * @param {function} [opts.acquireSlot]
- * @param {function} [opts.isRateLimited]
- * @param {function} [opts.onError]
+ * @param {function} [opts.isRateLimited] — default: the Data API pause
+ * @param {function} [opts.onError]       — default: stop on a Data API 429/403
+ *   (no CLOB slot is taken: opts.acquireSlot is ignored)
  * @param {number}   [opts.maxItems=10]
  * @returns {{ fetched: number }}
  */
@@ -236,9 +237,10 @@ export async function runFlowBatch(markets, opts = {}) {
  * @param {object} opts
  * @param {{ has: function, set: function }} opts.spreadCache
  * @param {{ has: function, set: function }} opts.flowCache
- * @param {function} [opts.acquireSlot]
- * @param {function} [opts.isRateLimited]
- * @param {function} [opts.onError]
+ * @param {function} [opts.acquireSlot]   — spread half only (CLOB slot)
+ * @param {function} [opts.isRateLimited] — spread half only (default: CLOB breaker)
+ * @param {function} [opts.isFlowRateLimited] — flow half (default: the Data API pause)
+ * @param {function} [opts.onError]       — spread half only (flow stops on a Data API 429/403)
  * @param {function} [opts.cancelled] — () => boolean
  * @returns {{ spreadFetched: number, flowFetched: number }}
  */
