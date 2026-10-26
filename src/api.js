@@ -235,6 +235,15 @@ export async function fetchPriceHistory(tokenId, interval, fidelity, startTs, en
       if (res.error) console.warn(`[fetchPriceHistory] /v2/prices-history ${res.status}: ${res.error}`);
       return null;
     }
+    // A cut-short history (page cap reached, or a later page failed) would be
+    // shown, cached and pushed to the table as if complete — with the newest
+    // points possibly missing. Treat it as a failure instead (not cached;
+    // retried on the next load). Pages hold 10,000 rows, so this means an
+    // actual error, not normal use.
+    if (res.hasMore || res.incomplete) {
+      console.warn('[fetchPriceHistory] incomplete history — not using it', res.incomplete ?? 'page cap reached');
+      return null;
+    }
     const history = [];
     for (const r of res.rows) {
       if (!r || !Number.isFinite(r.timestamp) || !Number.isFinite(r.price)) continue;
@@ -335,15 +344,33 @@ export async function fetchMarketBySlug(slug, signal) {
   return null;
 }
 
+/** Raw Gamma market's outcome IDs: CTF token IDs (JSON text) and V2 position IDs. */
+function rawOutcomeIds(m) {
+  const ids = [];
+  for (const v of [m.clobTokenIds, m.positionIds]) {
+    try {
+      const list = typeof v === 'string' ? JSON.parse(v) : v;
+      if (Array.isArray(list)) ids.push(...list.map(String));
+    } catch { /* malformed — no ids */ }
+  }
+  return ids;
+}
+
 /**
- * Fetch a market by condition_id.
+ * Fetch a market by condition ID. Gamma's filter is `condition_ids`; the
+ * old `condition_id` is silently ignored and returns 20 unrelated markets
+ * (verified 2026-10-26), so results are also checked to actually match.
  */
 export async function fetchMarketByConditionId(conditionId, signal) {
   try {
-    const res = await fetch(`${GAMMA_API}/markets?condition_id=${encodeURIComponent(conditionId)}`, { signal: withTimeout(signal, TIMEOUT_LOOKUP) });
+    const res = await fetch(`${GAMMA_API}/markets?condition_ids=${encodeURIComponent(conditionId)}`, { signal: withTimeout(signal, TIMEOUT_LOOKUP) });
     if (!res.ok) return null;
     const data = await res.json();
-    if (Array.isArray(data) && data.length > 0) return { markets: data, event: null };
+    const wanted = String(conditionId).toLowerCase();
+    const matches = Array.isArray(data)
+      ? data.filter((m) => String(m.conditionId || m.condition_id || '').toLowerCase() === wanted)
+      : [];
+    if (matches.length > 0) return { markets: matches, event: null };
     return null;
   } catch (e) {
     if (e.name !== 'AbortError') console.warn('[fetchMarketByConditionId] Failed:', e.message);
@@ -356,15 +383,18 @@ export async function fetchMarketByConditionId(conditionId, signal) {
  * or, for Protocol V2, a position ID (position_ids). Gamma ignores filter
  * names it doesn't know and returns unrelated markets, so only these two
  * verified names are used (2026-10-26: `positionIds` / `position_id` are
- * ignored; `position_ids` filters).
+ * ignored; `position_ids` filters) — and results are checked to actually
+ * hold the ID, in case a filter is ever ignored again.
  */
 export async function fetchMarketByTokenId(tokenId, signal) {
+  const wanted = String(tokenId);
   for (const param of ['clob_token_ids', 'position_ids']) {
     try {
       const res = await fetch(`${GAMMA_API}/markets?${param}=${encodeURIComponent(tokenId)}`, { signal: withTimeout(signal, TIMEOUT_LOOKUP) });
       if (!res.ok) continue;
       const data = await res.json();
-      if (Array.isArray(data) && data.length > 0) return { markets: data, event: null };
+      const matches = Array.isArray(data) ? data.filter((m) => rawOutcomeIds(m).includes(wanted)) : [];
+      if (matches.length > 0) return { markets: matches, event: null };
     } catch (e) {
       if (e.name === 'AbortError') return null;
       console.warn(`[fetchMarketByTokenId] ${param} lookup failed:`, e.message);

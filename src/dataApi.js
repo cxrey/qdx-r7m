@@ -18,6 +18,31 @@ import { DATA_API } from './apiConfig';
 import { withTimeout, TIMEOUT_DATA_API } from './fetchUtils';
 import { throwIfRateLimited } from './clobErrorHandler';
 
+// ── Data API rate limit ─────────────────────────────────────────
+// The Data API is a different host from the CLOB, with its own limits, so
+// it gets its own pause instead of tripping the CLOB breaker (which would
+// stop order books, cut CLOB concurrency and slow catalog refreshes for a
+// limit the CLOB never hit). Background batches check it before fetching.
+const DATA_API_PAUSE_429 = 60_000;
+const DATA_API_PAUSE_403 = 5 * 60_000;
+let dataApiPausedUntil = 0;
+
+/** True while a recent Data API 429/403 asks background fetches to wait. */
+export function isDataApiRateLimited() {
+  return Date.now() < dataApiPausedUntil;
+}
+
+function noteDataApiRateLimit(status) {
+  const pause = status === 403 ? DATA_API_PAUSE_403 : DATA_API_PAUSE_429;
+  dataApiPausedUntil = Math.max(dataApiPausedUntil, Date.now() + pause);
+  console.warn(`[DataAPI] ${status === 403 ? 'Forbidden' : 'Rate limited'} — background Data API fetches paused for ${pause / 1000}s`);
+}
+
+/** Clear the Data API pause (tests). */
+export function resetDataApiRateLimit() {
+  dataApiPausedUntil = 0;
+}
+
 /** proxy_wallet → proxyWallet, outcome_index → outcomeIndex */
 const toCamel = (key) => key.replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase());
 
@@ -90,6 +115,7 @@ export async function dataApiGet(route, params = {}, { maxPages = 1, stopWhen, s
       if (rows.length === 0 || signal?.aborted) throw err;
       return { ok: true, rows, hasMore: true, incomplete: { status: null, error: err.message } };
     }
+    if (res.status === 429 || res.status === 403) noteDataApiRateLimit(res.status);
     throwIfRateLimited(res);
     if (!res.ok) {
       let error = null;

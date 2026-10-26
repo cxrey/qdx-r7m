@@ -49,7 +49,9 @@ export async function fetchPositions(walletAddress) {
   // Entry price comes from each position's avgPrice, so no trade history fetch.
   try {
     const res = await dataApiGet('/v2/positions', { user: walletAddress }, { maxPages: MAX_POSITION_PAGES });
-    if (res.ok && res.rows.length > 0) positions = res.rows.map((r) => toV1Row(r, 'position'));
+    // ok with no rows = a wallet with no open positions: an empty portfolio,
+    // not a failure (it used to report "Could not fetch positions")
+    if (res.ok) positions = res.rows.map((r) => toV1Row(r, 'position'));
     if (!res.ok) console.warn(`[PortfolioEngine] /v2/positions ${res.status}${res.error ? `: ${res.error}` : ''}`);
     else if (res.incomplete) console.warn(`[PortfolioEngine] positions incomplete — a later page failed (${res.incomplete.status ?? 'network'}${res.incomplete.error ? `: ${res.incomplete.error}` : ''})`);
     else if (res.hasMore) console.warn(`[PortfolioEngine] positions truncated at ${MAX_POSITION_PAGES} pages`);

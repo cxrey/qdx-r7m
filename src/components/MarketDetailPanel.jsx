@@ -1,7 +1,7 @@
-import { useState, useEffect, useCallback, lazy, Suspense } from 'react';
+import { useState, useEffect, useCallback, useMemo, lazy, Suspense } from 'react';
 import { fetchOrderBook } from '../api';
 import {
-  TIMEFRAMES, DEFAULT_TIMEFRAME, fetchTimeframeHistory,
+  TIMEFRAMES, DEFAULT_TIMEFRAME, fetchTimeframeHistory, toYesHistory,
   priceCacheKey, bookCacheKey, PRICE_CACHE_TTL, BOOK_CACHE_TTL,
 } from '../detailPanelData';
 import { useFetchWithCache } from '../hooks/useFetchWithCache';
@@ -116,6 +116,10 @@ export default function MarketDetailPanel({ market, onBookData, onLivePriceUpdat
     const noPrice = 1 - yesPrice;
     onLivePriceUpdate(market.id, yesPrice, noPrice);
   }, [priceData, side, market.id, onLivePriceUpdate]);
+
+  // ThetaCard measures the history against the YES theta, so it always gets
+  // YES prices (with No selected, the NO history's complement)
+  const yesPriceHistory = useMemo(() => toYesHistory(priceData, side), [priceData, side]);
 
   // ↻ must fetch a new book: a plain load serves the cache (up to 30 s old,
   // possibly filled by the hover prefetch)
@@ -353,7 +357,7 @@ export default function MarketDetailPanel({ market, onBookData, onLivePriceUpdat
           <FLBCard flb={market.flb} yesPrice={market.yesPrice} noPrice={market.noPrice} />
 
           {/* Theta Time Decay */}
-          <ThetaCard theta={market.theta} market={market} priceHistory={priceData} />
+          <ThetaCard theta={market.theta} market={market} priceHistory={yesPriceHistory} />
 
           {/* Volume-Price Efficiency */}
           <VolumeEfficiencyCard market={market} bookData={bookData} />

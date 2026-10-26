@@ -39,10 +39,19 @@ export { cacheGet, cacheSet };
 export function useFetchWithCache({
   cacheKey, cacheTtl = 60000, fetcher, onSuccess, clobProtected = true,
 }) {
-  const [data, setData] = useState(() => cacheKey ? cacheGet(cacheKey) : null);
+  // Data is tied to the key it was fetched for. After the key changes (a
+  // Yes/No or timeframe switch) the previous key's data is never returned as
+  // the new key's: the new key's cache entry is shown at once if there is
+  // one, otherwise null until it loads. (Returning the old data meant a
+  // consumer saw the new key with the old side's prices for a moment.)
+  const [entry, setEntry] = useState(() => ({ key: cacheKey, data: cacheKey ? cacheGet(cacheKey) : null }));
+  const data = entry.key === cacheKey ? entry.data : (cacheKey ? cacheGet(cacheKey) : null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const mountedRef = useRef(true);
+  // Only the latest refetch may update state: a slow response for an earlier
+  // key (e.g. a 1Y history after the user switched to 7D) must not land on top.
+  const seqRef = useRef(0);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -50,14 +59,19 @@ export function useFetchWithCache({
   }, []);
 
   const refetch = useCallback(async (opts) => {
+    const seq = ++seqRef.current;
+    const key = cacheKey;
+    const isLatest = () => mountedRef.current && seq === seqRef.current;
+
     // Check cache first, unless forced. (`opts` may be a click event when
     // refetch is used directly as a handler — only an explicit force counts.)
     const force = opts?.force === true;
-    if (cacheKey && !force) {
-      const cached = cacheGet(cacheKey);
+    if (key && !force) {
+      const cached = cacheGet(key);
       if (cached) {
-        setData(cached);
+        setEntry({ key, data: cached });
         setError(null);
+        setLoading(false); // supersedes any request still in flight
         onSuccess?.(cached);
         return;
       }
@@ -66,6 +80,7 @@ export function useFetchWithCache({
     // Rate limit guard
     if (clobProtected && isClobRateLimited()) {
       setError('CLOB API rate limited — try again later');
+      setLoading(false);
       return;
     }
 
@@ -73,13 +88,16 @@ export function useFetchWithCache({
     setError(null);
     try {
       const result = await fetcher();
-      if (!mountedRef.current) return;
-      setData(result);
-      if (result && cacheKey) cacheSet(cacheKey, result, cacheTtl);
+      // A result is valid for the key it was fetched for, even if it's no longer current
+      if (result && key) cacheSet(key, result, cacheTtl);
+      if (!isLatest()) return;
+      setEntry({ key, data: result });
       onSuccess?.(result);
     } catch (err) {
-      if (!mountedRef.current) return;
-      if (clobProtected && handleClobError(err)) {
+      // An outdated request's rate limit is still real: record it either way
+      const clobLimited = clobProtected && handleClobError(err);
+      if (!isLatest()) return;
+      if (clobLimited) {
         setError(rateLimitMessage(err.status));
         return;
       }
@@ -89,7 +107,7 @@ export function useFetchWithCache({
       }
       setError(err?.message || 'Request failed');
     } finally {
-      if (mountedRef.current) setLoading(false);
+      if (isLatest()) setLoading(false);
     }
   }, [cacheKey, cacheTtl, fetcher, onSuccess, clobProtected]);
 

@@ -14,7 +14,8 @@ import { isClobRateLimited, triggerClobRateLimit } from '../clobRateLimit';
 import {
   SPREAD_FETCH_DELAY, FLOW_FETCH_DELAY,
 } from '../uiConfig';
-import { runSpreadBatch, runFlowBatch, runGapFill, makePlainObjectCache } from '../batchFetchUtils';
+import { runSpreadBatch, runFlowBatch, runGapFill, makePlainObjectCache, resetEmptyResults } from '../batchFetchUtils';
+import { isDataApiRateLimited } from '../dataApi';
 import { makeMarketList, resetCounter } from './helpers/marketFixtures';
 
 vi.mock('../api', () => ({ fetchOrderBook: vi.fn() }));
@@ -30,6 +31,7 @@ vi.mock('../clobRateLimit', () => ({
   isClobRateLimited: vi.fn(() => false),
   triggerClobRateLimit: vi.fn(),
 }));
+vi.mock('../dataApi', () => ({ isDataApiRateLimited: vi.fn(() => false) }));
 // Do NOT mock ../clobErrorHandler — let real handleClobError call the mocked triggerClobRateLimit
 
 // ── Test setup ─────────────────────────────────────────────────────
@@ -42,6 +44,9 @@ beforeEach(() => {
   calculateSpread.mockReturnValue({ absoluteSpread: 0.01 });
   fetchMarketTrades.mockResolvedValue([{ id: 't1' }]);
   isClobRateLimited.mockReturnValue(false);
+  isDataApiRateLimited.mockReturnValue(false);
+  peekCachedTradeFlow.mockImplementation(() => null); // clearAllMocks keeps implementations
+  resetEmptyResults();
 });
 
 afterEach(() => { vi.useRealTimers(); });
@@ -233,32 +238,76 @@ describe('gap filler', () => {
     expect(concurrentAttempts).toBe(1); // second call was blocked
   });
 
-  it('continues after rate limit recovery', async () => {
+  it('a CLOB rate limit pauses spreads only; trade flow (Data API) carries on, and spreads resume after', async () => {
     const markets = makeMarketList(5);
-    // First call: rate limited
     isClobRateLimited.mockReturnValue(true);
     const result1 = await runGapFill(markets, {
       spreadCache: makePlainObjectCache({}),
       flowCache: makePlainObjectCache({}),
     });
     expect(result1.spreadFetched).toBe(0);
-    expect(result1.flowFetched).toBe(0);
+    expect(result1.flowFetched).toBe(2);
 
-    // After recovery
     isClobRateLimited.mockReturnValue(false);
     const result2 = await runGapFill(markets, {
       spreadCache: makePlainObjectCache({}),
       flowCache: makePlainObjectCache({}),
     });
     expect(result2.spreadFetched).toBe(3);
-    expect(result2.flowFetched).toBe(2);
+  });
+
+  it('a Data API rate limit pauses trade flow only', async () => {
+    isDataApiRateLimited.mockReturnValue(true);
+    const result = await runGapFill(makeMarketList(5), {
+      spreadCache: makePlainObjectCache({}),
+      flowCache: makePlainObjectCache({}),
+    });
+    expect(result.spreadFetched).toBe(3);
+    expect(fetchMarketTrades).not.toHaveBeenCalled();
+  });
+
+  it('markets with nothing to show no longer take the gap filler\'s slots on every pass', async () => {
+    const markets = makeMarketList(6);
+    // The first 3 have one-sided books (no spread) and the first 2 no trades
+    calculateSpread.mockImplementation(() => null);
+    fetchMarketTrades.mockResolvedValue([]);
+    await runGapFill(markets, { spreadCache: makePlainObjectCache({}), flowCache: makePlainObjectCache({}) });
+    const firstBooks = fetchOrderBook.mock.calls.length;
+    const firstTrades = fetchMarketTrades.mock.calls.length;
+
+    calculateSpread.mockReturnValue({ absoluteSpread: 0.01 });
+    fetchMarketTrades.mockResolvedValue([{ id: 't1' }]);
+    vi.clearAllMocks();
+    fetchOrderBook.mockResolvedValue({ bids: [], asks: [] });
+    calculateSpread.mockReturnValue({ absoluteSpread: 0.01 });
+    fetchMarketTrades.mockResolvedValue([{ id: 't1' }]);
+    await runGapFill(markets, { spreadCache: makePlainObjectCache({}), flowCache: makePlainObjectCache({}) });
+    expect(firstBooks).toBe(3);
+    expect(firstTrades).toBe(2);
+    // Second pass moves on to the next markets instead of refetching the empty ones
+    expect(fetchOrderBook.mock.calls.map(([tok]) => tok)).toEqual(markets.slice(3, 6).map((m) => m.clobTokenIds[0]));
+    expect(fetchMarketTrades.mock.calls.map(([c]) => c)).toEqual(markets.slice(2, 4).map((m) => m.conditionId));
+  });
+
+  it('an empty book is retried after 60s; a failed trades request is retried at once', async () => {
+    const markets = makeMarketList(1);
+    calculateSpread.mockImplementation(() => null);
+    fetchMarketTrades.mockResolvedValue(null); // request failed — not "no trades"
+    const opts = () => ({ spreadCache: makePlainObjectCache({}), flowCache: makePlainObjectCache({}) });
+    await runGapFill(markets, opts());
+    await runGapFill(markets, opts());
+    expect(fetchOrderBook).toHaveBeenCalledTimes(1); // remembered as empty
+    expect(fetchMarketTrades).toHaveBeenCalledTimes(2); // failure not remembered
+    await vi.advanceTimersByTimeAsync(60_001);
+    await runGapFill(markets, opts());
+    expect(fetchOrderBook).toHaveBeenCalledTimes(2);
   });
 });
 
 // ── Rate limit integration ─────────────────────────────────────────
 
 describe('rate limit integration', () => {
-  it('skips all fetching when isClobRateLimited() is true', async () => {
+  it('a CLOB rate limit skips order books but not trade flow (a different API)', async () => {
     isClobRateLimited.mockReturnValue(true);
     const markets = makeMarketList(10);
     const p1 = runSpreadBatch(markets, { cache: makePlainObjectCache({}) });
@@ -266,7 +315,24 @@ describe('rate limit integration', () => {
     await vi.runAllTimersAsync();
     await Promise.all([p1, p2]);
     expect(fetchOrderBook).not.toHaveBeenCalled();
+    expect(fetchMarketTrades).toHaveBeenCalled();
+  });
+
+  it('a Data API rate limit skips trade flow', async () => {
+    isDataApiRateLimited.mockReturnValue(true);
+    const p = runFlowBatch(makeMarketList(10), { cache: makePlainObjectCache({}) });
+    await vi.runAllTimersAsync();
+    await p;
     expect(fetchMarketTrades).not.toHaveBeenCalled();
+  });
+
+  it('trade flow takes no CLOB concurrency slot', async () => {
+    const acquireSlot = vi.fn(async () => () => {});
+    const p = runFlowBatch(makeMarketList(3), { cache: makePlainObjectCache({}), acquireSlot });
+    await vi.runAllTimersAsync();
+    await p;
+    expect(fetchMarketTrades).toHaveBeenCalledTimes(3);
+    expect(acquireSlot).not.toHaveBeenCalled();
   });
 
   it('429 from fetchOrderBook triggers triggerClobRateLimit(429)', async () => {
@@ -280,7 +346,7 @@ describe('rate limit integration', () => {
     expect(triggerClobRateLimit).toHaveBeenCalledWith(429);
   });
 
-  it('403 from fetchMarketTrades triggers triggerClobRateLimit(403)', async () => {
+  it('a 403 from the Data API (trades) stops the flow batch without tripping the CLOB breaker', async () => {
     const err = new Error('Forbidden');
     err.status = 403;
     fetchMarketTrades.mockRejectedValue(err);
@@ -288,7 +354,8 @@ describe('rate limit integration', () => {
     const promise = runFlowBatch(markets, { cache: makePlainObjectCache({}) });
     await vi.runAllTimersAsync();
     await promise;
-    expect(triggerClobRateLimit).toHaveBeenCalledWith(403);
+    expect(triggerClobRateLimit).not.toHaveBeenCalled();
+    expect(fetchMarketTrades).toHaveBeenCalledTimes(1); // stopped after the 403
   });
 
   it('after rate limit trip, remaining batch items skipped', async () => {

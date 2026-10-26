@@ -29,6 +29,12 @@ const TRADE_PAGE_SIZE = 200;
 const MAX_TRADE_PAGES = 5;
 const TRADE_WINDOW_SEC = 86_400;
 
+/**
+ * @returns {Promise<object[] | null>} trades (newest first) — `[]` when the
+ *   market genuinely has none, `null` when the request failed, so callers
+ *   can cache "no trades" without caching a failure as one.
+ * @throws on 429/403 (with .status)
+ */
 export async function fetchMarketTrades(conditionId) {
   const since = Date.now() / 1000 - TRADE_WINDOW_SEC;
   try {
@@ -38,12 +44,12 @@ export async function fetchMarketTrades(conditionId) {
     });
     if (!res.ok) {
       if (res.error) console.warn(`[TradeFlow] /v2/trades ${res.status}: ${res.error}`);
-      return [];
+      return null;
     }
     return res.rows.map((r) => toV1Row(r, 'trade'));
   } catch (e) {
     if (e?.status === 429 || e?.status === 403) throw e;
-    return [];
+    return null;
   }
 }
 

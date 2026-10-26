@@ -83,10 +83,14 @@ export function useDirectLookup(rawMarkets, baseRatesRef) {
           if (String(m.id) === extracted) return m;
         }
 
-        // Token ID / Condition ID matching
+        // Condition ID matching (0x-hex, compared case-insensitively)
+        if (type === 'CONDITION_ID') {
+          const cond = String(m.conditionId || m.condition_id || '').toLowerCase();
+          if (cond && cond === extracted) return m;
+        }
+
+        // Token ID matching (decimal trading IDs)
         if (type === 'TOKEN_ID') {
-          if (m.conditionId && String(m.conditionId) === extracted) return m;
-          if (m.condition_id && String(m.condition_id) === extracted) return m;
           if (
             m.clobTokenIds &&
             m.clobTokenIds.some((t) => String(t) === extracted)
@@ -168,10 +172,11 @@ export function useDirectLookup(rawMarkets, baseRatesRef) {
       ) {
         return fetchMarketBySlug(extracted, signal);
       }
+      if (type === 'CONDITION_ID') {
+        return fetchMarketByConditionId(extracted, signal);
+      }
       if (type === 'TOKEN_ID') {
-        // Try condition_id first, then token_id
-        const result = await fetchMarketByConditionId(extracted, signal);
-        if (result) return result;
+        // Condition IDs are 0x-hex, so a decimal ID is only ever a token
         return fetchMarketByTokenId(extracted, signal);
       }
       return null;

@@ -30,6 +30,16 @@ export const PREFETCHED_BOOK_TTL = 10_000;
 export const priceCacheKey = (tokenId, timeframe) => `price-${tokenId}-${timeframe.label}`;
 export const bookCacheKey = (tokenId) => `book-${tokenId}`;
 
+/**
+ * A side's price history as YES prices: the NO token's history is the
+ * complement of YES (1 − p — the same relation the panel's live-price push
+ * relies on). For consumers that measure against YES quantities (theta).
+ */
+export function toYesHistory(priceData, side) {
+  if (side === 'yes' || !priceData?.history) return priceData;
+  return { ...priceData, history: priceData.history.map((pt) => ({ t: pt.t, p: 1 - pt.p })) };
+}
+
 /** Price history for one chart timeframe. */
 export function fetchTimeframeHistory(tokenId, timeframe, signal) {
   if (timeframe.useTs) {

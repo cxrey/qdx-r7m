@@ -149,6 +149,21 @@ describe('fetchPriceHistory (Data API /v2/prices-history since 2026-09-04)', () 
     expect(result.history.map((h) => h.t)).toEqual([1, 2, 3]);
   });
 
+  it('a history cut short by a failed later page is not returned as complete', async () => {
+    mockFetch
+      .mockResolvedValueOnce(v2([{ timestamp: 1, price: 0.1 }], 'c1'))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'upstream' }), { status: 502 }));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(await fetchPriceHistory('tok-1', 'all', 1440)).toBeNull();
+  });
+
+  it('a history that hits the page cap is not returned as complete', async () => {
+    mockFetch.mockImplementation(async () => v2([{ timestamp: 1, price: 0.1 }], 'more'));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(await fetchPriceHistory('tok-1', 'all', 1440)).toBeNull();
+    expect(mockFetch).toHaveBeenCalledTimes(5);
+  });
+
   it('returns null on a 400 (e.g. a rejected parameter)', async () => {
     mockFetch.mockResolvedValue(new Response(JSON.stringify({ error: "'start' to 'end' must span at most 15 days" }), { status: 400 }));
     expect(await fetchPriceHistory('tok-1', '1d')).toBeNull();
@@ -728,17 +743,26 @@ describe('fetchMarketById', () => {
 });
 
 describe('fetchMarketByConditionId', () => {
-  it('calls correct URL with condition_id', async () => {
-    mockFetch.mockResolvedValue(new Response(JSON.stringify([{ id: 'm1' }]), { status: 200 }));
-    await fetchMarketByConditionId('cond-123');
-    expect(mockFetch.mock.calls[0][0]).toContain('condition_id=cond-123');
+  const COND = '0x' + 'ab'.repeat(32);
+
+  it('uses the condition_ids filter (Gamma silently ignores condition_id)', async () => {
+    mockFetch.mockResolvedValue(new Response(JSON.stringify([{ id: 'm1', conditionId: COND }]), { status: 200 }));
+    await fetchMarketByConditionId(COND);
+    const url = new URL(mockFetch.mock.calls[0][0], 'http://localhost');
+    expect(url.searchParams.get('condition_ids')).toBe(COND);
+    expect(url.searchParams.has('condition_id')).toBe(false);
   });
 
-  it('returns { markets: data, event: null } for array result', async () => {
-    const data = [{ id: 'm1' }, { id: 'm2' }];
+  it('returns only markets that actually have the condition ID (never an ignored-filter dump)', async () => {
+    const data = [{ id: 'm1', conditionId: COND }, { id: 'unrelated', conditionId: '0x' + 'cd'.repeat(32) }];
     mockFetch.mockResolvedValue(new Response(JSON.stringify(data), { status: 200 }));
-    const result = await fetchMarketByConditionId('cond-123');
-    expect(result).toEqual({ markets: data, event: null });
+    const result = await fetchMarketByConditionId(COND.toUpperCase().replace('0X', '0x'));
+    expect(result).toEqual({ markets: [data[0]], event: null });
+  });
+
+  it('returns null when nothing returned matches', async () => {
+    mockFetch.mockResolvedValue(new Response(JSON.stringify([{ id: 'x', conditionId: '0x' + '00'.repeat(32) }]), { status: 200 }));
+    expect(await fetchMarketByConditionId(COND)).toBeNull();
   });
 
   it('returns null on empty array', async () => {
@@ -749,10 +773,17 @@ describe('fetchMarketByConditionId', () => {
 });
 
 describe('fetchMarketByTokenId', () => {
+  const json = (body) => new Response(JSON.stringify(body), { status: 200 });
+
   it('calls correct URL with clob_token_ids', async () => {
-    mockFetch.mockResolvedValue(new Response(JSON.stringify([{ id: 'm1' }]), { status: 200 }));
+    mockFetch.mockImplementation(async () => json([{ id: 'm1', clobTokenIds: '["tok-456","tok-x"]' }]));
     await fetchMarketByTokenId('tok-456');
     expect(mockFetch.mock.calls[0][0]).toContain('clob_token_ids=tok-456');
+  });
+
+  it('drops returned markets that do not hold the ID', async () => {
+    mockFetch.mockImplementation(async () => json([{ id: 'unrelated', clobTokenIds: '["a","b"]' }]));
+    expect(await fetchMarketByTokenId('tok-456')).toBeNull();
   });
 
   it('returns null on non-200', async () => {
@@ -762,16 +793,17 @@ describe('fetchMarketByTokenId', () => {
   });
 
   it('falls back to position_ids (Protocol V2 position IDs) when no CTF token matches', async () => {
+    const v2 = { id: 'm-v2', positionIds: ['pos-789', 'pos-790'] };
     mockFetch
-      .mockResolvedValueOnce(new Response(JSON.stringify([]), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify([{ id: 'm-v2' }]), { status: 200 }));
+      .mockResolvedValueOnce(json([]))
+      .mockResolvedValueOnce(json([v2]));
     const result = await fetchMarketByTokenId('pos-789');
     expect(mockFetch.mock.calls[1][0]).toContain('position_ids=pos-789');
-    expect(result).toEqual({ markets: [{ id: 'm-v2' }], event: null });
+    expect(result).toEqual({ markets: [v2], event: null });
   });
 
   it('does not try position_ids once clob_token_ids matched', async () => {
-    mockFetch.mockResolvedValue(new Response(JSON.stringify([{ id: 'm1' }]), { status: 200 }));
+    mockFetch.mockImplementation(async () => json([{ id: 'm1', clobTokenIds: '["tok-456","tok-x"]' }]));
     await fetchMarketByTokenId('tok-456');
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });

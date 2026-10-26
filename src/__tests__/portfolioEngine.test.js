@@ -824,8 +824,15 @@ describe('fetchPositions (Data API v2)', () => {
     expect(positions).toHaveLength(300);
   });
 
-  it('reports an error when the wallet has no positions (unchanged behaviour)', async () => {
+  it('a wallet with no open positions is an empty portfolio, not an error', async () => {
     mockFetch.mockImplementation(async () => jsonResponse(envelope([])));
+    const { positions, error } = await fetchPositions(WALLET);
+    expect(positions).toEqual([]);
+    expect(error).toBeNull();
+  });
+
+  it('a failed request still reports an error', async () => {
+    mockFetch.mockImplementation(async () => new Response('Server Error', { status: 500 }));
     const { positions, error } = await fetchPositions(WALLET);
     expect(positions).toEqual([]);
     expect(error).toMatch(/Could not fetch positions/);

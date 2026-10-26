@@ -12,8 +12,7 @@ import {
   getCachedTradeFlow, setCachedTradeFlow,
   formatUsdcSize, formatTimeAgo, truncateWallet,
 } from '../TradeFlowEngine';
-import { isClobRateLimited } from '../clobRateLimit';
-import { handleClobError, rateLimitMessage } from '../clobErrorHandler';
+import { isDataApiRateLimited } from '../dataApi';
 import { CYAN, PINK, PURPLE, AMBER, RED } from '../uiConfig';
 
 const RELIABILITY_CONFIG = {
@@ -57,8 +56,10 @@ export default function TradeFlowPanel({ market }) {
       return;
     }
 
-    if (isClobRateLimited()) {
-      setError('CLOB API rate limited — try again later');
+    // Trades, holders and wallet activity all come from the Data API, so its
+    // own rate-limit pause applies — not the CLOB breaker
+    if (isDataApiRateLimited()) {
+      setError('Data API rate limited — try again shortly');
       setLoading(false);
       return;
     }
@@ -68,10 +69,11 @@ export default function TradeFlowPanel({ market }) {
 
     try {
       // Step 1: Fetch trades and holders in parallel
-      const [trades, holders] = await Promise.all([
+      const [fetchedTrades, holders] = await Promise.all([
         fetchMarketTrades(market.conditionId),
         fetchMarketHolders(market.conditionId),
       ]);
+      const trades = fetchedTrades || []; // null = the request failed
 
       if (!mountedRef.current) return;
 
@@ -149,8 +151,9 @@ export default function TradeFlowPanel({ market }) {
       setCachedTradeFlow(market.id, analysis);
       setFlowData(analysis);
     } catch (err) {
-      if (handleClobError(err)) {
-        if (mountedRef.current) setError(rateLimitMessage(err.status));
+      if (err?.status === 429 || err?.status === 403) {
+        // dataApiGet has already started the Data API pause
+        if (mountedRef.current) setError('Data API rate limited — try again shortly');
         return;
       }
       if (mountedRef.current) {

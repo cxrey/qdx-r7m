@@ -4,7 +4,8 @@ import MarketRow from './MarketRow';
 import { calculateSpread } from '../SpreadFrictionEngine';
 import { createHoverPrefetcher } from '../hoverPrefetchUtils';
 import { peekCachedTradeFlow, setCachedTradeFlow } from '../TradeFlowEngine';
-import { runSpreadBatch, runFlowBatch, runGapFill } from '../batchFetchUtils';
+import { runSpreadBatch, runFlowBatch, runGapFill, needsSpread, needsFlow } from '../batchFetchUtils';
+import { isDataApiRateLimited } from '../dataApi';
 import {
   ROW_HEIGHT, HEADER_HEIGHT, FOOTER_HEIGHT, BANNER_HEIGHT, CYAN,
   SPREAD_BATCH_START, FLOW_BATCH_START,
@@ -208,7 +209,7 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, filt
   // Shared batch effect setup — spread and flow effects differ only in
   // filter predicate, batch function, cache adapter, max items, and start delay.
   // Returns a cleanup function for the useEffect return.
-  function setupBatchEffect({ abortRef, queueRef, filterFn, batchFn, cacheAdapter, maxDefault, startDelay }) {
+  function setupBatchEffect({ abortRef, queueRef, filterFn, batchFn, cacheAdapter, maxDefault, startDelay, isRateLimited }) {
     if (abortRef.current) abortRef.current.abort();
     if (queueRef.current) clearTimeout(queueRef.current);
 
@@ -220,7 +221,7 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, filt
     const visibleCount = Math.max(1, stop - start + 1);
     const toFetch = visibleMarkets.filter(filterFn).slice(0, Math.min(visibleCount, maxDefault));
 
-    if (toFetch.length === 0 || isClobRateLimited()) return () => {};
+    if (toFetch.length === 0 || isRateLimited()) return () => {};
 
     let cancelled = false;
     const run = async () => {
@@ -249,22 +250,24 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, filt
   useEffect(() => setupBatchEffect({
     abortRef: batchAbortRef,
     queueRef: batchQueueRef,
-    filterFn: (m) => m.clobTokenIds?.[0] && !spreadCacheRef.current.has(m.id),
+    filterFn: (m) => needsSpread(m, (id) => spreadCacheRef.current.has(id)),
     batchFn: runSpreadBatch,
     cacheAdapter: { has: (id) => spreadCacheRef.current.has(id), set: (id, v) => updateSpreadCache(spreadCacheRef, id, v) },
     maxDefault: 25,
     startDelay: SPREAD_BATCH_START,
+    isRateLimited: isClobRateLimited,
   }), [visibleRange.start, visibleRange.stop, listKey]);
 
   // Background batch fetch trade flow
   useEffect(() => setupBatchEffect({
     abortRef: flowBatchAbortRef,
     queueRef: flowBatchQueueRef,
-    filterFn: (m) => m.conditionId && !peekCachedTradeFlow(m.id),
+    filterFn: (m) => needsFlow(m),
     batchFn: runFlowBatch,
     cacheAdapter: { has: (id) => !!peekCachedTradeFlow(id), set: () => {} }, // setCachedTradeFlow called inside wrapper
     maxDefault: 10,
     startDelay: FLOW_BATCH_START,
+    isRateLimited: isDataApiRateLimited, // trade flow is a Data API request
   }), [visibleRange.start, visibleRange.stop, listKey, leaderboardReady]);
 
   // Gap filler: catch visible rows missing spread/flow data that appeared
@@ -276,8 +279,12 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, filt
     let emptyRuns = 0;
     let timerId = null;
 
+    // Spreads are CLOB requests (breaker + free slot needed); trade flow is a
+    // Data API request with its own pause. Neither blocks the other.
+    const spreadBlocked = () => isClobRateLimited() || !hasClobSlotAvailable();
+
     const doGapFill = async () => {
-      if (cancelled || running || isClobRateLimited() || !hasClobSlotAvailable()) {
+      if (cancelled || running) {
         scheduleNext();
         return;
       }
@@ -286,8 +293,8 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, filt
       const visible = marketsRef.current.slice(start, Math.min(stop + 1, marketsRef.current.length));
 
       // Pre-check for empty to track emptyRuns (runGapFill filters internally too)
-      const hasSpreadMissing = visible.some(m => m.clobTokenIds?.[0] && !spreadCacheRef.current.has(m.id));
-      const hasFlowMissing = visible.some(m => m.conditionId && !peekCachedTradeFlow(m.id));
+      const hasSpreadMissing = !spreadBlocked() && visible.some((m) => needsSpread(m, (id) => spreadCacheRef.current.has(id)));
+      const hasFlowMissing = !isDataApiRateLimited() && visible.some((m) => needsFlow(m));
 
       if (!hasSpreadMissing && !hasFlowMissing) {
         emptyRuns++;
@@ -303,6 +310,7 @@ export default function ResultsTable({ markets, lookupState, onClearSearch, filt
           spreadCache: { has: (id) => spreadCacheRef.current.has(id), set: (id, v) => updateSpreadCache(spreadCacheRef, id, v) },
           flowCache: { has: (id) => !!peekCachedTradeFlow(id), set: () => {} },
           acquireSlot: acquireClobSlot,
+          isRateLimited: spreadBlocked,
           cancelled: () => cancelled,
         });
 
