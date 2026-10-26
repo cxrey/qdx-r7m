@@ -155,10 +155,13 @@ export class RefreshManager {
     // Stop polling fallback
     this._stopPolling();
 
-    // Abort any in-flight Tier 3
+    // Abort any in-flight Tier 3. Clear the running flag here too: the aborted
+    // run's `finally` leaves it alone once the controller is no longer its own,
+    // so a stop() mid-crawl would otherwise block every Tier 3 after start().
     if (this._tier3Controller) {
       this._tier3Controller.abort();
       this._tier3Controller = null;
+      this._tier3Running = false;
     }
 
     // Remove visibility listener
@@ -201,7 +204,11 @@ export class RefreshManager {
       if (!this._assetToMarket.has(id)) this._resolvedAssets.delete(id);
     }
 
-    if (this._ws && !this._usePolling) {
+    // Also while polling: the stream queues (un)subscriptions while its socket
+    // is closed and sends them when it reconnects. Skipping them here left
+    // markets indexed during polling unsubscribed — no live prices — until
+    // the next Tier 3 rebuild.
+    if (this._ws) {
       // Unsubscribe assets that dropped out of the catalog FIRST: they would
       // otherwise keep streaming and keep occupying MAX_WS_ASSETS slots, so
       // newly listed markets would eventually be refused a subscription.
@@ -470,9 +477,9 @@ export class RefreshManager {
         this._opts.onNewMarkets?.(newMarkets);
         this._opts.onToast?.({ type: 'info', message: `${newMarkets.length} new market${newMarkets.length > 1 ? 's' : ''} discovered` });
 
-        // Subscribe to new market assets
+        // Subscribe to new market assets (queued by the stream while polling)
         const newAssets = this._indexMarketAssets(newMarkets);
-        if (newAssets.length > 0 && this._ws && !this._usePolling) {
+        if (newAssets.length > 0 && this._ws) {
           this._ws.subscribe(newAssets);
         }
       }
@@ -491,17 +498,24 @@ export class RefreshManager {
   async _runTier3() {
     if (!this._enabled || this._tier3Running) return;
     this._tier3Running = true;
-    this._tier3Controller = new AbortController();
+    // This run's own controller. resetTier3Timer()/stop() abort it and null
+    // this._tier3Controller (and may start a new run) while we're awaiting;
+    // fetchCatalog resolves with partial results on abort rather than
+    // throwing, so every check reads the local `signal`, and `finally` only
+    // clears state that still belongs to this run.
+    const controller = new AbortController();
+    this._tier3Controller = controller;
+    const { signal } = controller;
 
     try {
       this._opts.onStatusChange?.({ ws: this.wsStatus, tier: 3, message: 'Full refresh in progress...' });
 
       const { markets: raw, complete } = await fetchCatalog(
         null, // no progress callback for background refresh
-        this._tier3Controller.signal
+        signal
       );
 
-      if (this._tier3Controller.signal.aborted) return;
+      if (signal.aborted) return;
 
       // Deduplicate
       const seen = new Set();
@@ -511,9 +525,9 @@ export class RefreshManager {
         return true;
       });
 
-      if (this._tier3Controller.signal.aborted) return;
+      if (signal.aborted) return;
       const allProcessed = await processAllInWorker(deduped);
-      if (this._tier3Controller.signal.aborted) return;
+      if (signal.aborted) return;
       let processed = allProcessed.filter((m) => m.question);
 
       // Smart diff against current markets
@@ -557,8 +571,11 @@ export class RefreshManager {
         console.warn('[RefreshManager] Tier 3 error:', err.message);
       }
     } finally {
-      this._tier3Running = false;
-      this._tier3Controller = null;
+      // A newer run may have started after this one was aborted — leave its state alone
+      if (this._tier3Controller === controller) {
+        this._tier3Running = false;
+        this._tier3Controller = null;
+      }
     }
   }
 

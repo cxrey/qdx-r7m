@@ -268,6 +268,18 @@ describe('RefreshManager — asset index rebuild', () => {
     expect([...stream.subscribedAssets].sort()).toEqual(['n2', 'n3', 'y2', 'y3']);
   });
 
+  it('keeps WS subscriptions in sync while on the polling fallback (queued for reconnect)', () => {
+    const mgr = new RefreshManager({});
+    mgr.rebuildAssetIndex([{ id: 'm1', clobTokenIds: [YES, NO] }]);
+    mgr._startWebSocket();
+    const stream = wsInstances.at(-1);
+    mgr._usePolling = true; // WS gave up; polling took over
+    mgr.rebuildAssetIndex([{ id: 'm3', clobTokenIds: ['y3', 'n3'] }]);
+    // Previously skipped while polling, so m3 had no live prices after the WS came back
+    expect([...stream.subscribedAssets].sort()).toEqual(['n3', 'y3']);
+    expect(stream.unsubscribed.sort()).toEqual([NO, YES].sort());
+  });
+
   it('frees WS capacity: dropped assets are removed before new ones subscribe', () => {
     const mgr = new RefreshManager({});
     mgr.rebuildAssetIndex([{ id: 'm1', clobTokenIds: [YES, NO] }]);

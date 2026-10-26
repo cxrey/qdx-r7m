@@ -41,11 +41,16 @@ describe('fetchMarketTrades', () => {
     expect(result[0]).toMatchObject({ proxyWallet: WALLET, price: 0.55, asset: YES_TOKEN, outcomeIndex: 0 });
   });
 
-  it('returns empty array on non-200 response', async () => {
+  it('returns null (not []) on a failed request, so a failure is never cached as "no trades"', async () => {
     mockFetch.mockResolvedValueOnce(new Response('Not Found', { status: 404 }));
     const result = await fetchMarketTrades('cond-abc');
     expect(mockFetch).toHaveBeenCalledTimes(1);
-    expect(result).toEqual([]);
+    expect(result).toBeNull();
+  });
+
+  it('returns [] when the market genuinely has no trades', async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse(envelope([])));
+    expect(await fetchMarketTrades('cond-abc')).toEqual([]);
   });
 
   it('throws on 429 with .status property', async () => {
@@ -82,6 +87,16 @@ describe('fetchMarketTrades', () => {
     const result = await fetchMarketTrades('cond-abc');
     expect(mockFetch).toHaveBeenCalledTimes(5);
     expect(result).toHaveLength(10);
+    expect(result.incomplete).toBeUndefined(); // the page cap is by design, not a failure
+  });
+
+  it('flags a window cut short by a failed later page as incomplete', async () => {
+    mockFetch
+      .mockResolvedValueOnce(page([60, 3_600], 'c1'))
+      .mockResolvedValueOnce(new Response('upstream', { status: 500 }));
+    const result = await fetchMarketTrades('cond-abc');
+    expect(result).toHaveLength(2);
+    expect(result.incomplete).toBe(true);
   });
 });
 

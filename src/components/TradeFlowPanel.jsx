@@ -12,8 +12,7 @@ import {
   getCachedTradeFlow, setCachedTradeFlow,
   formatUsdcSize, formatTimeAgo, truncateWallet,
 } from '../TradeFlowEngine';
-import { isClobRateLimited } from '../clobRateLimit';
-import { handleClobError, rateLimitMessage } from '../clobErrorHandler';
+import { isDataApiRateLimited } from '../dataApi';
 import { CYAN, PINK, PURPLE, AMBER, RED } from '../uiConfig';
 
 const RELIABILITY_CONFIG = {
@@ -57,8 +56,10 @@ export default function TradeFlowPanel({ market }) {
       return;
     }
 
-    if (isClobRateLimited()) {
-      setError('CLOB API rate limited — try again later');
+    // Trades, holders and wallet activity all come from the Data API, so its
+    // own rate-limit pause applies — not the CLOB breaker
+    if (isDataApiRateLimited()) {
+      setError('Data API rate limited — try again shortly');
       setLoading(false);
       return;
     }
@@ -68,12 +69,19 @@ export default function TradeFlowPanel({ market }) {
 
     try {
       // Step 1: Fetch trades and holders in parallel
-      const [trades, holders] = await Promise.all([
+      const [fetchedTrades, holders] = await Promise.all([
         fetchMarketTrades(market.conditionId),
         fetchMarketHolders(market.conditionId),
       ]);
-
       if (!mountedRef.current) return;
+
+      // null = the trades request failed. Analysing it as "no trades" would show
+      // (and cache for 5 min) a 24h flow of zero, so show an error to retry instead.
+      if (fetchedTrades === null) {
+        setError('Failed to load trade flow data');
+        return;
+      }
+      const trades = fetchedTrades;
 
       if ((!trades || trades.length === 0) && !holders) {
         setFlowData({ dataAvailable: false, reliabilityScore: 'VERY_LOW', tradeCount24h: 0, totalUniqueWallets: 0 });
@@ -145,12 +153,14 @@ export default function TradeFlowPanel({ market }) {
 
       if (!mountedRef.current) return;
 
-      // Cache and set
-      setCachedTradeFlow(market.id, analysis);
+      // Cache and set. A cut-short trade window (a later page failed) is shown
+      // but not cached, so the next open fetches the full 24h.
+      if (!trades.incomplete) setCachedTradeFlow(market.id, analysis);
       setFlowData(analysis);
     } catch (err) {
-      if (handleClobError(err)) {
-        if (mountedRef.current) setError(rateLimitMessage(err.status));
+      if (err?.status === 429 || err?.status === 403) {
+        // dataApiGet has already started the Data API pause
+        if (mountedRef.current) setError('Data API rate limited — try again shortly');
         return;
       }
       if (mountedRef.current) {

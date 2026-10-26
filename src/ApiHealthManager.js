@@ -54,13 +54,15 @@ export function getClobRecoverySeconds() {
  */
 function _tripCircuitBreaker(statusCode) {
   const recoveryTime = statusCode === 403 ? RECOVERY_403 : RECOVERY_429;
-  currentRecoverySeconds = recoveryTime / 1000;
 
   // If already tripped by a 429, a 403 must upgrade the timer.
   // If already tripped by a 403, a duplicate 403 resets the timer and re-notifies.
-  // If not tripped, always proceed. Only skip re-entry for duplicate 429s.
+  // If not tripped, always proceed. Only skip re-entry for duplicate 429s —
+  // and leave the displayed recovery time alone for them (a 429 during a
+  // 5-min 403 window must not make the UI promise recovery in 60s).
   if (rateLimited && statusCode !== 403) return false;
 
+  currentRecoverySeconds = recoveryTime / 1000;
   rateLimited = true;
 
   console.warn(
@@ -271,18 +273,24 @@ function _escalateBackoff() {
 
   console.warn(`[ApiHealthManager] Backoff multiplier now ${backoffMultiplier}x`);
 
-  // Schedule recovery: halve after 5 minutes
+  // Schedule recovery: halve every 5 minutes until back to 1x. (It used to
+  // halve once and stop, so after 3 trips — 8x — it stayed at 4x for good.)
   if (backoffRecoveryTimer) clearTimeout(backoffRecoveryTimer);
+  _scheduleBackoffRecovery();
+
+  // Always notify — even if already at max, the recovery timer was reset
+  // and consumers need to know a rate limit event occurred.
+  backoffListeners.forEach(fn => fn(backoffMultiplier));
+}
+
+function _scheduleBackoffRecovery() {
   backoffRecoveryTimer = setTimeout(() => {
     backoffMultiplier = Math.max(1, backoffMultiplier / 2);
     backoffRecoveryTimer = null;
     console.log(`[ApiHealthManager] Backoff recovery — multiplier now ${backoffMultiplier}x`);
     backoffListeners.forEach(fn => fn(backoffMultiplier));
+    if (backoffMultiplier > 1) _scheduleBackoffRecovery();
   }, BACKOFF_RECOVERY_MS);
-
-  // Always notify — even if already at max, the recovery timer was reset
-  // and consumers need to know a rate limit event occurred.
-  backoffListeners.forEach(fn => fn(backoffMultiplier));
 }
 
 /**

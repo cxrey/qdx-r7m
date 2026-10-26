@@ -9,7 +9,7 @@ vi.mock('../api', () => ({
   fetchMarketByTokenId: vi.fn(),
 }));
 
-import { fetchMarketBySlug } from '../api';
+import { fetchMarketBySlug, fetchMarketByConditionId, fetchMarketByTokenId } from '../api';
 import { useDirectLookup } from '../hooks/useDirectLookup';
 
 const SLUG = 'will-something-happen-before-2027';
@@ -52,6 +52,30 @@ describe('useDirectLookup — stable identity', () => {
     act(() => result.current.runLookup('bitcoin', false));
     act(() => result.current.runLookup('bitcoin price', false));
     expect(result.current.fetchedMarkets).toBe(before);
+  });
+});
+
+describe('useDirectLookup — IDs', () => {
+  const COND = '0x' + 'ab'.repeat(32);
+
+  it('a pasted 0x condition ID matches a loaded market by condition, case-insensitively', () => {
+    const { result } = render(loaded({ conditionId: COND }));
+    act(() => result.current.runLookup(COND.toUpperCase().replace('0X', '0x'), true));
+    expect(result.current.foundInLoadedId).toBe('m1');
+  });
+
+  it('an unloaded condition ID is looked up by condition only; a decimal ID by token only', async () => {
+    fetchMarketByConditionId.mockReset().mockResolvedValue(null);
+    fetchMarketByTokenId.mockReset().mockResolvedValue(null);
+    const { result } = render(loaded());
+    await act(async () => { result.current.runLookup(COND, true); });
+    expect(fetchMarketByConditionId).toHaveBeenCalledWith(COND, expect.anything());
+    expect(fetchMarketByTokenId).not.toHaveBeenCalled();
+
+    fetchMarketByConditionId.mockClear();
+    await act(async () => { result.current.runLookup('1234567890123456789012345', true); });
+    expect(fetchMarketByTokenId).toHaveBeenCalled();
+    expect(fetchMarketByConditionId).not.toHaveBeenCalled(); // decimal IDs are never condition IDs
   });
 });
 

@@ -68,17 +68,22 @@ export function detectMarketLink(input) {
     return { type: 'MARKET_ID', extracted: trimmed, outcomeId: null };
   }
 
-  // 5. CONDITION ID or TOKEN ID (10+ digits)
+  // 5. CONDITION ID: 0x + 64 hex digits (a bytes32)
+  if (/^0x[0-9a-f]{64}$/i.test(trimmed)) {
+    return { type: 'CONDITION_ID', extracted: trimmed.toLowerCase(), outcomeId: null };
+  }
+
+  // 6. TOKEN ID: a long decimal number (CTF token ID, or a Protocol V2 position ID)
   if (/^\d{10,}$/.test(trimmed)) {
     return { type: 'TOKEN_ID', extracted: trimmed, outcomeId: null };
   }
 
-  // 6. RAW SLUG (20+ chars, lowercase alphanumeric with hyphens, no spaces)
+  // 7. RAW SLUG (20+ chars, lowercase alphanumeric with hyphens, no spaces)
   if (/^[a-z0-9]([a-z0-9-]{18,})[a-z0-9]$/.test(trimmed) && trimmed.includes('-') && !trimmed.includes(' ')) {
     return { type: 'SLUG', extracted: trimmed, outcomeId: null };
   }
 
-  // 7. Normal text search
+  // 8. Normal text search
   return RESULT_TEXT;
 }
 
