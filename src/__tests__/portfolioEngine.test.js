@@ -35,6 +35,7 @@ import {
   buildCorrelationStructure,
   priceClusters,
   mutuallyExclusive,
+  exclusiveOutcomeCorrelation,
 } from '../PortfolioEngine';
 import { envelope, jsonResponse, v2Position, WALLET, YES_TOKEN, CONDITION } from './helpers/dataApiV2Fixtures';
 import { generateMarkets } from '../__benchmarks__/helpers/fixtures';
@@ -374,7 +375,7 @@ describe('screenNewTrade', () => {
 
     // Same slug => EVENT overlap (0.8 corr), candidate side defaults to YES but we check opposing logic
     // screenNewTrade creates candidatePos with side 'YES', so for OPPOSING we need existing side !== 'YES'
-    // Actually: isOpposingSide checks p.side !== candidatePos.side. candidatePos.side is always 'YES'.
+    // For markets that aren't exclusive outcomes, opposing is a guess: the most-correlated market held on the other side. candidatePos.side is always 'YES'.
     // So existing position must have side 'NO' on the same highly-correlated market.
     const existingPosNo = { market: sharedMarket, side: 'NO', currentValue: 200, size: 200, currentPrice: 0.45 };
     const { clusters: clusters2 } = buildCorrelationClusters([existingPosNo]);
@@ -405,35 +406,68 @@ describe('screenNewTrade', () => {
   });
 
   describe('direction: mutually exclusive outcomes of one event (negRisk)', () => {
-    const outcome = (id, q) => makeMarket({ id, question: q, description: '', slug: 'election-2028', category: 'Politics', negRisk: true });
-    const heldYesOnA = { market: outcome('a', 'Will Alice win?'), side: 'YES', size: 100, currentValue: 50 };
-    const candidateB = outcome('b', 'Will Bob win?');
+    const outcome = (id, q, yesPrice) => makeMarket({ id, question: q, description: '', slug: 'election-2028', category: 'Politics', negRisk: true, yesPrice, noPrice: 1 - yesPrice });
+    const screen = (candidate, held) => screenNewTrade(candidate, [held], buildCorrelationClusters([held]).clusters);
 
     it('mutuallyExclusive needs negRisk on both, the same event, and different markets', () => {
-      expect(mutuallyExclusive(heldYesOnA.market, candidateB)).toBe(true);
-      expect(mutuallyExclusive(heldYesOnA.market, heldYesOnA.market)).toBe(false);
-      expect(mutuallyExclusive(heldYesOnA.market, { ...candidateB, negRisk: false })).toBe(false);
-      expect(mutuallyExclusive(heldYesOnA.market, { ...candidateB, slug: 'other-event' })).toBe(false);
+      const a = outcome('a', 'Will Alice win?', 0.6);
+      const b = outcome('b', 'Will Bob win?', 0.4);
+      expect(mutuallyExclusive(a, b)).toBe(true);
+      expect(mutuallyExclusive(a, a)).toBe(false);
+      expect(mutuallyExclusive(a, { ...b, negRisk: false })).toBe(false);
+      expect(mutuallyExclusive(a, { ...b, slug: 'other-event' })).toBe(false);
     });
 
-    it('YES on another outcome hedges a YES holding; NO on it moves with it', () => {
-      const { clusters } = buildCorrelationClusters([heldYesOnA]);
-      const r = screenNewTrade(candidateB, [heldYesOnA], clusters);
-      expect(r.sideRisk.YES).toMatchObject({ correlation: 0, hedges: [{ question: 'Will Alice win?', side: 'YES', size: 100 }] });
+    it('exclusiveOutcomeCorrelation: −√(pA·pB/((1−pA)(1−pB))), sign by side, clamped, 0 when settled', () => {
+      expect(exclusiveOutcomeCorrelation(0.6, 0.4, true)).toBeCloseTo(-1);   // two-way race
+      expect(exclusiveOutcomeCorrelation(0.6, 0.4, false)).toBeCloseTo(1);
+      expect(exclusiveOutcomeCorrelation(0.3, 0.25, true)).toBeCloseTo(-0.378, 3); // front-runners
+      expect(exclusiveOutcomeCorrelation(0.03, 0.02, true)).toBeCloseTo(-0.025, 3); // longshots: ~independent
+      expect(exclusiveOutcomeCorrelation(0.7, 0.6, true)).toBe(-1); // prices summing past 1 → clamped
+      expect(exclusiveOutcomeCorrelation(1, 0.3, false)).toBe(0);   // settled
+      expect(exclusiveOutcomeCorrelation(null, 0.3, true)).toBe(0); // no price
+    });
+
+    it('two-way race: YES on the other outcome hedges a YES holding (r≈−1); NO moves with it', () => {
+      const held = { market: outcome('a', 'Will Alice win?', 0.6), side: 'YES', size: 100, currentValue: 60 };
+      const r = screen(outcome('b', 'Will Bob win?', 0.4), held);
+      expect(r.sideRisk.YES.correlation).toBe(0);
+      expect(r.sideRisk.YES.hedges).toHaveLength(1);
+      expect(r.sideRisk.YES.hedges[0]).toMatchObject({ question: 'Will Alice win?', side: 'YES', size: 100 });
+      expect(r.sideRisk.YES.hedges[0].correlation).toBeCloseTo(-1);
       expect(r.sideRisk.NO).toMatchObject({ side: 'YES', directionKnown: true, hedges: [] });
-      expect(r.sideRisk.NO.correlation).toBeGreaterThan(0.5);
-      // Portfolio Impact (screens buying YES): a hedge, and says why
+      expect(r.sideRisk.NO.correlation).toBeCloseTo(1);
+      // Portfolio Impact (screens buying YES): a hedge, with the correlation
       expect(r.fit).toBe('OPPOSING');
-      expect(r.text).toContain("can't both win");
+      expect(r.text).toContain('move against each other (r=-1.00)');
     });
 
-    it('YES on another outcome moves with a NO holding (both pay if Bob wins)', () => {
-      const heldNoOnA = { ...heldYesOnA, side: 'NO' };
-      const { clusters } = buildCorrelationClusters([heldNoOnA]);
-      const r = screenNewTrade(candidateB, [heldNoOnA], clusters);
+    it('a NO holding flips it: YES on the other outcome moves with it', () => {
+      const held = { market: outcome('a', 'Will Alice win?', 0.6), side: 'NO', size: 100, currentValue: 40 };
+      const r = screen(outcome('b', 'Will Bob win?', 0.4), held);
       expect(r.sideRisk.YES).toMatchObject({ side: 'NO', directionKnown: true, hedges: [] });
+      expect(r.sideRisk.YES.correlation).toBeCloseTo(1);
       expect(r.sideRisk.NO.hedges).toHaveLength(1);
       expect(r.fit).not.toBe('OPPOSING');
+    });
+
+    it('two longshots are nearly independent: no hedge and no correlation on either side', () => {
+      const held = { market: outcome('a', 'Will Alice win?', 0.03), side: 'YES', size: 100, currentValue: 3 };
+      const r = screen(outcome('b', 'Will Bob win?', 0.02), held);
+      for (const s of ['YES', 'NO']) {
+        expect(r.sideRisk[s].hedges).toHaveLength(0);
+        expect(r.sideRisk[s].correlation).toBeLessThan(0.05);
+      }
+      expect(r.fit).toBe('GOOD_FIT');
+    });
+
+    it('a settled outcome carries no correlation (e.g. the other side of a decided race)', () => {
+      const held = { market: outcome('a', 'Will Alice win?', 0.001), side: 'YES', size: 100, currentValue: 0.1 };
+      const r = screen(outcome('b', 'Will Bob win?', 1), held);
+      for (const s of ['YES', 'NO']) {
+        expect(r.sideRisk[s].correlation).toBe(0);
+        expect(r.sideRisk[s].hedges).toHaveLength(0);
+      }
     });
 
     it('related markets that are not exclusive keep the unsigned, conservative reading on both sides', () => {

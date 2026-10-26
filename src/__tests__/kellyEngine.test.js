@@ -344,7 +344,7 @@ describe('applyPortfolioConstraints', () => {
         screenTrade: () => ({
           alreadyHeld: null, maxCorrelation: 0.9,
           sideRisk: {
-            YES: { correlation: 0, hedges: [{ question: 'Will Alice win?', side: 'YES', size: 100 }], directionKnown: false },
+            YES: { correlation: 0, hedges: [{ question: 'Will Alice win?', side: 'YES', size: 100, correlation: -0.9 }], directionKnown: false },
             NO: { correlation: 0.9, question: 'Will Alice win?', side: 'YES', directionKnown: true, hedges: [] },
           },
         }),
@@ -352,7 +352,7 @@ describe('applyPortfolioConstraints', () => {
       const yes = applyPortfolioConstraints(100, market, portfolio, settings, 'YES');
       expect(yes.adjustedDollars).toBe(100);
       expect(yes.constraints.find((c) => c.type === 'OFFSET').label)
-        .toBe('Hedges your YES position in "Will Alice win?" (outcomes of one event; both can\'t win) — no correlation penalty');
+        .toBe('Hedges your YES position in "Will Alice win?" (outcomes of one event; r=-0.90) — no correlation penalty');
 
       const no = applyPortfolioConstraints(100, market, portfolio, settings, 'NO');
       expect(no.adjustedDollars).toBeCloseTo(60);

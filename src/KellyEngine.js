@@ -538,14 +538,16 @@ export function applyPortfolioConstraints(rawDollars, market, portfolio = null, 
         });
       }
       // With the side known, use the screening's per-side view: positions on
-      // other outcomes of a mutually exclusive event are hedged (not
-      // penalized) or added to (penalized) depending on side. Other
-      // correlations are unsigned, so they're penalized either way.
+      // other outcomes of a mutually exclusive event carry their exact,
+      // price-implied payoff correlation — strongly negative ones are hedges
+      // (noted, not penalized), strongly positive ones are penalized, and
+      // near-zero ones (e.g. two longshots) are neither. Other correlations
+      // are unsigned, so they're penalized either way.
       const risk = betSide ? screening?.sideRisk?.[betSide] : null;
       for (const h of risk?.hedges ?? []) {
         constraints.push({
           type: 'OFFSET',
-          label: `Hedges your ${h.side} position in "${h.question.slice(0, 40)}" (outcomes of one event; both can't win) — no correlation penalty`,
+          label: `Hedges your ${h.side} position in "${h.question.slice(0, 40)}" (outcomes of one event; r=${h.correlation.toFixed(2)}) — no correlation penalty`,
         });
       }
       const correlation = risk ? risk.correlation : screening?.maxCorrelation;
