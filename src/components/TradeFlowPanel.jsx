@@ -73,9 +73,15 @@ export default function TradeFlowPanel({ market }) {
         fetchMarketTrades(market.conditionId),
         fetchMarketHolders(market.conditionId),
       ]);
-      const trades = fetchedTrades || []; // null = the request failed
-
       if (!mountedRef.current) return;
+
+      // null = the trades request failed. Analysing it as "no trades" would show
+      // (and cache for 5 min) a 24h flow of zero, so show an error to retry instead.
+      if (fetchedTrades === null) {
+        setError('Failed to load trade flow data');
+        return;
+      }
+      const trades = fetchedTrades;
 
       if ((!trades || trades.length === 0) && !holders) {
         setFlowData({ dataAvailable: false, reliabilityScore: 'VERY_LOW', tradeCount24h: 0, totalUniqueWallets: 0 });
@@ -147,8 +153,9 @@ export default function TradeFlowPanel({ market }) {
 
       if (!mountedRef.current) return;
 
-      // Cache and set
-      setCachedTradeFlow(market.id, analysis);
+      // Cache and set. A cut-short trade window (a later page failed) is shown
+      // but not cached, so the next open fetches the full 24h.
+      if (!trades.incomplete) setCachedTradeFlow(market.id, analysis);
       setFlowData(analysis);
     } catch (err) {
       if (err?.status === 429 || err?.status === 403) {

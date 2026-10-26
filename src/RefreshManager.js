@@ -155,10 +155,13 @@ export class RefreshManager {
     // Stop polling fallback
     this._stopPolling();
 
-    // Abort any in-flight Tier 3
+    // Abort any in-flight Tier 3. Clear the running flag here too: the aborted
+    // run's `finally` leaves it alone once the controller is no longer its own,
+    // so a stop() mid-crawl would otherwise block every Tier 3 after start().
     if (this._tier3Controller) {
       this._tier3Controller.abort();
       this._tier3Controller = null;
+      this._tier3Running = false;
     }
 
     // Remove visibility listener

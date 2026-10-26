@@ -87,6 +87,16 @@ describe('fetchMarketTrades', () => {
     const result = await fetchMarketTrades('cond-abc');
     expect(mockFetch).toHaveBeenCalledTimes(5);
     expect(result).toHaveLength(10);
+    expect(result.incomplete).toBeUndefined(); // the page cap is by design, not a failure
+  });
+
+  it('flags a window cut short by a failed later page as incomplete', async () => {
+    mockFetch
+      .mockResolvedValueOnce(page([60, 3_600], 'c1'))
+      .mockResolvedValueOnce(new Response('upstream', { status: 500 }));
+    const result = await fetchMarketTrades('cond-abc');
+    expect(result).toHaveLength(2);
+    expect(result.incomplete).toBe(true);
   });
 });
 

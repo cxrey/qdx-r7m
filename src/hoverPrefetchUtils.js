@@ -11,6 +11,7 @@
 import { fetchOrderBook } from './api';
 import { isClobRateLimited } from './clobRateLimit';
 import { handleClobError } from './clobErrorHandler';
+import { isDataApiRateLimited } from './dataApi';
 import { cacheGet, cacheSet } from './hooks/useFetchWithCache';
 import {
   DEFAULT_TIMEFRAME, fetchTimeframeHistory,
@@ -27,6 +28,7 @@ import { HOVER_DEBOUNCE_DELAY } from './uiConfig';
  * @param {function} [opts.acquireSlot]      - async (signal) => release fn (CLOB concurrency gating)
  * @param {function} [opts.hasSlotAvailable] - () => boolean (non-blocking CLOB slot check)
  * @param {function} [opts.isRateLimited]    - () => boolean (CLOB breaker)
+ * @param {function} [opts.isPriceRateLimited] - () => boolean (Data API pause, for price history)
  * @param {function} [opts.onError]          - (err) => void, for order-book (CLOB) failures
  * @returns {{ hover: function, hoverEnd: function }}
  */
@@ -36,6 +38,7 @@ export function createHoverPrefetcher(opts = {}) {
     acquireSlot,
     hasSlotAvailable,
     isRateLimited = isClobRateLimited,
+    isPriceRateLimited = isDataApiRateLimited,
     onError = handleClobError,
   } = opts;
 
@@ -47,7 +50,9 @@ export function createHoverPrefetcher(opts = {}) {
     const bookKey = bookCacheKey(yesTokenId);
     const priceKey = priceCacheKey(yesTokenId, DEFAULT_TIMEFRAME);
     const wantBook = !spreadCache.has(marketId) && !cacheGet(bookKey);
-    const wantPrice = !cacheGet(priceKey);
+    // (skipped during a Data API pause: more requests would only prolong it,
+    // and the panel fetches its own history when opened)
+    const wantPrice = !cacheGet(priceKey) && !isPriceRateLimited();
     if (!wantBook && !wantPrice) return; // the panel already has what it needs
 
     if (controller) controller.abort();

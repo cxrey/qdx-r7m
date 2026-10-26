@@ -162,4 +162,12 @@ describe('hover prefetch', () => {
     expect(fetchOrderBook).not.toHaveBeenCalled();
     expect(fetchPriceHistory).toHaveBeenCalledTimes(1);
   });
+
+  it('price history is skipped during a Data API pause; the order book still prefetches', async () => {
+    const { hover } = createHoverPrefetcher({ isPriceRateLimited: () => true });
+    hover('m1', { clobTokenIds: [tok()] });
+    await vi.advanceTimersByTimeAsync(HOVER_DEBOUNCE_DELAY);
+    expect(fetchPriceHistory).not.toHaveBeenCalled();
+    expect(fetchOrderBook).toHaveBeenCalledTimes(1);
+  });
 });

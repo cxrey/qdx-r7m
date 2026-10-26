@@ -9,7 +9,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { fetchOrderBook } from '../api';
 import { calculateSpread } from '../SpreadFrictionEngine';
-import { fetchMarketTrades, peekCachedTradeFlow } from '../TradeFlowEngine';
+import { fetchMarketTrades, peekCachedTradeFlow, setCachedTradeFlow } from '../TradeFlowEngine';
 import { isClobRateLimited, triggerClobRateLimit } from '../clobRateLimit';
 import {
   SPREAD_FETCH_DELAY, FLOW_FETCH_DELAY,
@@ -301,6 +301,17 @@ describe('gap filler', () => {
     await vi.advanceTimersByTimeAsync(60_001);
     await runGapFill(markets, opts());
     expect(fetchOrderBook).toHaveBeenCalledTimes(2);
+  });
+
+  it('a cut-short trade window is not cached as the market\'s flow, and is retried', async () => {
+    const markets = makeMarketList(1);
+    fetchMarketTrades.mockResolvedValue(Object.assign([{ id: 't1' }], { incomplete: true }));
+    const flow = {};
+    await runGapFill(markets, { spreadCache: makePlainObjectCache({ [markets[0].id]: 0.01 }), flowCache: makePlainObjectCache(flow) });
+    expect(setCachedTradeFlow).not.toHaveBeenCalled();
+    expect(flow).toEqual({});
+    await runGapFill(markets, { spreadCache: makePlainObjectCache({ [markets[0].id]: 0.01 }), flowCache: makePlainObjectCache(flow) });
+    expect(fetchMarketTrades).toHaveBeenCalledTimes(2);
   });
 });
 

@@ -32,7 +32,9 @@ const TRADE_WINDOW_SEC = 86_400;
 /**
  * @returns {Promise<object[] | null>} trades (newest first) — `[]` when the
  *   market genuinely has none, `null` when the request failed, so callers
- *   can cache "no trades" without caching a failure as one.
+ *   can cache "no trades" without caching a failure as one. If a later page
+ *   failed, the trades fetched so far are returned with `incomplete: true` —
+ *   usable for display, but not a full 24h window, so not to be cached.
  * @throws on 429/403 (with .status)
  */
 export async function fetchMarketTrades(conditionId) {
@@ -46,7 +48,9 @@ export async function fetchMarketTrades(conditionId) {
       if (res.error) console.warn(`[TradeFlow] /v2/trades ${res.status}: ${res.error}`);
       return null;
     }
-    return res.rows.map((r) => toV1Row(r, 'trade'));
+    const trades = res.rows.map((r) => toV1Row(r, 'trade'));
+    if (res.incomplete) trades.incomplete = true;
+    return trades;
   } catch (e) {
     if (e?.status === 429 || e?.status === 403) throw e;
     return null;

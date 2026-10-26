@@ -69,7 +69,9 @@ const isDataApiLimitError = (err) => err?.status === 429 || err?.status === 403;
 async function fetchFlowTrades(market) {
   const trades = await fetchMarketTrades(market.conditionId);
   if (trades && trades.length === 0) markEmpty(emptyFlows, market.id, EMPTY_FLOW_TTL);
-  return trades && trades.length > 0 ? trades : null;
+  // A cut-short window (a later page failed) would be cached for 5 min as the
+  // market's 24h flow: treat it as a failure and retry on a later pass
+  return trades && trades.length > 0 && !trades.incomplete ? trades : null;
 }
 
 function storeSpread(cache, market, book) {

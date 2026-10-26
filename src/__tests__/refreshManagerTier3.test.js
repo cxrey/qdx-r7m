@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 /**
  * Tier 3 (full catalog refresh) concurrency: a manual Refresh aborts the
  * running crawl (resetTier3Timer) and a new run can start before the old
@@ -54,5 +55,22 @@ describe('RefreshManager Tier 3 — abort and restart', () => {
     expect(mgr._tier3Running).toBe(false);
     expect(mgr._tier3Controller).toBeNull();
     warn.mockRestore();
+  });
+
+  it('stopping auto-refresh mid-crawl does not block Tier 3 after it is turned back on', async () => {
+    const mgr = new RefreshManager({ onFullRefresh: vi.fn(), getCurrentMarkets: () => [], onStatusChange: vi.fn() });
+    mgr._enabled = true;
+
+    const runA = mgr._runTier3();
+    await Promise.resolve();
+    mgr.stop(); // auto-refresh switched off: aborts A, nulls the controller
+    expect(catalogCalls[0].signal.aborted).toBe(true);
+    catalogCalls[0].resolve({ markets: [], complete: false });
+    await runA;
+
+    mgr._enabled = true; // switched back on
+    mgr._runTier3();
+    await Promise.resolve();
+    expect(catalogCalls).toHaveLength(2);
   });
 });
