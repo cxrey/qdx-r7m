@@ -338,6 +338,28 @@ describe('applyPortfolioConstraints', () => {
       expect(r.constraints.find((x) => x.type === 'CORRELATION').label).toContain('direction not modelled');
     });
 
+    it('a bet that hedges a position on another exclusive outcome is not penalized for it', () => {
+      const portfolio = {
+        hasPortfolio: true, summary: { totalValue: 0 },
+        screenTrade: () => ({
+          alreadyHeld: null, maxCorrelation: 0.9,
+          sideRisk: {
+            YES: { correlation: 0, hedges: [{ question: 'Will Alice win?', side: 'YES', size: 100 }], directionKnown: false },
+            NO: { correlation: 0.9, question: 'Will Alice win?', side: 'YES', directionKnown: true, hedges: [] },
+          },
+        }),
+      };
+      const yes = applyPortfolioConstraints(100, market, portfolio, settings, 'YES');
+      expect(yes.adjustedDollars).toBe(100);
+      expect(yes.constraints.find((c) => c.type === 'OFFSET').label)
+        .toBe('Hedges your YES position in "Will Alice win?" (outcomes of one event; both can\'t win) — no correlation penalty');
+
+      const no = applyPortfolioConstraints(100, market, portfolio, settings, 'NO');
+      expect(no.adjustedDollars).toBeCloseTo(60);
+      expect(no.constraints.find((c) => c.type === 'CORRELATION').label)
+        .toBe('Moves with your YES position in "Will Alice win?" (outcomes of one event; r=0.90), reduced by 40%');
+    });
+
     it('when the side is unknown, assumes it adds (conservative)', () => {
       const r = applyPortfolioConstraints(100, market, heldPortfolio({ yes: 0, no: 50 }), settings);
       expect(r.adjustedDollars).toBeCloseTo(55);

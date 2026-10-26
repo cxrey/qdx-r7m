@@ -843,6 +843,26 @@ export function calculateConcentration(positions, clusters) {
 
 // ── Trade Screening ──
 
+/**
+ * Whether two markets are different outcomes of one mutually exclusive event:
+ * Polymarket "negRisk" events (e.g. "Who will win the election?"), where
+ * exactly one market resolves YES. Correlations are otherwise unsigned; this
+ * is the one relationship whose DIRECTION is known: YES on one outcome and
+ * YES on another move against each other (both can't win), so the same side
+ * on two outcomes partly hedges, and opposite sides concentrate.
+ * (processMarket's `slug` is the event's slug.)
+ */
+export function mutuallyExclusive(mA, mB) {
+  return Boolean(mA && mB && mA.negRisk === true && mB.negRisk === true
+    && mA.slug && mA.slug === mB.slug && String(mA.id) !== String(mB.id));
+}
+
+/** Whether a bet on `betSide` moves with (concentrates) position `pos`, or null if unknown. */
+function movesWith(market, betSide, pos) {
+  if (!mutuallyExclusive(market, pos.market)) return null;
+  return pos.side !== betSide; // exclusive outcomes: opposite sides pay together
+}
+
 export function screenNewTrade(market, portfolioPositions, clusters, simulatedSize = 50) {
   if (!market || portfolioPositions.length === 0) {
     return {
@@ -919,6 +939,36 @@ export function screenNewTrade(market, portfolioPositions, clusters, simulatedSi
   }
   const newConcentration = calculateConcentration(newPositions, newClusters);
 
+  // Per bet side: the strongest correlation with another position that the
+  // bet would add to, and the positions it would hedge. Only mutually
+  // exclusive outcomes have a known direction; any other correlation counts
+  // as adding (direction unknown — the conservative reading).
+  const heldHereSet = new Set(heldHere);
+  const sideRisk = {};
+  for (const betSide of ['YES', 'NO']) {
+    let best = null;
+    const hedges = [];
+    for (const pos of portfolioPositions) {
+      const corr = corrWith.get(pos);
+      if (heldHereSet.has(pos) || !(corr > 0.5)) continue;
+      const along = movesWith(market, betSide, pos);
+      if (along === false) {
+        if (hedges.length < 3) hedges.push({ question: pos.market?.question ?? '', side: pos.side, size: pos.size });
+        continue;
+      }
+      if (!best || corr > best.correlation) {
+        best = { correlation: corr, question: pos.market?.question ?? '', side: pos.side, directionKnown: along === true };
+      }
+    }
+    sideRisk[betSide] = {
+      correlation: best?.correlation ?? 0,
+      question: best?.question ?? null,
+      side: best?.side ?? null,
+      directionKnown: best?.directionKnown ?? false,
+      hedges,
+    };
+  }
+
   // Shares held in this market, per side (a wallet YES and a manual NO in
   // the same market are different exposures, not one bigger one)
   const alreadyHeld = heldHere.length > 0
@@ -929,10 +979,17 @@ export function screenNewTrade(market, portfolioPositions, clusters, simulatedSi
     }, { yes: 0, no: 0 })
     : null;
 
-  // Determine fit
+  // Determine fit (for buying YES here, as candidatePos does). Whether it
+  // opposes the most-correlated position: for mutually exclusive outcomes
+  // that's holding the SAME side on the other outcome (both can't win);
+  // otherwise the old assumption — the other side — which is only a guess.
   let fit, text;
-  const isOpposingSide = maxCorrMarket && maxCorr > 0.5 &&
-    portfolioPositions.some((p) => p.market === maxCorrMarket && p.side !== candidatePos.side);
+  const maxCorrPositions = maxCorrMarket ? portfolioPositions.filter((p) => p.market === maxCorrMarket) : [];
+  const exclusiveWithMax = mutuallyExclusive(market, maxCorrMarket);
+  const opposingPos = maxCorr > 0.5
+    ? maxCorrPositions.find((p) => (exclusiveWithMax ? p.side === candidatePos.side : p.side !== candidatePos.side))
+    : null;
+  const isOpposingSide = Boolean(opposingPos);
 
   if (alreadyHeld) {
     fit = 'ALREADY_HELD';
@@ -946,9 +1003,12 @@ export function screenNewTrade(market, portfolioPositions, clusters, simulatedSi
     } else {
       text = 'You already hold this market.';
     }
+  } else if (isOpposingSide && exclusiveWithMax) {
+    fit = 'OPPOSING';
+    text = `A different outcome of the same event as your ${opposingPos.side} position in "${maxCorrMarket.question?.slice(0, 50)}" — they can't both win, so buying YES here partly hedges it.`;
   } else if (isOpposingSide) {
     fit = 'OPPOSING';
-    text = `This market opposes your existing ${joinCluster?.name || 'correlated'} positions — acts as a partial hedge.`;
+    text = `This market opposes your existing ${joinCluster?.name || 'correlated'} positions — it may act as a partial hedge, if they move together (direction not modelled).`;
   } else if (maxCorr > 0.5 && joinCluster && joinCluster.portfolioWeight > 0.3) {
     fit = 'INCREASES_CONCENTRATION';
     text = `This market is highly correlated with your ${joinCluster.name} positions (${(joinCluster.portfolioWeight * 100).toFixed(0)}% of portfolio). Adding it increases concentration risk.`;
@@ -968,6 +1028,7 @@ export function screenNewTrade(market, portfolioPositions, clusters, simulatedSi
     currentDivScore: currentConcentration.diversificationScore,
     newDivScore: newConcentration.diversificationScore,
     alreadyHeld,
+    sideRisk,
     text,
   };
 }
