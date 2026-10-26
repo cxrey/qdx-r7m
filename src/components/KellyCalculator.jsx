@@ -451,6 +451,11 @@ export default function KellyCalculator({ market, portfolio }) {
       robustness: kelly.robustness?.level,
       gapPp: kelly.gapPp,
       bankroll: settings.bankroll,
+      // For auto-resolution and markouts
+      conditionId: market.conditionId ?? null,
+      yesTokenId: market.clobTokenIds?.[0] ?? null,
+      noTokenId: market.clobTokenIds?.[1] ?? null,
+      endDate: market.endDateIso ?? null,
     });
     if (entry) {
       setJournalSaved(true);

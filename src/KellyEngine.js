@@ -637,7 +637,7 @@ export function addReEvaluation(entryId, reEval) {
   } catch { return false; }
 }
 
-export function resolveJournalEntry(entryId, outcome) {
+export function resolveJournalEntry(entryId, outcome, { auto = false } = {}) {
   try {
     const entries = getJournalEntries();
     const entry = entries.find((e) => e.id === entryId);
@@ -645,6 +645,19 @@ export function resolveJournalEntry(entryId, outcome) {
     entry.resolved = true;
     entry.outcome = outcome; // 'WIN', 'LOSS', or 'SCRATCH'
     entry.resolvedAt = new Date().toISOString();
+    if (auto) entry.autoResolved = true; // from the market's settlement, not by hand
+    localStorage.setItem(JOURNAL_KEY, JSON.stringify(entries));
+    return true;
+  } catch { return false; }
+}
+
+/** Merge fields into an entry (auto-resolution check stamps, markouts). */
+export function updateJournalEntry(entryId, patch) {
+  try {
+    const entries = getJournalEntries();
+    const entry = entries.find((e) => e.id === entryId);
+    if (!entry) return false;
+    Object.assign(entry, patch);
     localStorage.setItem(JOURNAL_KEY, JSON.stringify(entries));
     return true;
   } catch { return false; }
@@ -681,33 +694,65 @@ export function addCalibrationPoint(point) {
   } catch { return false; }
 }
 
-/**
- * Compute calibration metrics: bucket predictions by confidence level
- * and see how often they actually came true.
- */
-export function computeCalibrationMetrics() {
-  const journal = getJournalEntries().filter((e) => e.resolved && e.outcome !== 'SCRATCH');
-  if (journal.length === 0) return { buckets: [], totalResolved: 0 };
+// Fewer resolved entries than this and the scores are mostly noise
+export const MIN_CALIBRATION_SAMPLE = 30;
+const LOG_LOSS_CLIP = 0.01;
 
-  // Bucket by predicted probability (in 10% bands)
+/**
+ * Whether the event (YES) happened, from a resolved entry: 1, 0, or null
+ * (unresolved / scratched). `estProb` is P(YES) whichever side was bet, so it
+ * must be scored against YES — not against "the chosen side won", which
+ * mis-scored every NO bet (a winning NO at P(YES)=0.2 scored 0.64, not 0.04).
+ */
+export function yesOutcome(entry) {
+  if (!entry?.resolved || (entry.outcome !== 'WIN' && entry.outcome !== 'LOSS')) return null;
+  return (entry.side === 'YES') === (entry.outcome === 'WIN') ? 1 : 0;
+}
+
+/** The market's P(YES) when the entry was recorded (marketPrice is the chosen side's price). */
+export function marketYesProb(entry) {
+  if (!Number.isFinite(entry?.marketPrice)) return null;
+  return entry.side === 'NO' ? 1 - entry.marketPrice : entry.marketPrice;
+}
+
+const brier = (p, y) => (p - y) ** 2;
+function logLoss(p, y) {
+  const q = Math.min(1 - LOG_LOSS_CLIP, Math.max(LOG_LOSS_CLIP, p));
+  return -(y * Math.log(q) + (1 - y) * Math.log(1 - q));
+}
+
+/**
+ * Compute calibration metrics: bucket predictions of P(YES) and see how often
+ * YES actually happened; score them (Brier, log loss) and benchmark them
+ * against the market price at the time of the bet.
+ *
+ * @param {object[]} [entries] — journal entries (default: the stored journal)
+ */
+export function computeCalibrationMetrics(entries = getJournalEntries()) {
+  const scored = entries
+    .map((e) => ({ e, y: yesOutcome(e) }))
+    .filter(({ e, y }) => y != null && Number.isFinite(e.estProb));
+  if (scored.length === 0) return { buckets: [], totalResolved: 0 };
+
+  // Bucket by predicted P(YES) (in 10% bands)
   const buckets = [];
   for (let lower = 0; lower < 100; lower += 10) {
     const upper = lower + 10;
-    const inBucket = journal.filter((e) => {
-      const pct = (e.estProb || 0) * 100;
-      return pct >= lower && pct < upper;
+    const inBucket = scored.filter(({ e }) => {
+      const pct = e.estProb * 100;
+      return pct >= lower && (pct < upper || (upper === 100 && pct <= 100));
     });
     if (inBucket.length === 0) continue;
 
-    const wins = inBucket.filter((e) => e.outcome === 'WIN').length;
-    const actualRate = wins / inBucket.length;
+    const yesCount = inBucket.filter(({ y }) => y === 1).length;
+    const actualRate = yesCount / inBucket.length;
     const midpoint = (lower + upper) / 2 / 100;
 
     buckets.push({
       range: `${lower}-${upper}%`,
       midpoint,
       count: inBucket.length,
-      wins,
+      wins: yesCount, // YES outcomes in the bucket
       actualRate,
       calibrationError: actualRate - midpoint,
       overconfident: actualRate < midpoint,
@@ -715,16 +760,27 @@ export function computeCalibrationMetrics() {
   }
 
   // Overall metrics
-  const totalResolved = journal.length;
-  const totalWins = journal.filter((e) => e.outcome === 'WIN').length;
+  const totalResolved = scored.length;
+  const totalWins = scored.filter(({ e }) => e.outcome === 'WIN').length;
   const overallWinRate = totalWins / totalResolved;
 
-  // Brier score
-  const brierScore = journal.reduce((sum, e) => {
-    const predicted = e.estProb || 0.5;
-    const actual = e.outcome === 'WIN' ? 1 : 0;
-    return sum + Math.pow(predicted - actual, 2);
-  }, 0) / totalResolved;
+  const mean = (fn) => scored.reduce((sum, s) => sum + fn(s), 0) / totalResolved;
+  const brierScore = mean(({ e, y }) => brier(e.estProb, y));
+  const logLossScore = mean(({ e, y }) => logLoss(e.estProb, y));
+
+  // Benchmark: the market's own P(YES) at entry, on the entries that have it
+  const benchmarked = scored.filter(({ e }) => marketYesProb(e) != null);
+  let marketBrier = null;
+  let marketLogLoss = null;
+  let skillScore = null;
+  if (benchmarked.length > 0) {
+    const n = benchmarked.length;
+    const youBrier = benchmarked.reduce((s, { e, y }) => s + brier(e.estProb, y), 0) / n;
+    marketBrier = benchmarked.reduce((s, { e, y }) => s + brier(marketYesProb(e), y), 0) / n;
+    marketLogLoss = benchmarked.reduce((s, { e, y }) => s + logLoss(marketYesProb(e), y), 0) / n;
+    // Brier skill score: > 0 = better than the price you bet against
+    skillScore = marketBrier > 0 ? 1 - youBrier / marketBrier : null;
+  }
 
   return {
     buckets,
@@ -732,5 +788,72 @@ export function computeCalibrationMetrics() {
     totalWins,
     overallWinRate,
     brierScore,
+    logLoss: logLossScore,
+    marketBrier,
+    marketLogLoss,
+    skillScore,
+    benchmarkCount: benchmarked.length,
+    smallSample: totalResolved < MIN_CALIBRATION_SAMPLE,
   };
+}
+
+// ─── Auto-resolution ────────────────────────────────────────────────
+
+const SETTLED_HIGH = 0.99;
+const SETTLED_LOW = 0.01;
+const AUTO_RESOLVE_DELAY_MS = 250;
+const AUTO_RESOLVE_MAX = 20; // lookups per run
+const AUTO_RESOLVE_RECHECK_MS = 60 * 60 * 1000; // an unsettled market is looked up at most hourly
+
+/**
+ * The journal outcome a settled market implies for an entry, from a raw
+ * Gamma market (as /markets/{id} returns it): 'WIN' / 'LOSS' for the entry's
+ * side, 'SCRATCH' for a 50/50 (void) settlement, null while unsettled.
+ */
+export function outcomeFromSettledMarket(entry, rawMarket) {
+  if (!rawMarket || rawMarket.closed !== true) return null;
+  let prices = rawMarket.outcomePrices;
+  if (typeof prices === 'string') {
+    try { prices = JSON.parse(prices); } catch { return null; }
+  }
+  const yes = parseFloat(prices?.[0]);
+  const no = parseFloat(prices?.[1]);
+  if (!Number.isFinite(yes) || !Number.isFinite(no)) return null;
+  let yesWon;
+  if (yes >= SETTLED_HIGH && no <= SETTLED_LOW) yesWon = true;
+  else if (no >= SETTLED_HIGH && yes <= SETTLED_LOW) yesWon = false;
+  else if (Math.abs(yes - 0.5) < 0.01 && Math.abs(no - 0.5) < 0.01) return 'SCRATCH';
+  else return null; // closed but not settled yet
+  return (entry.side === 'YES') === yesWon ? 'WIN' : 'LOSS';
+}
+
+/** Unresolved entries that may have settled: past their end date, or with none recorded. */
+function dueForResolution(entry, now) {
+  if (entry.resolved || !entry.marketId) return false;
+  if (entry.resolutionCheckedAt && now - entry.resolutionCheckedAt < AUTO_RESOLVE_RECHECK_MS) return false;
+  if (!entry.endDate) return true;
+  const end = Date.parse(entry.endDate);
+  return !Number.isFinite(end) || end <= now;
+}
+
+/**
+ * Look up due, unresolved entries and resolve those whose market has settled.
+ * Sequential and throttled (it runs when the journal is opened).
+ *
+ * @param {function} fetchMarket — async (marketId) => raw Gamma market | null
+ * @returns {Promise<number>} entries resolved
+ */
+export async function autoResolveJournal(fetchMarket, { now = Date.now(), delayMs = AUTO_RESOLVE_DELAY_MS, signal } = {}) {
+  const due = getJournalEntries().filter((e) => dueForResolution(e, now)).slice(0, AUTO_RESOLVE_MAX);
+  let resolved = 0;
+  for (let i = 0; i < due.length; i++) {
+    if (signal?.aborted) break;
+    if (i > 0 && delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
+    let raw = null;
+    try { raw = await fetchMarket(due[i].marketId); } catch { raw = null; }
+    const outcome = outcomeFromSettledMarket(due[i], raw);
+    if (outcome && resolveJournalEntry(due[i].id, outcome, { auto: true })) resolved++;
+    else if (raw) updateJournalEntry(due[i].id, { resolutionCheckedAt: now }); // a failed lookup is retried next time
+  }
+  return resolved;
 }

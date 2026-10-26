@@ -324,6 +324,7 @@ export function processMarket(market) {
     daysLeft,
     durationDays,
     endDate: endDate ? endDate.toLocaleDateString() : 'N/A',
+    endDateIso: endDate ? endDate.toISOString() : null, // machine-readable (journal, yield)
     category,
     edgeScore,
     spread,
