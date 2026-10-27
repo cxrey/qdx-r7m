@@ -9,6 +9,7 @@ import { useMarkets } from './hooks/useMarkets';
 import { useAutoRefresh } from './hooks/useAutoRefresh';
 import { useDebounce } from './hooks/useDebounce';
 import { useDirectLookup } from './hooks/useDirectLookup';
+import { useRemoteSearch } from './hooks/useRemoteSearch';
 import { usePortfolio } from './hooks/usePortfolio';
 import { PortfolioProvider } from './contexts/PortfolioContext';
 import { useExecutionStyle } from './contexts/ExecutionContext';
@@ -16,13 +17,14 @@ import { ALL_CATEGORIES } from './processMarket';
 import { mergePendingPrice } from './utils/pendingPrices';
 import { buildIndexMap, diffPriceSnapshot, shouldRefilter } from './utils/priceSnapshot';
 import { fetchLeaderboard, buildLeaderboardIndex } from './TradeFlowEngine';
-import { filterAndSort } from './utils/filterAndSort';
+import { filterAndSort, searchRegex, matchesSearch } from './utils/filterAndSort';
 import { produce } from 'immer';
 import ErrorBoundary from './components/ErrorBoundary';
 import { PRICE_THROTTLE_MS, THROTTLE_LOG_EVERY } from './uiConfig';
 import { DEFAULT_FILTERS } from './filterDefaults';
 
 const NO_FLASHES = {};
+const NO_MARKETS = [];
 const isEmpty = (obj) => Object.keys(obj).length === 0;
 
 function App() {
@@ -246,19 +248,43 @@ function App() {
   // Pre-compute lowercase search text once
   const searchLower = useMemo(() => debouncedSearch?.toLowerCase() || '', [debouncedSearch]);
 
-  // Consolidated single-pass filter + sort (extracted to pure utility)
-  const filteredMarkets = useMemo(() => {
-    lastFilteredSourceRef.current = rawMarketsRef.current;
-    return filterAndSort({
-      markets: rawMarketsRef.current,
+  // Text search also covers markets that aren't loaded (events below the
+  // catalog's volume floor), via Polymarket's own search
+  const remoteSearch = useRemoteSearch(debouncedSearch, baseRatesRef);
+
+  // Consolidated single-pass filter + sort (extracted to pure utility).
+  // While searching, Polymarket-search results that aren't loaded join the
+  // input, so the same text match and filters apply to them.
+  const { filteredMarkets, searchExtra } = useMemo(() => {
+    const loaded = rawMarketsRef.current;
+    lastFilteredSourceRef.current = loaded;
+    let extra = NO_MARKETS;
+    if (searchLower && remoteSearch.markets.length > 0) {
+      const loadedIds = new Set(loaded.map((m) => m.id));
+      extra = remoteSearch.markets.filter((m) => !loadedIds.has(m.id));
+    }
+    const filtered = filterAndSort({
+      markets: extra.length > 0 ? loaded.concat(extra) : loaded,
       filters,
       searchLower,
       lookupState: { isLookupActive, fetchedMarkets, foundInLoadedId },
       portfolio,
       executionStyle,
     });
+    return { filteredMarkets: filtered, searchExtra: extra };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [marketsVersion, searchLower, filters, executionStyle, isLookupActive, fetchedMarkets, foundInLoadedId, portfolio.hasPortfolio, portfolio.isMarketHeld]);
+  }, [marketsVersion, searchLower, filters, executionStyle, isLookupActive, fetchedMarkets, foundInLoadedId, portfolio.hasPortfolio, portfolio.isMarketHeld, remoteSearch.markets]);
+
+  // How many unloaded matches Polymarket's search found, and how many of
+  // them the filters hide — so a filtered-out match isn't mistaken for missing
+  const searchExtraStats = useMemo(() => {
+    if (searchExtra.length === 0 || !searchLower) return null;
+    const re = searchRegex(searchLower);
+    const matched = searchExtra.filter((m) => matchesSearch(m, re)).length;
+    if (matched === 0) return null;
+    const shown = filteredMarkets.filter((m) => m._fromSearch).length;
+    return { matched, shown, hidden: matched - shown };
+  }, [searchExtra, searchLower, filteredMarkets]);
 
   const handleFiltersChange = useCallback((updater) => {
     setFilters(updater);
@@ -331,6 +357,22 @@ function App() {
           {lookup.lookupError && (
             <div className="absolute left-0 top-full mt-1">
               <span className="text-xs" style={{ color: '#f59e0b' }}>{lookup.lookupError}</span>
+            </div>
+          )}
+          {!lookup.isLookupActive && searchLower && (remoteSearch.loading || remoteSearch.error || searchExtraStats) && (
+            <div className="absolute left-0 top-full mt-1 z-20">
+              {remoteSearch.loading ? (
+                <span className="text-xs text-gray-400">Searching all of Polymarket…</span>
+              ) : remoteSearch.error ? (
+                <span className="text-xs" style={{ color: '#f59e0b' }}>{remoteSearch.error}</span>
+              ) : (
+                <span className="text-xs text-gray-400">
+                  {searchExtraStats.matched} more on Polymarket outside the loaded markets
+                  {searchExtraStats.hidden > 0
+                    ? ` — ${searchExtraStats.hidden} hidden by your filters${searchExtraStats.shown > 0 ? `, ${searchExtraStats.shown} shown` : ''}`
+                    : ' — shown below'}
+                </span>
+              )}
             </div>
           )}
         </div>

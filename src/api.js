@@ -178,6 +178,46 @@ export async function fetchCatalog(onProgress, signal) {
   return { markets: parseGammaMarkets(allRaw), complete };
 }
 
+const SEARCH_PAGE_SIZE = 50; // Gamma's limit_per_type
+const SEARCH_MAX_PAGES = 3;
+
+/**
+ * Search ALL active Polymarket events by text — including those below the
+ * catalog's volume floor, which are never loaded (in Oct 2026, ~5,600 events
+ * holding ~71K markets, mostly sports). Gamma's /public-search matches
+ * loosely; callers apply their own text match and filters on top.
+ *
+ * @returns {Promise<object[]|null>} listed markets of the matching active
+ *   events (parsed like the catalog's), or null if the search failed.
+ *   Throws only on abort.
+ */
+export async function searchActiveMarkets(query, signal) {
+  const events = [];
+  for (let page = 1; page <= SEARCH_MAX_PAGES; page++) {
+    const url = `${GAMMA_API}/public-search?q=${encodeURIComponent(query)}`
+      + `&limit_per_type=${SEARCH_PAGE_SIZE}&events_status=active&page=${page}`;
+    let data;
+    try {
+      const res = await fetch(url, { signal: withTimeout(signal, TIMEOUT_LOOKUP) });
+      if (!res.ok) {
+        console.warn(`[searchActiveMarkets] HTTP ${res.status}`);
+        if (page === 1) return null;
+        break;
+      }
+      data = await res.json();
+    } catch (e) {
+      if (signal?.aborted) throw e;
+      console.warn('[searchActiveMarkets] Failed:', e.message);
+      if (page === 1) return null;
+      break;
+    }
+    // events_status=active can still let a closed event through on later pages
+    events.push(...(Array.isArray(data?.events) ? data.events : []).filter((e) => e.active !== false && e.closed !== true));
+    if (!data?.pagination?.hasMore) break;
+  }
+  return parseGammaMarkets(flattenEventsToMarkets(events));
+}
+
 /** Crawl the active catalog; markets only (see fetchCatalog for completeness). */
 export async function fetchAllMarkets(onProgress, signal) {
   return (await fetchCatalog(onProgress, signal)).markets;

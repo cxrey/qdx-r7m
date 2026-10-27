@@ -1,6 +1,6 @@
 import { useCallback, useMemo } from 'react';
 import DualRangeSlider from './DualRangeSlider';
-import { DEFAULT_FILTERS, VOLUME_FILTER_MAX } from '../filterDefaults';
+import { DEFAULT_FILTERS, VOLUME_FILTER_MAX, DAYS_FILTER_MAX } from '../filterDefaults';
 import { CATALOG_MIN_VOLUME } from '../engineConfig';
 import { formatVolumeShort } from '../formatters';
 
@@ -141,9 +141,9 @@ export default function FilterPanel({ filters, setFilters, categories, hasPortfo
         min={0} max={VOLUME_FILTER_MAX}
         value={filters.volumeRange}
         onChange={(v) => update('volumeRange', v)}
-        displayFormat={formatVolumeShort}
+        displayFormat={(v) => `${formatVolumeShort(v)}${v >= VOLUME_FILTER_MAX ? '+' : ''}`}
         logScale
-        hint={`Only events with ${formatVolumeShort(CATALOG_MIN_VOLUME)}+ total volume are loaded. Markets under ${formatVolumeShort(CATALOG_MIN_VOLUME)} are hidden by default — lower the slider to show them.`}
+        hint={`Only events with ${formatVolumeShort(CATALOG_MIN_VOLUME)}+ total volume are loaded; a search also checks all of Polymarket. Markets under ${formatVolumeShort(CATALOG_MIN_VOLUME)} are hidden by default — lower the slider to show them.`}
       />
 
       {/* Yes Price Range */}
@@ -167,9 +167,10 @@ export default function FilterPanel({ filters, setFilters, categories, hasPortfo
       {/* Days Left */}
       <DualRangeSlider
         label="Days Left"
-        min={0} max={365}
+        min={0} max={DAYS_FILTER_MAX}
         value={filters.daysLeftRange}
         onChange={(v) => update('daysLeftRange', v)}
+        displayFormat={(v) => (v >= DAYS_FILTER_MAX ? `${v}+` : String(v))}
       />
 
       {/* Categories */}
