@@ -1,6 +1,27 @@
 import { getVolEffSortValue } from '../VolumeEfficiencyEngine';
 import { marketYield } from '../yieldUtils';
 import { perfStart, perfEnd } from '../perfMonitor';
+import { VOLUME_FILTER_MAX, DAYS_FILTER_MAX } from '../filterDefaults';
+
+/**
+ * Case-insensitive regex for search text (null for no search). 'u' gives
+ * Unicode case folding; only regex syntax chars are escaped (escaping
+ * anything else is a SyntaxError in 'u' mode).
+ */
+export function searchRegex(searchLower) {
+  return searchLower
+    ? new RegExp(searchLower.replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&'), 'iu')
+    : null;
+}
+
+/**
+ * Whether a market matches the search: its question, its description, or
+ * its event's title (a fighter's name is in "Randy Brown vs. Jacobe Smith",
+ * not in that event's "Fight to Go the Distance?").
+ */
+export function matchesSearch(m, re) {
+  return re.test(m.question) || re.test(m.description) || (m.eventTitle != null && re.test(m.eventTitle));
+}
 
 /**
  * Single-pass filter + sort for the markets table.
@@ -35,11 +56,10 @@ export function filterAndSort({ markets, filters, searchLower, lookupState, port
   const hasSearch = !isLookupActive && searchLower.length > 0;
   // One case-insensitive regex per run instead of lowercasing every
   // question/description per market (several MB of garbage per pass).
-  // 'u' gives Unicode case folding; only regex syntax chars are escaped
-  // (escaping anything else is a SyntaxError in 'u' mode).
-  const searchRe = hasSearch
-    ? new RegExp(searchLower.replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&'), 'iu')
-    : null;
+  const searchRe = hasSearch ? searchRegex(searchLower) : null;
+  // A range ending at the slider's top has no upper limit
+  const volMax = filters.volumeRange[1] >= VOLUME_FILTER_MAX ? Infinity : filters.volumeRange[1];
+  const daysMax = filters.daysLeftRange[1] >= DAYS_FILTER_MAX ? Infinity : filters.daysLeftRange[1];
 
   // Pre-convert filter arrays to Sets for O(1) lookups in the hot loop
   const categorySet = hasCategories ? new Set(filters.categories) : null;
@@ -57,7 +77,7 @@ export function filterAndSort({ markets, filters, searchLower, lookupState, port
 
     if (!isPinned) {
       // CHEAPEST: numeric comparisons
-      if (m.volume < filters.volumeRange[0] || m.volume > filters.volumeRange[1]) continue;
+      if (m.volume < filters.volumeRange[0] || m.volume > volMax) continue;
       if (m.yesPrice != null) {
         const yc = m.yesPrice * 100;
         if (yc < filters.yesPriceRange[0] || yc > filters.yesPriceRange[1]) continue;
@@ -67,7 +87,7 @@ export function filterAndSort({ markets, filters, searchLower, lookupState, port
         if (nc < filters.noPriceRange[0] || nc > filters.noPriceRange[1]) continue;
       }
       if (m.daysLeft != null) {
-        if (m.daysLeft < filters.daysLeftRange[0] || m.daysLeft > filters.daysLeftRange[1]) continue;
+        if (m.daysLeft < filters.daysLeftRange[0] || m.daysLeft > daysMax) continue;
       }
 
       // MEDIUM: set membership (O(1) per check)
@@ -113,7 +133,7 @@ export function filterAndSort({ markets, filters, searchLower, lookupState, port
       if (filters.hideHeld && portfolio.hasPortfolio && portfolio.isMarketHeld(m.id)) continue;
 
       // MOST EXPENSIVE: string matching (last)
-      if (hasSearch && !searchRe.test(m.question) && !searchRe.test(m.description)) continue;
+      if (hasSearch && !matchesSearch(m, searchRe)) continue;
     }
 
     result.push(m);

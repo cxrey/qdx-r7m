@@ -14,7 +14,7 @@ import {
   fetchAllMarkets, fetchCatalog, fetchOrderBook, fetchPriceHistory,
   fetchMarketById, fetchMarketBySlug,
   fetchMarketByConditionId, fetchMarketByTokenId,
-  flattenEventsToMarkets, isListedMarket,
+  flattenEventsToMarkets, isListedMarket, searchActiveMarkets,
 } from '../api';
 import { withTimeout } from '../fetchUtils';
 import { CATALOG_MIN_VOLUME } from '../engineConfig';
@@ -806,5 +806,52 @@ describe('fetchMarketByTokenId', () => {
     mockFetch.mockImplementation(async () => json([{ id: 'm1', clobTokenIds: '["tok-456","tok-x"]' }]));
     await fetchMarketByTokenId('tok-456');
     expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── searchActiveMarkets ────────────────────────────────────────────
+
+describe('searchActiveMarkets (Gamma /public-search — events below the catalog floor)', () => {
+  const json = (body) => new Response(JSON.stringify(body), { status: 200 });
+  const event = (id, over = {}) => ({
+    id, slug: `ev-${id}`, title: `Event ${id}`, active: true, closed: false, tags: [{ slug: 'sports' }],
+    markets: [
+      { id: `${id}-a`, question: 'Open market', active: true, closed: false },
+      { id: `${id}-b`, question: 'Resolved market', active: true, closed: true },
+    ],
+    ...over,
+  });
+
+  it('searches active events and returns their listed markets with the event attached', async () => {
+    mockFetch.mockResolvedValue(json({ events: [event('e1')], pagination: { hasMore: false } }));
+    const out = await searchActiveMarkets('randy brown');
+    expect(mockFetch.mock.calls[0][0]).toBe('/gamma-api/public-search?q=randy%20brown&limit_per_type=50&events_status=active&page=1');
+    expect(out.map((m) => m.id)).toEqual(['e1-a']); // the resolved market is dropped
+    expect(out[0].events[0]).toMatchObject({ id: 'e1', title: 'Event e1' });
+  });
+
+  it('follows pages while there are more, and drops closed events', async () => {
+    mockFetch
+      .mockResolvedValueOnce(json({ events: [event('e1')], pagination: { hasMore: true } }))
+      .mockResolvedValueOnce(json({ events: [event('e2', { closed: true }), event('e3')], pagination: { hasMore: false } }));
+    const out = await searchActiveMarkets('ufc');
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(mockFetch.mock.calls[1][0]).toContain('&page=2');
+    expect(out.map((m) => m.id)).toEqual(['e1-a', 'e3-a']);
+  });
+
+  it('stops at 3 pages', async () => {
+    mockFetch.mockImplementation(async () => json({ events: [], pagination: { hasMore: true } }));
+    await searchActiveMarkets('a lot');
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+  });
+
+  it('returns null when the search fails; keeps earlier pages if a later one fails', async () => {
+    mockFetch.mockResolvedValueOnce(new Response('err', { status: 500 }));
+    expect(await searchActiveMarkets('x y z')).toBeNull();
+    mockFetch
+      .mockResolvedValueOnce(json({ events: [event('e1')], pagination: { hasMore: true } }))
+      .mockRejectedValueOnce(new Error('network'));
+    expect((await searchActiveMarkets('x y z')).map((m) => m.id)).toEqual(['e1-a']);
   });
 });

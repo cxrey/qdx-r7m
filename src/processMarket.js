@@ -325,6 +325,7 @@ export function processMarket(market) {
     durationDays,
     endDate: endDate ? endDate.toLocaleDateString() : 'N/A',
     endDateIso: endDate ? endDate.toISOString() : null, // machine-readable (journal, yield)
+    eventTitle: market.events?.[0]?.title ?? null, // searched too (names are often only in the event title)
     category,
     edgeScore,
     spread,

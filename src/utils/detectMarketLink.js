@@ -51,6 +51,13 @@ export function detectMarketLink(input) {
     }
   }
 
+  // 2b. POLYMARKET SPORTS URL: /sports/<league>/<…>/<event-slug> — the last
+  // path segment is the event slug (league pages have no slug after the league)
+  const sportsUrlMatch = trimmed.match(/(?:m\.)?polymarket\.com\/sports\/[a-z0-9-]+\/(?:[a-z0-9-]+\/)*([a-z0-9][a-z0-9-]*[a-z0-9])\/?(?:[?#]|$)/i);
+  if (sportsUrlMatch) {
+    return { type: 'EVENT_URL', extracted: sportsUrlMatch[1].toLowerCase(), outcomeId: extractOutcomeId(trimmed) };
+  }
+
   // 3. POLYMARKETSCAN URL
   const scanUrlMatch = trimmed.match(/polymarketscan\.org\/(event|market)\/([a-z0-9][a-z0-9-]*[a-z0-9])/i);
   if (scanUrlMatch) {
